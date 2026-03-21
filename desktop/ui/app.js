@@ -25,9 +25,47 @@ let codeEditorModified = false;
 let historyCache = [];
 let historyExpandedGroups = new Set();
 let historySelectedIds = new Set();  // Selected for comparison
-let viewedResults = new Set();  // Tracks viewed test result rows ("fileIdx-blockIdx")
-let viewedHistoryEntries = new Set();  // Tracks viewed history entries (seq numbers)
+// Tri-state viewed tracking: Maps key → { status, response_hash }
+// States: unseen (not in map), seen (in map, hash matches), seen-mutated (in map, hash differs)
+let viewedResults = new Map();       // "fileIdx-blockIdx" → { status, hash }
+let viewedHistoryEntries = new Map(); // seq → { status, hash }
 let runHistory = new Map(); // Map<fileName, [{timestamp, passed, failed, skipped, totalTime, blockResults: [{name, status, timeMs}]}]>
+
+// --- Zoom ---
+let zoomLevel = parseInt(localStorage.getItem('rp-zoom') || '100', 10);
+const ZOOM_MIN = 50, ZOOM_MAX = 200, ZOOM_STEP = 10;
+
+function applyZoom() {
+  // Zoom on <html> so everything scales uniformly including the viewport.
+  document.documentElement.style.zoom = `${zoomLevel}%`;
+  // Clear any stale styles from previous implementations
+  document.body.style.transform = '';
+  document.body.style.transformOrigin = '';
+  document.body.style.width = '';
+  document.body.style.height = '';
+  document.body.style.zoom = '';
+  const indicator = document.getElementById('zoomIndicator');
+  if (indicator) indicator.textContent = `${zoomLevel}%`;
+  localStorage.setItem('rp-zoom', zoomLevel.toString());
+}
+
+function zoomIn() { if (zoomLevel < ZOOM_MAX) { zoomLevel += ZOOM_STEP; applyZoom(); } }
+function zoomOut() { if (zoomLevel > ZOOM_MIN) { zoomLevel -= ZOOM_STEP; applyZoom(); } }
+function zoomReset() { zoomLevel = 100; applyZoom(); }
+
+// Simple hash for tri-state viewed detection
+function resultHash(br) {
+  if (!br) return '0';
+  return `${br.status}:${br.time_ms}:${br.response?.status || 0}`;
+}
+function historyHash(entry) {
+  return `${entry.status}:${entry.response_time_ms}:${entry.method}`;
+}
+function getViewedState(map, key, currentHash) {
+  if (!map.has(key)) return 'unseen';
+  const saved = map.get(key);
+  return saved.hash === currentHash ? 'seen' : 'seen-mutated';
+}
 
 function pushRunHistory(fileName, results) {
   if (!runHistory.has(fileName)) runHistory.set(fileName, []);
@@ -87,7 +125,6 @@ const copyBtn         = $('#copyBtn');
 const loadingOverlay  = $('#loadingOverlay');
 const fileInput       = $('#fileInput');
 const openFileBtn     = $('#openFileBtn');
-const addFileBtn      = $('#addFileBtn');
 const runAllBtn       = $('#runAllBtn');
 const fileTree        = $('#fileTree');
 const envList         = $('#envList');
@@ -636,14 +673,14 @@ copyBtn.addEventListener('click', async () => {
 
 // --- File Loading ---
 openFileBtn.addEventListener('click', () => fileInput.click());
-addFileBtn.addEventListener('click', () => fileInput.click());
 
 // Uber-level tooltip on FILES section header
 const filesSectionHeader = document.querySelector('#filesSection > .sidebar-section-header');
 if (filesSectionHeader) {
   filesSectionHeader.addEventListener('mouseenter', () => {
-    clearTimeout(tooltipTimer);
-    tooltipTimer = setTimeout(() => showAllFilesTooltip(filesSectionHeader), 300);
+    clearTimeout(showTooltipTimer);
+    clearTimeout(hideTooltipTimer);
+    showTooltipTimer = setTimeout(() => showAllFilesTooltip(filesSectionHeader), 300);
   });
   filesSectionHeader.addEventListener('mouseleave', () => {
     hideBlockTooltip();
@@ -729,12 +766,18 @@ function getBlockStatus(fileIdx, blockIdx) {
 }
 
 // --- Block Hover Tooltip ---
-let tooltipTimer = null;
+let showTooltipTimer = null;
+let hideTooltipTimer = null;
 const blockTooltip = $('#blockTooltip');
 
 function showBlockTooltip(block, anchorEl) {
-  const typeIcon = getBlockIcon(block.block_type);
-  const typeLabel = block.block_type.charAt(0).toUpperCase() + block.block_type.slice(1);
+  try {
+    if (!block || !anchorEl || !blockTooltip) {
+      console.warn('[Tooltip] showBlockTooltip: missing', { block: !!block, anchorEl: !!anchorEl, blockTooltip: !!blockTooltip });
+      return;
+    }
+    const typeIcon = getBlockIcon(block.block_type);
+    const typeLabel = (block.block_type || 'request').charAt(0).toUpperCase() + (block.block_type || 'request').slice(1);
 
   let html = `<div class="btt-header">
     <span class="btt-type-icon">${typeIcon}</span>
@@ -834,22 +877,31 @@ function showBlockTooltip(block, anchorEl) {
 
   blockTooltip.innerHTML = html;
   blockTooltip.classList.remove('hidden');
-  positionTooltip(anchorEl);
+  blockTooltip.style.display = 'block';
+  positionBlockTooltip(anchorEl);
+  } catch (e) {
+    console.error('[Tooltip] showBlockTooltip error:', e);
+  }
 }
 
 function hideBlockTooltip() {
-  clearTimeout(tooltipTimer);
-  tooltipTimer = setTimeout(() => {
-    if (!blockTooltip.matches(':hover')) {
+  clearTimeout(showTooltipTimer);
+  clearTimeout(hideTooltipTimer);
+  hideTooltipTimer = setTimeout(() => {
+    if (blockTooltip && !blockTooltip.matches(':hover')) {
       blockTooltip.classList.add('hidden');
+      blockTooltip.style.display = '';
     }
-  }, 100);
+  }, 200);
 }
 
 // Keep tooltip open while mouse is over it (for scrolling)
-blockTooltip.addEventListener('mouseleave', () => {
-  blockTooltip.classList.add('hidden');
-});
+if (blockTooltip) {
+  blockTooltip.addEventListener('mouseleave', () => {
+    blockTooltip.classList.add('hidden');
+    blockTooltip.style.display = '';
+  });
+}
 
 function extractFileHeader(content) {
   const lines = content.split('\n');
@@ -897,14 +949,17 @@ function formatTimeAgo(timestamp) {
   return `${Math.floor(diff / 86400000)}d ago`;
 }
 
-function positionTooltip(anchorEl) {
+function positionBlockTooltip(anchorEl) {
   const rect = anchorEl.getBoundingClientRect();
+  // Force layout by reading dimensions after showing tooltip
   const tooltipRect = blockTooltip.getBoundingClientRect();
   let top = rect.top + (rect.height / 2) - (tooltipRect.height / 2);
   let left = rect.right + 8;
   if (top < 8) top = 8;
   if (top + tooltipRect.height > window.innerHeight - 8) top = window.innerHeight - tooltipRect.height - 8;
   if (left + tooltipRect.width > window.innerWidth - 8) left = rect.left - tooltipRect.width - 8;
+  if (left < 8) left = 8;
+  if (top < 8) top = 8;
   blockTooltip.style.top = `${top}px`;
   blockTooltip.style.left = `${left}px`;
 }
@@ -984,7 +1039,7 @@ function showGroupTooltip(file, fileIdx, groupName, groupBlocks, anchorEl) {
 
   blockTooltip.innerHTML = html;
   blockTooltip.classList.remove('hidden');
-  positionTooltip(anchorEl);
+  positionBlockTooltip(anchorEl);
 }
 
 function showAllFilesTooltip(anchorEl) {
@@ -1055,7 +1110,7 @@ function showAllFilesTooltip(anchorEl) {
 
   blockTooltip.innerHTML = html;
   blockTooltip.classList.remove('hidden');
-  positionTooltip(anchorEl);
+  positionBlockTooltip(anchorEl);
 }
 
 function showFileTooltip(file, fileIdx, anchorEl) {
@@ -1140,7 +1195,7 @@ function showFileTooltip(file, fileIdx, anchorEl) {
 
   blockTooltip.innerHTML = html;
   blockTooltip.classList.remove('hidden');
-  positionTooltip(anchorEl);
+  positionBlockTooltip(anchorEl);
 }
 
 // Persistent expand/collapse state: { "file-0": true, "file-0-grp-auth": false, ... }
@@ -1199,8 +1254,9 @@ function renderFileTree() {
     });
 
     header.addEventListener('mouseenter', () => {
-      clearTimeout(tooltipTimer);
-      tooltipTimer = setTimeout(() => showFileTooltip(file, fileIdx, header), 300);
+      clearTimeout(showTooltipTimer);
+      clearTimeout(hideTooltipTimer);
+      showTooltipTimer = setTimeout(() => showFileTooltip(file, fileIdx, header), 300);
     });
     header.addEventListener('mouseleave', () => {
       hideBlockTooltip();
@@ -1276,8 +1332,9 @@ function renderFileTree() {
       });
 
       groupHeader.addEventListener('mouseenter', () => {
-        clearTimeout(tooltipTimer);
-        tooltipTimer = setTimeout(() => showGroupTooltip(file, fileIdx, groupName, groupBlocks, groupHeader), 300);
+        clearTimeout(showTooltipTimer);
+        clearTimeout(hideTooltipTimer);
+        showTooltipTimer = setTimeout(() => showGroupTooltip(file, fileIdx, groupName, groupBlocks, groupHeader), 300);
       });
       groupHeader.addEventListener('mouseleave', () => {
         hideBlockTooltip();
@@ -1361,9 +1418,13 @@ function createBlockItem(file, fileIdx, block, blockIdx) {
     selectBlock(fileIdx, blockIdx);
   });
 
+  // Native title fallback (always visible on hover after ~1s)
+  item.title = `${block.block_type}: ${block.name || 'Unnamed'}${block.description ? ' — ' + block.description : ''}`;
+
   item.addEventListener('mouseenter', () => {
-    clearTimeout(tooltipTimer);
-    tooltipTimer = setTimeout(() => showBlockTooltip(block, item), 300);
+    clearTimeout(showTooltipTimer);
+    clearTimeout(hideTooltipTimer);
+    showTooltipTimer = setTimeout(() => showBlockTooltip(block, item), 300);
   });
   item.addEventListener('mouseleave', () => {
     hideBlockTooltip();
@@ -1392,12 +1453,22 @@ function closeFile(fileIdx) {
     activeFileIndex--;
   }
 
+  // Clear test results to prevent stale index references
+  testResultsDetails.innerHTML = '';
+  testResultsBar.classList.add('hidden');
+
+  // Re-index viewedResults: remove closed file entries, shift higher file indices down
+  const newViewed = new Map();
+  viewedResults.forEach((val, key) => {
+    const [fi, bi] = key.split('-').map(Number);
+    if (fi === fileIdx) return;
+    const newFi = fi > fileIdx ? fi - 1 : fi;
+    newViewed.set(`${newFi}-${bi}`, val);
+  });
+  viewedResults = newViewed;
+
   renderFileTree();
   renderEnvVars();
-
-  if (loadedFiles.length === 0) {
-    testResultsBar.classList.add('hidden');
-  }
 }
 
 // --- Block Selection ---
@@ -1802,8 +1873,9 @@ function showTestResults(passed, failed, skipped, timeMs, blockResults, pendingB
   blockResults.forEach(br => {
     const row = document.createElement('div');
     const viewKey = `${br.fileIdx}-${br.blockIdx}`;
-    const isViewed = viewedResults.has(viewKey);
-    row.className = `result-detail-row${isViewed ? ' viewed' : ''}`;
+    const hash = resultHash(br);
+    const viewState = getViewedState(viewedResults, viewKey, hash);
+    row.className = `result-detail-row${viewState !== 'unseen' ? ` ${viewState}` : ''}`;
 
     const assertionCount = br.assertion_results?.length || 0;
     const assertionPassed = br.assertion_results?.filter(a => a.passed).length || 0;
@@ -1835,7 +1907,9 @@ function showTestResults(passed, failed, skipped, timeMs, blockResults, pendingB
       }
     }
 
-    const viewedIcon = isViewed ? '<span class="detail-viewed" title="Viewed">👁</span>' : '';
+    const viewedIcon = viewState === 'seen' ? '<span class="detail-viewed" title="Viewed">👁</span>'
+      : viewState === 'seen-mutated' ? '<span class="detail-viewed mutated" title="Changed since last viewed">👁✱</span>'
+      : '';
 
     row.innerHTML = `
       <span class="detail-status ${br.status}"></span>
@@ -1850,11 +1924,11 @@ function showTestResults(passed, failed, skipped, timeMs, blockResults, pendingB
     if (br.fileIdx !== undefined && br.blockIdx !== undefined) {
       row.style.cursor = 'pointer';
       row.addEventListener('click', () => {
-        viewedResults.add(viewKey);
-        row.classList.add('viewed');
-        if (!row.querySelector('.detail-viewed')) {
-          row.insertAdjacentHTML('beforeend', '<span class="detail-viewed" title="Viewed">👁</span>');
-        }
+        viewedResults.set(viewKey, { hash });
+        row.className = 'result-detail-row seen';
+        const vi = row.querySelector('.detail-viewed');
+        if (vi) { vi.textContent = '👁'; vi.title = 'Viewed'; vi.classList.remove('mutated'); }
+        else row.insertAdjacentHTML('beforeend', '<span class="detail-viewed" title="Viewed">👁</span>');
         selectBlock(br.fileIdx, br.blockIdx);
         if (currentMode === 'code') setMode('builder');
       });
@@ -1966,11 +2040,12 @@ async function startBlockProgressListener() {
       const bIdx = parseInt(row.dataset.blockIdx);
       row.addEventListener('click', () => {
         const vk = `${fIdx}-${bIdx}`;
-        viewedResults.add(vk);
-        row.classList.add('viewed');
-        if (!row.querySelector('.detail-viewed')) {
-          row.insertAdjacentHTML('beforeend', '<span class="detail-viewed" title="Viewed">👁</span>');
-        }
+        const h = `${p.status}:${p.time_ms}:${p.http_status || 0}`;
+        viewedResults.set(vk, { hash: h });
+        row.className = 'result-detail-row seen';
+        const vi = row.querySelector('.detail-viewed');
+        if (vi) { vi.textContent = '👁'; vi.title = 'Viewed'; vi.classList.remove('mutated'); }
+        else row.insertAdjacentHTML('beforeend', '<span class="detail-viewed" title="Viewed">👁</span>');
         selectBlock(fIdx, bIdx);
         if (currentMode === 'code') setMode('builder');
       });
@@ -2290,9 +2365,15 @@ async function runGroup(fileIdx, groupName) {
     if (!file.results) {
       file.results = { block_results: new Array(file.suite.blocks.length).fill(null), passed: 0, failed: 0, skipped: 0, total_time_ms: 0 };
     }
+    // Duplicate-safe: splice matched indices to avoid double-mapping
+    const unmatchedGroupIndices = [...groupBlockIndices];
     results.block_results.forEach(br => {
-      const matchIdx = groupBlockIndices.find(idx => file.suite.blocks[idx].name === br.name);
-      if (matchIdx !== undefined) file.results.block_results[matchIdx] = br;
+      const matchPos = unmatchedGroupIndices.findIndex(idx => file.suite.blocks[idx].name === br.name);
+      if (matchPos >= 0) {
+        const origIdx = unmatchedGroupIndices[matchPos];
+        file.results.block_results[origIdx] = br;
+        unmatchedGroupIndices.splice(matchPos, 1);
+      }
     });
 
     if (results.final_variables) {
@@ -2899,6 +2980,9 @@ function buildHistoryFilter() {
 }
 
 async function loadHistory() {
+  // Show loading state
+  historyLog.innerHTML = `<div class="history-loading"><div class="loading-spinner"></div><span>Loading history…</span></div>`;
+  historyStats.innerHTML = '<div class="history-loading"><div class="loading-spinner"></div></div>';
   try {
     const filter = buildHistoryFilter();
     const hasFilter = Object.keys(filter).length > 0;
@@ -3260,14 +3344,18 @@ function renderGenericGroup(title, groupEntries, groupKey) {
 function createHistoryEntryRow(entry) {
   const row = document.createElement('div');
   const isViewed = viewedHistoryEntries.has(entry.seq);
-  row.className = `hist-entry-row${isViewed ? ' viewed' : ''}`;
+  const hash = historyHash(entry);
+  const viewState = getViewedState(viewedHistoryEntries, entry.seq, hash);
+  row.className = `hist-entry-row${viewState !== 'unseen' ? ` ${viewState}` : ''}`;
   const statusClass = getHistoryStatusClass(entry.status);
   const sourceBadge = entry.source === 'test-run'
     ? '<span class="hist-source-badge test-run">Test Run</span>'
     : '<span class="hist-source-badge manual">Manual</span>';
   const blockName = entry.block_name ? `<span class="hist-block-name">${escapeHtml(entry.block_name)}</span>` : '';
   const timeColor = entry.response_time_ms < 200 ? 'var(--green)' : entry.response_time_ms < 500 ? 'var(--orange)' : 'var(--red)';
-  const viewedIcon = isViewed ? '<span class="hist-viewed" title="Viewed">👁</span>' : '';
+  const viewedIcon = viewState === 'seen' ? '<span class="hist-viewed" title="Viewed">👁</span>'
+    : viewState === 'seen-mutated' ? '<span class="hist-viewed mutated" title="Changed since last viewed">👁✱</span>'
+    : '';
   row.innerHTML = `
     <input type="checkbox" class="hist-entry-checkbox" data-seq="${entry.seq}" title="Select for comparison">
     <span class="hist-entry-seq">#${entry.seq}</span>
@@ -3301,11 +3389,11 @@ function createHistoryEntryRow(entry) {
   });
   row.addEventListener('click', (e) => {
     if (e.target.closest('.hist-entry-checkbox')) return;
-    viewedHistoryEntries.add(entry.seq);
-    row.classList.add('viewed');
-    if (!row.querySelector('.hist-viewed')) {
-      row.insertAdjacentHTML('beforeend', '<span class="hist-viewed" title="Viewed">👁</span>');
-    }
+    viewedHistoryEntries.set(entry.seq, { hash });
+    row.className = 'hist-entry-row seen';
+    const vi = row.querySelector('.hist-viewed');
+    if (vi) { vi.textContent = '👁'; vi.title = 'Viewed'; vi.classList.remove('mutated'); }
+    else row.insertAdjacentHTML('beforeend', '<span class="hist-viewed" title="Viewed">👁</span>');
     showHistoryDetail(entry);
   });
   return row;
@@ -3692,7 +3780,25 @@ $('#historyCollapseAllBtn').addEventListener('click', () => {
   });
 });
 
-$('#historyRefreshBtn').addEventListener('click', loadHistory);
+// Clear viewed state for history
+$('#historyClearViewedBtn').addEventListener('click', () => {
+  viewedHistoryEntries.clear();
+  historyLog.querySelectorAll('.hist-entry-row').forEach(r => {
+    r.classList.remove('seen', 'seen-mutated');
+    const v = r.querySelector('.hist-viewed');
+    if (v) v.remove();
+  });
+});
+
+// Clear viewed state for test results
+$('#clearViewedBtn').addEventListener('click', () => {
+  viewedResults.clear();
+  document.querySelectorAll('.result-detail-row').forEach(r => {
+    r.classList.remove('seen', 'seen-mutated');
+    const v = r.querySelector('.detail-viewed');
+    if (v) v.remove();
+  });
+});
 
 $('#historyClearBtn').addEventListener('click', async () => {
   if (historyCache.length === 0) {
@@ -3748,6 +3854,10 @@ document.addEventListener('keydown', (e) => {
       showToast('File saved', 'success');
     }
   }
+  // Zoom shortcuts
+  if (e.ctrlKey && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoomIn(); }
+  else if (e.ctrlKey && e.key === '-') { e.preventDefault(); zoomOut(); }
+  else if (e.ctrlKey && e.key === '0') { e.preventDefault(); zoomReset(); }
   // Escape -> close history detail or leave history
   if (e.key === 'Escape' && currentMode === 'history') {
     if (!historyDetailOverlay.classList.contains('hidden')) {
@@ -3757,6 +3867,17 @@ document.addEventListener('keydown', (e) => {
     }
   }
 });
+
+// --- Zoom controls ---
+window.addEventListener('wheel', (e) => {
+  if (e.ctrlKey) {
+    e.preventDefault();
+    if (e.deltaY < 0) zoomIn();
+    else if (e.deltaY > 0) zoomOut();
+  }
+}, { passive: false });
+
+applyZoom();
 
 // --- Initialize ---
 renderEnvVars();

@@ -34,6 +34,13 @@ const ALL_RESOURCE_TYPES = [
   "other",
 ];
 
+// Mutex to serialize all storage mutations (prevents race conditions)
+let _mutationQueue = Promise.resolve();
+function withMutationLock(fn) {
+  _mutationQueue = _mutationQueue.then(fn, fn);
+  return _mutationQueue;
+}
+
 /* ============================================================
  * Storage helpers
  * ========================================================== */
@@ -49,12 +56,19 @@ async function saveRules(rules) {
   await chrome.storage.local.set({ requestPilotRules: rules });
 }
 
-/** Get-and-increment the auto-ID counter. */
-async function nextId() {
+/** Get-and-increment the auto-ID counter (unsafe – caller must hold lock). */
+async function _nextIdUnsafe() {
   const data = await chrome.storage.local.get("requestPilotCounter");
   const id = (data.requestPilotCounter || 0) + 1;
   await chrome.storage.local.set({ requestPilotCounter: id });
   return id;
+}
+
+/** Get-and-increment the auto-ID counter. */
+async function nextId() {
+  return withMutationLock(async () => {
+    return _nextIdUnsafe();
+  });
 }
 
 /* ============================================================
@@ -317,74 +331,84 @@ async function handleMessage(msg) {
 /* ── Individual mutation handlers ──────────────────────────── */
 
 async function handleAddRule(msg) {
-  const rules = await getStoredRules();
-  const id = await nextId();
+  return withMutationLock(async () => {
+    const rules = await getStoredRules();
+    const id = await _nextIdUnsafe();
 
-  const newRule = {
-    id,
-    type: msg.type,
-    urlPattern: msg.urlPattern,
-    enabled: true,
-    ...(msg.type === "modify-headers" && { headers: msg.headers || [] }),
-    ...(msg.type === "redirect" && { redirectUrl: msg.redirectUrl || "" }),
-    methods: msg.methods || [],
-  };
+    const newRule = {
+      id,
+      type: msg.type,
+      urlPattern: msg.urlPattern,
+      enabled: true,
+      ...(msg.type === "modify-headers" && { headers: msg.headers || [] }),
+      ...(msg.type === "redirect" && { redirectUrl: msg.redirectUrl || "" }),
+      methods: msg.methods || [],
+    };
 
-  rules.push(newRule);
-  await saveRules(rules);
-  await syncAllRules();
+    rules.push(newRule);
+    await saveRules(rules);
+    await syncAllRules();
 
-  return { success: true, rule: newRule };
+    return { success: true, rule: newRule };
+  });
 }
 
 async function handleUpdateRule(msg) {
-  const rules = await getStoredRules();
-  const idx = rules.findIndex((r) => r.id === msg.ruleId);
-  if (idx === -1) return { success: false, error: "Rule not found" };
+  return withMutationLock(async () => {
+    const rules = await getStoredRules();
+    const idx = rules.findIndex((r) => r.id === msg.ruleId);
+    if (idx === -1) return { success: false, error: "Rule not found" };
 
-  // Merge only the fields the caller provided
-  Object.assign(rules[idx], msg.fields);
-  await saveRules(rules);
-  await syncAllRules();
+    // Merge only the fields the caller provided
+    Object.assign(rules[idx], msg.fields);
+    await saveRules(rules);
+    await syncAllRules();
 
-  return { success: true };
+    return { success: true };
+  });
 }
 
 async function handleDeleteRule(msg) {
-  let rules = await getStoredRules();
-  rules = rules.filter((r) => r.id !== msg.ruleId);
-  await saveRules(rules);
-  await syncAllRules();
+  return withMutationLock(async () => {
+    let rules = await getStoredRules();
+    rules = rules.filter((r) => r.id !== msg.ruleId);
+    await saveRules(rules);
+    await syncAllRules();
 
-  return { success: true };
+    return { success: true };
+  });
 }
 
 async function handleToggleRule(msg) {
-  const rules = await getStoredRules();
-  const rule = rules.find((r) => r.id === msg.ruleId);
-  if (!rule) return { success: false, error: "Rule not found" };
+  return withMutationLock(async () => {
+    const rules = await getStoredRules();
+    const rule = rules.find((r) => r.id === msg.ruleId);
+    if (!rule) return { success: false, error: "Rule not found" };
 
-  rule.enabled = !rule.enabled;
-  await saveRules(rules);
-  await syncAllRules();
+    rule.enabled = !rule.enabled;
+    await saveRules(rules);
+    await syncAllRules();
 
-  return { success: true };
+    return { success: true };
+  });
 }
 
 async function handleImportRules(msg) {
-  const existing = await getStoredRules();
-  const incoming = msg.rules || [];
+  return withMutationLock(async () => {
+    const existing = await getStoredRules();
+    const incoming = msg.rules || [];
 
-  // Assign fresh IDs to every imported rule
-  for (const rule of incoming) {
-    rule.id = await nextId();
-  }
+    // Assign fresh IDs to every imported rule
+    for (const rule of incoming) {
+      rule.id = await _nextIdUnsafe();
+    }
 
-  const merged = existing.concat(incoming);
-  await saveRules(merged);
-  await syncAllRules();
+    const merged = existing.concat(incoming);
+    await saveRules(merged);
+    await syncAllRules();
 
-  return { success: true, count: incoming.length };
+    return { success: true, count: incoming.length };
+  });
 }
 
 /* ============================================================

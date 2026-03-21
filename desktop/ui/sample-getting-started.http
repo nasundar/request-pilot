@@ -1,0 +1,192 @@
+# ============================================================
+# Microsoft Public APIs — Getting Started E2E Tests
+#
+# Demonstrates all Request Pilot features using only Microsoft
+# and Azure public APIs. No authentication or third-party
+# services needed — just hit Run All!
+#
+# Test Scenarios:
+#   Setup:
+#     1. Fetch OpenID Configuration — extract Azure AD v2.0 metadata
+#     2. Fetch NuGet Service Index — extract search/registration endpoints
+#
+#   Tests:
+#     azure-identity (parallel)
+#       - Fetch JWKS Signing Keys — validate RSA keys from setup jwks_uri
+#       - Fetch v1 OpenID Config — compare v1 vs v2 issuer formats
+#       - Validate Token Endpoint — verify extracted endpoint is well-formed
+#     nuget-packages (parallel)
+#       - Search NuGet Packages — query for Newtonsoft.Json, verify results
+#       - Get Package Registration — fetch package metadata by ID
+#     microsoft-services (parallel)
+#       - Fetch Azure Status Page — verify Azure status is reachable
+#       - Fetch Graph API Metadata — validate Graph $metadata endpoint
+#       - Fetch GitHub Microsoft Org — query GitHub API for Microsoft org
+#     error-handling (parallel)
+#       - Non-Existent NuGet Package — validate empty search results
+#       - Invalid OpenID Tenant — validate error for bogus tenant
+#
+# Prerequisites:
+#   - Internet access (all APIs are public, no credentials needed)
+#
+# Metrics:
+#   - Total: 10 tests, 2 setup, 0 teardown
+#   - Key assertions: status codes, JSON field values, array lengths,
+#     extracted URL chaining, response structure validation
+# ============================================================
+
+@variables
+# --- Microsoft Identity Platform ---
+azure_ad_base = https://login.microsoftonline.com
+tenant = common
+
+# --- NuGet Public API ---
+nuget_base = https://api.nuget.org
+
+# --- Microsoft Services ---
+graph_base = https://graph.microsoft.com
+azure_status_url = https://azure.status.microsoft.com
+github_api = https://api.github.com
+
+# --- Extracted at runtime (populated by @setup blocks) ---
+jwks_uri =
+issuer =
+token_endpoint =
+authorization_endpoint =
+nuget_search_url =
+
+### @setup Fetch OpenID Configuration
+# @description Fetches Azure AD v2.0 OpenID discovery document and extracts key endpoints
+GET {{azure_ad_base}}/{{tenant}}/v2.0/.well-known/openid-configuration
+
+# @extract jwks_uri = $.jwks_uri
+# @extract issuer = $.issuer
+# @extract token_endpoint = $.token_endpoint
+# @extract authorization_endpoint = $.authorization_endpoint
+# @assert status == 200
+# @assert $.issuer != null
+# @assert $.jwks_uri != null
+# @assert $.token_endpoint != null
+# @assert $.authorization_endpoint != null
+# @assert $.response_types_supported.length > 0
+
+### @setup Fetch NuGet Service Index
+# @description Fetches NuGet v3 service index and extracts the search query endpoint
+GET {{nuget_base}}/v3/index.json
+
+# @extract nuget_search_url = $.resources[0].@id
+# @assert status == 200
+# @assert $.version != null
+# @assert $.resources.length > 0
+
+###
+# --------------------------------------------------
+# Group: azure-identity
+# Validate Azure AD identity discovery endpoints
+# --------------------------------------------------
+
+### @test Fetch JWKS Signing Keys
+# @description Retrieves JWT signing keys from the jwks_uri extracted in setup
+# @group azure-identity
+GET {{jwks_uri}}
+
+# @assert status == 200
+# @assert $.keys.length > 0
+# @assert $.keys[0].kty == RSA
+# @assert $.keys[0].kid != null
+# @assert $.keys[0].use == sig
+
+### @test Fetch v1 OpenID Config
+# @description Fetches v1.0 OpenID config to compare against v2.0 extracted in setup
+# @group azure-identity
+GET {{azure_ad_base}}/{{tenant}}/.well-known/openid-configuration
+
+# @assert status == 200
+# @assert $.issuer != null
+# @assert $.jwks_uri != null
+# @assert $.token_endpoint != null
+
+### @test Validate Token Endpoint
+# @description Verifies the extracted token endpoint responds (OPTIONS/HEAD-safe check)
+# @group azure-identity
+GET {{azure_ad_base}}/{{tenant}}/v2.0/.well-known/openid-configuration
+
+# @assert status == 200
+# @assert $.token_endpoint contains /oauth2/v2.0/token
+
+###
+# --------------------------------------------------
+# Group: nuget-packages
+# Query NuGet public package registry
+# --------------------------------------------------
+
+### @test Search NuGet Packages
+# @description Searches for the popular Newtonsoft.Json package
+# @group nuget-packages
+GET https://azuresearch-usnc.nuget.org/query?q=Newtonsoft.Json&take=5
+
+# @assert status == 200
+# @assert $.totalHits > 0
+# @assert $.data.length > 0
+# @assert $.data[0].id == Newtonsoft.Json
+
+### @test Get Package Registration
+# @description Fetches registration metadata for the Azure.Core package
+# @group nuget-packages
+GET https://api.nuget.org/v3/registration5-gz-semver2/azure.core/index.json
+
+# @assert status == 200
+# @assert $.items.length > 0
+
+###
+# --------------------------------------------------
+# Group: microsoft-services
+# Validate public Microsoft service endpoints
+# --------------------------------------------------
+
+### @test Fetch Azure Status Page
+# @description Checks the Azure global status page is reachable
+# @group microsoft-services
+GET {{azure_status_url}}/en-us/status
+
+# @assert status == 200
+
+### @test Fetch Graph API Metadata
+# @description Validates the public Microsoft Graph OData metadata endpoint
+# @group microsoft-services
+GET {{graph_base}}/v1.0/$metadata
+Accept: application/xml
+
+# @assert status == 200
+
+### @test Fetch GitHub Microsoft Org
+# @description Queries GitHub API for the Microsoft organization (GitHub is Microsoft-owned)
+# @group microsoft-services
+GET {{github_api}}/orgs/microsoft
+Accept: application/vnd.github.v3+json
+
+# @assert status == 200
+# @assert $.login == microsoft
+# @assert $.type == Organization
+
+###
+# --------------------------------------------------
+# Group: error-handling
+# Validate error and edge-case responses
+# --------------------------------------------------
+
+### @test Non-Existent NuGet Package
+# @description Searches for a package that should not exist
+# @group error-handling
+GET https://azuresearch-usnc.nuget.org/query?q=zzz-nonexistent-package-{{$uuid}}&take=1
+
+# @assert status == 200
+# @assert $.totalHits == 0
+# @assert $.data.length == 0
+
+### @test Invalid OpenID Tenant
+# @description Requests OpenID config for a bogus tenant — expects an error
+# @group error-handling
+GET {{azure_ad_base}}/nonexistent-tenant-{{$timestamp}}/.well-known/openid-configuration
+
+# @assert status == 400

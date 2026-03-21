@@ -12,6 +12,8 @@
     <div class="toolbar-left">
       <span class="app-logo">✈</span>
       <span class="app-title">Request Pilot</span>
+      <span class="zoom-indicator" id="zoomIndicator" title="Zoom level (Ctrl+Scroll, Ctrl+0 to reset)">100%</span>
+      <button class="btn-icon-sm help-btn" id="helpBtn" title="Getting Started Tour">❓</button>
     </div>
     <div class="toolbar-center">
       <div class="mode-toggle" id="modeToggle">
@@ -21,12 +23,6 @@
       </div>
       <button class="btn btn-primary btn-sm" id="runAllBtn" title="Run all tests (Ctrl+Shift+Enter)">
         <span class="btn-label">▶ Run All</span>
-      </button>
-    </div>
-    <div class="toolbar-right">
-      <button class="btn btn-ghost btn-sm" id="newFileBtn" title="Create new .http file">📄 New File</button>
-      <button class="btn btn-ghost btn-sm" id="openFileBtn" title="Open .http file (Ctrl+O)">
-        📂 Open File
       </button>
     </div>
   </header>
@@ -41,7 +37,8 @@
           <span class="section-chevron">▸</span>
           <span class="section-icon">📁</span>
           <span class="section-title">FILES</span>
-          <button class="btn-icon-sm sidebar-action" id="addFileBtn" title="Load more files">+</button>
+          <button class="btn-icon-sm sidebar-action" id="newFileBtn" title="New .http file">📄</button>
+          <button class="btn-icon-sm sidebar-action" id="openFileBtn" title="Open .http file">📂</button>
         </div>
         <div class="sidebar-section-body" id="fileTree">
           <div class="sidebar-empty">No files loaded</div>
@@ -118,7 +115,7 @@
             <button class="btn btn-primary btn-xs hidden" id="historyCompareBtn" title="Compare selected requests">⚖ Compare</button>
             <button class="btn btn-ghost btn-xs" id="historyExpandAllBtn" title="Expand all groups">⊞ Expand All</button>
             <button class="btn btn-ghost btn-xs" id="historyCollapseAllBtn" title="Collapse all groups">⊟ Collapse All</button>
-            <button class="btn btn-ghost btn-xs" id="historyRefreshBtn" title="Refresh">🔄 Refresh</button>
+            <button class="btn btn-ghost btn-xs clear-viewed-btn" id="historyClearViewedBtn" title="Clear viewed state">👁 Clear Viewed</button>
             <button class="btn btn-ghost btn-xs" id="historyClearBtn" title="Clear all history">🗑 Clear</button>
           </div>
         </div>
@@ -264,6 +261,7 @@
             <span class="result-stat failed">✗ <span id="resultsFailed">0</span> failed</span>
             <span class="result-stat skipped">○ <span id="resultsSkipped">0</span> skipped</span>
             <span class="result-stat time">— <span id="resultsTotalTime">0</span> ms</span>
+            <button class="btn btn-ghost btn-xs clear-viewed-btn" id="clearViewedBtn" title="Clear viewed state">👁 Clear Viewed</button>
           </div>
           <div class="test-progress-bar" id="testProgressBar">
             <div class="progress-passed" id="progressPassed"></div>
@@ -307,7 +305,49 @@
 
   <div class="block-tooltip hidden" id="blockTooltip"></div>
 
+  <!-- Tour Picker Dialog -->
+  <div class="tour-picker-overlay hidden" id="tourPickerOverlay">
+    <div class="tour-picker-backdrop" id="tourPickerBackdrop"></div>
+    <div class="tour-picker-dialog">
+      <h3 class="tour-picker-title">✈ Getting Started</h3>
+      <p class="tour-picker-subtitle">Choose a tour to learn Request Pilot</p>
+      <div class="tour-picker-options">
+        <button class="tour-picker-card" id="tourOverviewBtn">
+          <span class="tour-picker-icon">🗺</span>
+          <span class="tour-picker-card-title">Quick Overview</span>
+          <span class="tour-picker-card-desc">~30 seconds · Highlights key UI areas</span>
+        </button>
+        <button class="tour-picker-card" id="tourDetailedBtn">
+          <span class="tour-picker-icon">🎓</span>
+          <span class="tour-picker-card-title">Hands-On Walkthrough</span>
+          <span class="tour-picker-card-desc">~3 minutes · Load a sample file, run tests, explore all features</span>
+        </button>
+      </div>
+      <button class="btn btn-ghost btn-xs tour-picker-dismiss" id="tourPickerDismiss">No thanks, I'll explore on my own</button>
+    </div>
+  </div>
+
+  <!-- Guided Tour Overlay -->
+  <div class="tour-overlay hidden" id="tourOverlay">
+    <div class="tour-backdrop" id="tourBackdrop"></div>
+    <div class="tour-tooltip" id="tourTooltip">
+      <div class="tour-tooltip-header">
+        <span class="tour-step-badge" id="tourStepBadge">1/8</span>
+        <span class="tour-title" id="tourTitle"></span>
+      </div>
+      <div class="tour-body" id="tourBody"></div>
+      <div class="tour-footer">
+        <button class="btn btn-ghost btn-xs" id="tourSkipBtn">Skip Tour</button>
+        <div class="tour-nav">
+          <button class="btn btn-ghost btn-xs" id="tourPrevBtn">← Back</button>
+          <button class="btn btn-primary btn-xs" id="tourNextBtn">Next →</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="comparison.js"></script>
   <script src="app.js"></script>
+  <script src="tour.js"></script>
 </body>
 </html>
