@@ -1,0 +1,3762 @@
+/* ============================================================
+   Request Pilot - Desktop App Logic
+   State management, Tauri IPC, DOM manipulation
+   ============================================================ */
+
+const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
+
+// --- DOM helpers ---
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => document.querySelectorAll(sel);
+
+// --- Global State ---
+let loadedFiles = [];        // [{name, content, suite: TestSuite, results: TestRunResults|null}]
+let activeFileIndex = -1;
+let activeBlockIndex = -1;
+let envVars = {};            // {name: value} — from .env file
+let envFilePath = null;      // path to loaded .env file
+let disabledBlocks = {};     // {"fileIdx-blockIdx": true} — disabled steps
+let isRunning = false;
+let lastResponse = null;
+let currentMode = 'builder';    // 'builder' | 'code'
+let codeEditorContent = '';     // last saved content in code editor
+let codeEditorModified = false;
+let historyCache = [];
+let historyExpandedGroups = new Set();
+let historySelectedIds = new Set();  // Selected for comparison
+let viewedResults = new Set();  // Tracks viewed test result rows ("fileIdx-blockIdx")
+let viewedHistoryEntries = new Set();  // Tracks viewed history entries (seq numbers)
+let runHistory = new Map(); // Map<fileName, [{timestamp, passed, failed, skipped, totalTime, blockResults: [{name, status, timeMs}]}]>
+
+function pushRunHistory(fileName, results) {
+  if (!runHistory.has(fileName)) runHistory.set(fileName, []);
+  const history = runHistory.get(fileName);
+  history.push({
+    timestamp: Date.now(),
+    passed: results.passed,
+    failed: results.failed,
+    skipped: results.skipped,
+    totalTime: results.total_time_ms,
+    blockResults: results.block_results
+      .filter(br => br && br.name)
+      .map(br => ({ name: br.name, status: br.status, timeMs: br.time_ms })),
+  });
+  if (history.length > 50) history.splice(0, history.length - 50);
+}
+
+function getBlockRunHistory(fileName, blockName) {
+  const history = runHistory.get(fileName) || [];
+  return history.map(run => {
+    const br = run.blockResults.find(b => b.name === blockName);
+    return br ? { timestamp: run.timestamp, status: br.status, timeMs: br.timeMs } : null;
+  }).filter(Boolean);
+}
+
+function getFileRunStats(fileName) {
+  const history = runHistory.get(fileName) || [];
+  return {
+    totalRuns: history.length,
+    history: history.map(r => ({
+      timestamp: r.timestamp,
+      passed: r.passed,
+      failed: r.failed,
+      skipped: r.skipped,
+      totalTime: r.totalTime,
+    })),
+  };
+}
+
+// --- DOM Refs ---
+const methodSelect    = $('#methodSelect');
+const urlInput        = $('#urlInput');
+const sendBtn         = $('#sendBtn');
+const addHeaderBtn    = $('#addHeaderBtn');
+const headersContainer= $('#headersContainer');
+const bodyType        = $('#bodyType');
+const bodyInput       = $('#bodyInput');
+const responseEmpty   = $('#responseEmpty');
+const responseContent = $('#responseContent');
+const responseMeta    = $('#responseMeta');
+const statusBadge     = $('#responseStatusBadge');
+const responseTime    = $('#responseTime');
+const responseSize    = $('#responseSize');
+const responseBody    = $('#responseBody');
+const responseHeadersBody = $('#responseHeadersBody');
+const copyBtn         = $('#copyBtn');
+const loadingOverlay  = $('#loadingOverlay');
+const fileInput       = $('#fileInput');
+const openFileBtn     = $('#openFileBtn');
+const addFileBtn      = $('#addFileBtn');
+const runAllBtn       = $('#runAllBtn');
+const fileTree        = $('#fileTree');
+const envList         = $('#envList');
+const loadEnvBtn      = $('#loadEnvBtn');
+const saveEnvBtn      = $('#saveEnvBtn');
+const addEnvVarBtn    = $('#addEnvVarBtn');
+const clearEnvBtn     = $('#clearEnvBtn');
+const envFileInput    = $('#envFileInput');
+const assertionsTab   = $('#assertionsTab');
+const assertionsContent = $('#assertionsContent');
+const testResultsBar  = $('#testResultsBar');
+const testResultsSummary = $('#testResultsSummary');
+const testResultsDetails = $('#testResultsDetails');
+const modeToggle      = $('#modeToggle');
+const codeEditorPanel = $('#codeEditorPanel');
+const codeEditor      = $('#codeEditor');
+const codeEditorFilename = $('#codeEditorFilename');
+const codeSaveBtn     = $('#codeSaveBtn');
+const codeRevertBtn   = $('#codeRevertBtn');
+const newFileBtn      = $('#newFileBtn');
+const codeEditorHighlightCode = $('#codeEditorHighlightCode');
+const codeEditorHighlight = $('#codeEditorHighlight');
+const codeLineNumbers = $('#codeLineNumbers');
+const splitPanels     = $('.split-panels');
+const urlBar          = $('.url-bar');
+
+// History panel refs
+const historyPanel        = $('#historyPanel');
+const historyStats        = $('#historyStats');
+const historyLog          = $('#historyLog');
+const historyCountBadge   = $('#historyCountBadge');
+const historyMethodFilter = $('#historyMethodFilter');
+const historyStatusFilter = $('#historyStatusFilter');
+const historySourceFilter = $('#historySourceFilter');
+const historyUrlSearch    = $('#historyUrlSearch');
+const historyGroupBySelect= $('#historyGroupBySelect');
+const historyDetailOverlay= $('#historyDetailOverlay');
+const historyDetailBody   = $('#historyDetailBody');
+const historyDetailTitle  = $('#historyDetailTitle');
+
+// --- Sidebar section toggle ---
+$$('.sidebar-section-header').forEach(header => {
+  header.addEventListener('click', (e) => {
+    if (e.target.closest('.sidebar-action')) return;
+    const section = header.parentElement;
+    section.classList.toggle('expanded');
+  });
+});
+
+// Expand files and env by default
+$('#filesSection').classList.add('expanded');
+$('#envSection').classList.add('expanded');
+
+// --- Run button state helpers ---
+let abortRunController = null;
+
+function setRunning(running) {
+  isRunning = running;
+  const label = runAllBtn.querySelector('.btn-label');
+  if (running) {
+    runAllBtn.classList.remove('btn-primary');
+    runAllBtn.classList.add('btn-danger');
+    label.textContent = '⏹ Stop';
+    runAllBtn.title = 'Stop execution';
+  } else {
+    runAllBtn.classList.remove('btn-danger');
+    runAllBtn.classList.add('btn-primary');
+    label.textContent = '▶ Run All';
+    runAllBtn.title = 'Run all tests (Ctrl+Shift+Enter)';
+    abortRunController = null;
+  }
+}
+
+// --- Lightweight active-block highlight (avoids full DOM rebuild) ---
+function updateActiveHighlight() {
+  fileTree.querySelectorAll('.block-item.active').forEach(el => el.classList.remove('active'));
+  if (activeFileIndex < 0 || activeBlockIndex < 0) return;
+  const fileNode = fileTree.querySelector(`.file-node[data-file-idx="${activeFileIndex}"]`);
+  if (!fileNode) return;
+  const item = fileNode.querySelector(`.block-item[data-block-idx="${activeBlockIndex}"]`);
+  if (item) item.classList.add('active');
+}
+
+// --- Update status dots without full rebuild ---
+function updateBlockStatuses() {
+  loadedFiles.forEach((file, fileIdx) => {
+    const fileNode = fileTree.querySelector(`.file-node[data-file-idx="${fileIdx}"]`);
+    if (!fileNode) return;
+    file.suite.blocks.forEach((_, blockIdx) => {
+      const item = fileNode.querySelector(`.block-item[data-block-idx="${blockIdx}"]`);
+      if (!item) return;
+      const dot = item.querySelector('.block-status');
+      if (!dot) return;
+      const status = getBlockStatus(fileIdx, blockIdx);
+      dot.className = `block-status ${status ? 'status-' + status : ''}`;
+    });
+    // Update group summary dots
+    fileNode.querySelectorAll('.group-node').forEach(gn => {
+      const groupBlocks = gn.querySelectorAll('.block-item');
+      let allPassed = true, anyFailed = false, anyRunning = false;
+      groupBlocks.forEach(bi => {
+        const dot = bi.querySelector('.block-status');
+        if (!dot) return;
+        if (dot.classList.contains('status-failed')) anyFailed = true;
+        else if (dot.classList.contains('status-running')) anyRunning = true;
+        else if (!dot.classList.contains('status-passed')) allPassed = false;
+      });
+      const gDot = gn.querySelector('.group-status');
+      if (gDot) {
+        gDot.className = 'group-status';
+        if (anyFailed) gDot.classList.add('status-failed');
+        else if (anyRunning) gDot.classList.add('status-running');
+        else if (allPassed && groupBlocks.length > 0) gDot.classList.add('status-passed');
+      }
+    });
+  });
+}
+
+// --- Sidebar resize ---
+{
+  const handle = $('#sidebarResizeHandle');
+  const sidebar = $('#sidebar');
+  let resizing = false;
+
+  handle.addEventListener('mousedown', (e) => {
+    resizing = true;
+    handle.classList.add('active');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!resizing) return;
+    const newWidth = Math.max(200, Math.min(400, e.clientX));
+    sidebar.style.width = newWidth + 'px';
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (resizing) {
+      resizing = false;
+      handle.classList.remove('active');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+  });
+}
+
+// --- Panel resize (request/response split) ---
+{
+  const handle = $('#panelResizeHandle');
+  let resizing = false;
+
+  handle.addEventListener('mousedown', (e) => {
+    resizing = true;
+    handle.classList.add('active');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!resizing) return;
+    const splitPanels = $('.split-panels');
+    const rect = splitPanels.getBoundingClientRect();
+    const percent = ((e.clientX - rect.left) / rect.width) * 100;
+    const clamped = Math.max(25, Math.min(75, percent));
+    $('.request-panel').style.flex = `0 0 ${clamped}%`;
+    $('.response-panel').style.flex = `0 0 ${100 - clamped}%`;
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (resizing) {
+      resizing = false;
+      handle.classList.remove('active');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+  });
+}
+
+// --- Sub-tabs (scoped) ---
+document.addEventListener('click', (e) => {
+  const subTab = e.target.closest('.sub-tab');
+  if (!subTab) return;
+
+  const tabGroup = subTab.parentElement;
+  tabGroup.querySelectorAll('.sub-tab').forEach(t => t.classList.remove('active'));
+  subTab.classList.add('active');
+
+  const parent = tabGroup.parentElement;
+  parent.querySelectorAll(':scope > .sub-content').forEach(sc => sc.classList.remove('active'));
+  const target = parent.querySelector(`#subtab-${subTab.dataset.subtab}`);
+  if (target) target.classList.add('active');
+});
+
+// --- Method select color ---
+const METHOD_COLORS = {
+  GET: '#3fb950', POST: '#58a6ff', PUT: '#d29922', PATCH: '#d29922',
+  DELETE: '#f85149', HEAD: '#bc8cff', OPTIONS: '#8b949e'
+};
+
+function updateMethodColor() {
+  methodSelect.style.color = METHOD_COLORS[methodSelect.value] || '#e6edf3';
+}
+methodSelect.addEventListener('change', updateMethodColor);
+updateMethodColor();
+
+// --- Headers key-value ---
+function createHeaderRow(key = '', value = '', enabled = true) {
+  const row = document.createElement('div');
+  row.className = 'kv-row';
+  row.innerHTML = `
+    <input type="checkbox" class="kv-toggle" ${enabled ? 'checked' : ''} title="Enable this header">
+    <input type="text" class="kv-key" placeholder="Header name" value="${escapeAttr(key)}" spellcheck="false">
+    <input type="text" class="kv-value" placeholder="Header value" value="${escapeAttr(value)}" spellcheck="false">
+    <button class="btn-icon kv-remove" title="Remove">&times;</button>
+  `;
+  row.querySelector('.kv-remove').addEventListener('click', () => {
+    row.remove();
+    if (headersContainer.children.length === 0) headersContainer.appendChild(createHeaderRow());
+  });
+  return row;
+}
+
+addHeaderBtn.addEventListener('click', () => {
+  headersContainer.appendChild(createHeaderRow());
+});
+
+headersContainer.querySelector('.kv-remove')?.addEventListener('click', function() {
+  this.closest('.kv-row').remove();
+  if (headersContainer.children.length === 0) headersContainer.appendChild(createHeaderRow());
+});
+
+// --- Body type toggle ---
+bodyType.addEventListener('change', () => {
+  bodyInput.disabled = bodyType.value === 'none';
+  if (bodyType.value === 'json') {
+    bodyInput.placeholder = '{\n  "key": "value"\n}';
+  } else if (bodyType.value === 'form') {
+    bodyInput.placeholder = 'key=value&another=value';
+  } else if (bodyType.value === 'text') {
+    bodyInput.placeholder = 'Raw text body...';
+  } else {
+    bodyInput.placeholder = 'Request body...';
+  }
+});
+
+// --- Variable interpolation ---
+function interpolateVariables(str) {
+  if (!str) return str;
+  const merged = {};
+  loadedFiles.forEach(file => {
+    if (file.suite.variables) {
+      file.suite.variables.forEach(([name, value]) => { merged[name] = value; });
+    }
+  });
+  Object.entries(envVars).forEach(([name, value]) => {
+    if (value !== '') merged[name] = value;
+  });
+  return str.replace(/\{\{(\w+)\}\}/g, (match, name) => {
+    if (name === '$timestamp') return Date.now().toString();
+    if (name === '$uuid') return crypto.randomUUID();
+    if (name === '$randomInt') return Math.floor(Math.random() * 10000).toString();
+    return merged[name] !== undefined ? merged[name] : match;
+  });
+}
+
+function collectVariablesArray() {
+  const merged = {};
+  loadedFiles.forEach(file => {
+    if (file.suite.variables) {
+      file.suite.variables.forEach(([name, value]) => { merged[name] = value; });
+    }
+  });
+  Object.entries(envVars).forEach(([name, value]) => {
+    if (value !== '') merged[name] = value;
+  });
+  return Object.entries(merged);
+}
+
+// Build a suite copy with disabled blocks removed
+function getEnabledSuite(fileIdx) {
+  const file = loadedFiles[fileIdx];
+  if (!file) return null;
+  const enabledBlocks = file.suite.blocks.filter((_, blockIdx) => !disabledBlocks[`${fileIdx}-${blockIdx}`]);
+  return { variables: file.suite.variables, blocks: enabledBlocks };
+}
+
+// Map from enabled-suite result index → original block index
+function getEnabledIndexMap(fileIdx) {
+  const file = loadedFiles[fileIdx];
+  if (!file) return [];
+  const map = [];
+  file.suite.blocks.forEach((_, blockIdx) => {
+    if (!disabledBlocks[`${fileIdx}-${blockIdx}`]) map.push(blockIdx);
+  });
+  return map;
+}
+
+// Remap block_results from enabled-only indices to original block indices.
+// Results are matched by block name because Rust sorts blocks by type
+// (setup → test → teardown), so positional mapping would be wrong.
+function remapResults(fileIdx, results) {
+  const file = loadedFiles[fileIdx];
+  if (!file || !results) return results;
+  const enabledMap = getEnabledIndexMap(fileIdx);
+  const remapped = new Array(file.suite.blocks.length).fill(null);
+
+  // Track which enabled indices haven't been matched yet (handles duplicate names)
+  const unmatchedIndices = [...enabledMap];
+  results.block_results.forEach(br => {
+    const matchPos = unmatchedIndices.findIndex(idx => file.suite.blocks[idx].name === br.name);
+    if (matchPos >= 0) {
+      const origIdx = unmatchedIndices[matchPos];
+      remapped[origIdx] = br;
+      unmatchedIndices.splice(matchPos, 1);
+    }
+  });
+
+  return { ...results, block_results: remapped };
+}
+
+// --- Send Request ---
+async function sendRequest() {
+  const method = methodSelect.value;
+  let url = urlInput.value.trim();
+
+  if (!url) {
+    showToast('Please enter a URL', 'error');
+    urlInput.focus();
+    return;
+  }
+
+  url = interpolateVariables(url);
+
+  const headers = [];
+  headersContainer.querySelectorAll('.kv-row').forEach(row => {
+    const enabled = row.querySelector('.kv-toggle')?.checked ?? true;
+    const key = row.querySelector('.kv-key').value.trim();
+    const val = interpolateVariables(row.querySelector('.kv-value').value.trim());
+    if (enabled && key) headers.push([key, val]);
+  });
+
+  if (bodyType.value === 'json' && !headers.some(([k]) => k.toLowerCase() === 'content-type')) {
+    headers.push(['Content-Type', 'application/json']);
+  } else if (bodyType.value === 'form' && !headers.some(([k]) => k.toLowerCase() === 'content-type')) {
+    headers.push(['Content-Type', 'application/x-www-form-urlencoded']);
+  }
+
+  let body = (bodyType.value !== 'none' && bodyInput.value.trim()) ? bodyInput.value.trim() : null;
+  if (body) body = interpolateVariables(body);
+
+  sendBtn.disabled = true;
+  sendBtn.classList.add('loading');
+
+  try {
+    const resp = await invoke('send_request', { method, url, headers, body });
+    lastResponse = resp;
+    displayResponse(resp);
+    showToast(`${resp.status} ${resp.status_text}`, resp.status < 400 ? 'success' : 'error');
+  } catch (err) {
+    displayError(err);
+    showToast(String(err), 'error');
+  } finally {
+    sendBtn.disabled = false;
+    sendBtn.classList.remove('loading');
+    refreshHistoryIfVisible();
+  }
+}
+
+sendBtn.addEventListener('click', sendRequest);
+urlInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey) sendRequest();
+});
+
+// --- Display Response ---
+function displayResponse(resp) {
+  responseEmpty.classList.add('hidden');
+  responseContent.classList.remove('hidden');
+  responseContent.classList.add('visible');
+  responseMeta.classList.remove('hidden');
+
+  const code = resp.status;
+  statusBadge.textContent = `${code} ${resp.status_text}`;
+  statusBadge.className = 'status-badge';
+  if (code >= 200 && code < 300) statusBadge.classList.add('s2xx');
+  else if (code >= 300 && code < 400) statusBadge.classList.add('s3xx');
+  else if (code >= 400 && code < 500) statusBadge.classList.add('s4xx');
+  else statusBadge.classList.add('s5xx');
+
+  responseTime.textContent = `${resp.time_ms} ms`;
+  responseSize.textContent = formatBytes(resp.size_bytes);
+
+  // Render as interactive JSON tree or plain text
+  responseBody.innerHTML = '';
+  try {
+    const parsed = JSON.parse(resp.body);
+    responseBody.appendChild(renderJsonTree(parsed));
+    responseBody.dataset.rawJson = JSON.stringify(parsed, null, 2);
+  } catch {
+    responseBody.dataset.rawJson = resp.body;
+    const pre = document.createElement('pre');
+    pre.className = 'json-plain';
+    pre.textContent = resp.body;
+    responseBody.appendChild(pre);
+  }
+
+  responseHeadersBody.innerHTML = '';
+  resp.headers.forEach(([k, v]) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${escapeHtml(k)}</td><td>${escapeHtml(v)}</td>`;
+    responseHeadersBody.appendChild(tr);
+  });
+}
+
+// --- JSON Tree Renderer ---
+function renderJsonTree(data) {
+  const container = document.createElement('div');
+  container.className = 'json-tree';
+  container.appendChild(renderJsonNode(data, null, 0, true));
+  return container;
+}
+
+function renderJsonNode(value, key, depth, isLast) {
+  const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+  const isComplex = type === 'object' || type === 'array';
+
+  const line = document.createElement('div');
+  line.className = 'json-line';
+  line.style.paddingLeft = `${depth * 18}px`;
+
+  if (isComplex) {
+    const entries = type === 'array' ? value : Object.entries(value);
+    const count = type === 'array' ? value.length : Object.keys(value).length;
+    const open = type === 'array' ? '[' : '{';
+    const close = type === 'array' ? ']' : '}';
+    const comma = isLast ? '' : ',';
+
+    const toggle = document.createElement('span');
+    toggle.className = 'json-toggle expanded';
+    toggle.textContent = '▾';
+
+    const keySpan = key !== null ? `<span class="json-key">"${escapeHtml(String(key))}"</span><span class="json-colon">: </span>` : '';
+
+    line.innerHTML = `${keySpan}<span class="json-bracket">${open}</span>`;
+    line.insertBefore(toggle, line.firstChild);
+
+    const preview = document.createElement('span');
+    preview.className = 'json-preview hidden';
+    preview.textContent = ` ${count} ${type === 'array' ? 'items' : 'keys'} `;
+    line.appendChild(preview);
+
+    const childContainer = document.createElement('div');
+    childContainer.className = 'json-children';
+
+    if (type === 'array') {
+      value.forEach((item, i) => {
+        childContainer.appendChild(renderJsonNode(item, null, depth + 1, i === value.length - 1));
+      });
+    } else {
+      const keys = Object.keys(value);
+      keys.forEach((k, i) => {
+        childContainer.appendChild(renderJsonNode(value[k], k, depth + 1, i === keys.length - 1));
+      });
+    }
+
+    const closeLine = document.createElement('div');
+    closeLine.className = 'json-line json-close';
+    closeLine.style.paddingLeft = `${depth * 18}px`;
+    closeLine.innerHTML = `<span class="json-bracket">${close}</span>${comma}`;
+
+    toggle.addEventListener('click', () => {
+      const isExpanded = toggle.classList.toggle('expanded');
+      toggle.classList.toggle('collapsed', !isExpanded);
+      toggle.textContent = isExpanded ? '▾' : '▸';
+      childContainer.classList.toggle('hidden', !isExpanded);
+      closeLine.classList.toggle('hidden', !isExpanded);
+      preview.classList.toggle('hidden', isExpanded);
+    });
+
+    const wrapper = document.createDocumentFragment();
+    wrapper.appendChild(line);
+    wrapper.appendChild(childContainer);
+    wrapper.appendChild(closeLine);
+    return wrapper;
+  } else {
+    // Primitive value
+    const keySpan = key !== null ? `<span class="json-key">"${escapeHtml(String(key))}"</span><span class="json-colon">: </span>` : '';
+    const comma = isLast ? '' : ',';
+    let valHtml;
+    if (type === 'string') {
+      valHtml = `<span class="json-string">"${escapeHtml(value)}"</span>`;
+    } else if (type === 'number') {
+      valHtml = `<span class="json-number">${value}</span>`;
+    } else if (type === 'boolean') {
+      valHtml = `<span class="json-boolean">${value}</span>`;
+    } else {
+      valHtml = `<span class="json-null">null</span>`;
+    }
+
+    const spacer = document.createElement('span');
+    spacer.className = 'json-toggle-spacer';
+
+    line.innerHTML = `${keySpan}${valHtml}${comma}`;
+    line.insertBefore(spacer, line.firstChild);
+    return line;
+  }
+}
+
+function displayError(err) {
+  responseEmpty.classList.add('hidden');
+  responseContent.classList.remove('hidden');
+  responseContent.classList.add('visible');
+  responseMeta.classList.remove('hidden');
+
+  statusBadge.textContent = 'ERROR';
+  statusBadge.className = 'status-badge s-err';
+  responseTime.textContent = '\u2014';
+  responseSize.textContent = '\u2014';
+  responseBody.innerHTML = '';
+  responseBody.dataset.rawJson = String(err);
+  const pre = document.createElement('pre');
+  pre.className = 'json-plain json-error';
+  pre.textContent = String(err);
+  responseBody.appendChild(pre);
+  responseHeadersBody.innerHTML = '';
+}
+
+// --- Response toolbar ---
+$('#expandAllBtn').addEventListener('click', () => {
+  responseBody.querySelectorAll('.json-toggle.collapsed').forEach(t => t.click());
+});
+$('#collapseAllBtn').addEventListener('click', () => {
+  responseBody.querySelectorAll('.json-toggle.expanded').forEach(t => t.click());
+});
+
+copyBtn.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(responseBody.dataset.rawJson || responseBody.textContent);
+    showToast('Copied to clipboard', 'success');
+  } catch {
+    showToast('Failed to copy', 'error');
+  }
+});
+
+// --- File Loading ---
+openFileBtn.addEventListener('click', () => fileInput.click());
+addFileBtn.addEventListener('click', () => fileInput.click());
+
+// Uber-level tooltip on FILES section header
+const filesSectionHeader = document.querySelector('#filesSection > .sidebar-section-header');
+if (filesSectionHeader) {
+  filesSectionHeader.addEventListener('mouseenter', () => {
+    clearTimeout(tooltipTimer);
+    tooltipTimer = setTimeout(() => showAllFilesTooltip(filesSectionHeader), 300);
+  });
+  filesSectionHeader.addEventListener('mouseleave', () => {
+    hideBlockTooltip();
+  });
+}
+
+fileInput.addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files);
+  if (!files.length) return;
+
+  for (const file of files) {
+    await loadFile(file);
+  }
+  fileInput.value = '';
+});
+
+async function loadFile(file) {
+  const content = await file.text();
+  try {
+    const suite = await invoke('parse_test_file', { content });
+
+    const fileEntry = {
+      name: file.name,
+      content,
+      suite,
+      results: null
+    };
+
+    loadedFiles.push(fileEntry);
+    const fileIdx = loadedFiles.length - 1;
+
+    // Populate envVars from .http file variable values (non-placeholders)
+    if (suite.variables) {
+      suite.variables.forEach(([name, value]) => {
+        if (envVars[name] === undefined || envVars[name] === '') {
+          if (value && !value.startsWith('your-') && !value.includes('your-')) {
+            envVars[name] = value;
+          }
+        }
+      });
+    }
+
+    // Sync disabled state from parsed # @disabled directives
+    syncDisabledFromSuite(fileIdx);
+
+    renderFileTree();
+    renderEnvVars();
+
+    // Auto-select first request block
+    if (suite.blocks && suite.blocks.length > 0) {
+      activeFileIndex = fileIdx;
+      const firstRequestIdx = suite.blocks.findIndex(b =>
+        b.block_type === 'test' || b.block_type === 'request' || b.block_type === 'setup'
+      );
+      if (firstRequestIdx >= 0) {
+        selectBlock(fileIdx, firstRequestIdx);
+      }
+    }
+
+    showToast(`Loaded ${file.name} (${suite.blocks.length} blocks)`, 'success');
+  } catch (err) {
+    showToast(`Parse error: ${err}`, 'error');
+  }
+}
+
+// --- File Tree Rendering ---
+function getBlockIcon(blockType) {
+  switch (blockType) {
+    case 'setup': return '\u2699\uFE0F';
+    case 'test': return '\uD83E\uDDEA';
+    case 'teardown': return '\uD83D\uDDD1\uFE0F';
+    case 'request': return '\uD83D\uDCE4';
+    default: return '\uD83D\uDCC4';
+  }
+}
+
+function getBlockStatus(fileIdx, blockIdx) {
+  const file = loadedFiles[fileIdx];
+  if (!file || !file.results) return '';
+  const br = file.results.block_results?.[blockIdx];
+  if (!br) return '';
+  return br.status;
+}
+
+// --- Block Hover Tooltip ---
+let tooltipTimer = null;
+const blockTooltip = $('#blockTooltip');
+
+function showBlockTooltip(block, anchorEl) {
+  const typeIcon = getBlockIcon(block.block_type);
+  const typeLabel = block.block_type.charAt(0).toUpperCase() + block.block_type.slice(1);
+
+  let html = `<div class="btt-header">
+    <span class="btt-type-icon">${typeIcon}</span>
+    <span class="btt-type-label">${escapeHtml(typeLabel)}</span>
+    <span class="btt-name">${escapeHtml(block.name || 'Unnamed')}</span>
+  </div>`;
+
+  if (block.description) {
+    html += `<div class="btt-desc">${escapeHtml(block.description)}</div>`;
+  }
+
+  if (block.request) {
+    const methodClass = `method-${block.request.method.toLowerCase()}`;
+    html += `<div class="btt-section">
+      <span class="btt-method ${methodClass}">${escapeHtml(block.request.method)}</span>
+      <span class="btt-url">${escapeHtml(block.request.url)}</span>
+    </div>`;
+
+    if (block.request.headers && block.request.headers.length > 0) {
+      html += `<div class="btt-section">
+        <div class="btt-section-title">Headers <span class="btt-count">${block.request.headers.length}</span></div>`;
+      block.request.headers.forEach(([k, v]) => {
+        html += `<div class="btt-kv"><span class="btt-key">${escapeHtml(k)}</span>: <span class="btt-val">${escapeHtml(v)}</span></div>`;
+      });
+      html += `</div>`;
+    }
+
+    if (block.request.body) {
+      const bodyPreview = block.request.body.length > 200
+        ? block.request.body.substring(0, 200) + '\u2026'
+        : block.request.body;
+      html += `<div class="btt-section">
+        <div class="btt-section-title">Body</div>
+        <pre class="btt-body">${escapeHtml(bodyPreview)}</pre>
+      </div>`;
+    }
+  }
+
+  if (block.assertions && block.assertions.length > 0) {
+    html += `<div class="btt-section">
+      <div class="btt-section-title">Assertions <span class="btt-count">${block.assertions.length}</span></div>`;
+    block.assertions.forEach(a => {
+      html += `<div class="btt-assertion">
+        <span class="btt-assert-icon">\u25CF</span>
+        <span class="btt-assert-text">${escapeHtml(a.left)} ${escapeHtml(a.operator)} ${escapeHtml(a.right)}</span>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+
+  if (block.extracts && block.extracts.length > 0) {
+    html += `<div class="btt-section">
+      <div class="btt-section-title">Extracts <span class="btt-count">${block.extracts.length}</span></div>`;
+    block.extracts.forEach(e => {
+      html += `<div class="btt-extract">
+        <span class="btt-extract-var">${escapeHtml(e.variable_name)}</span>
+        <span class="btt-extract-arrow">\u2190</span>
+        <span class="btt-extract-path">${escapeHtml(e.source_path)}</span>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+
+  // Run history trend for this block
+  const fileForBlock = loadedFiles.find(f => f.suite.blocks.includes(block));
+  if (fileForBlock) {
+    const blockHist = getBlockRunHistory(fileForBlock.name, block.name);
+    if (blockHist.length > 0) {
+      const passed = blockHist.filter(h => h.status === 'passed').length;
+      const failed = blockHist.filter(h => h.status === 'failed' || h.status === 'error').length;
+      const passRate = Math.round((passed / blockHist.length) * 100);
+      const avgTime = Math.round(blockHist.reduce((s, h) => s + h.timeMs, 0) / blockHist.length);
+
+      html += `<div class="btt-section">
+        <div class="btt-section-title">Run History <span class="btt-count">${blockHist.length} runs</span></div>
+        <div class="btt-run-stats">
+          <span class="btt-stat">✓ ${passed}</span>
+          <span class="btt-stat btt-stat-fail">✗ ${failed}</span>
+          <span class="btt-stat">${passRate}%</span>
+          <span class="btt-stat">avg ${avgTime}ms</span>
+        </div>
+        <div class="btt-trend">${buildBlockTrendBar(blockHist)}</div>
+      </div>`;
+    }
+  }
+
+  if (block.group || (block.depends && block.depends.length > 0)) {
+    html += `<div class="btt-section btt-meta">`;
+    if (block.group) {
+      html += `<div class="btt-meta-item"><span class="btt-meta-icon">\u229E</span> Group: <strong>${escapeHtml(block.group)}</strong></div>`;
+    }
+    if (block.depends && block.depends.length > 0) {
+      html += `<div class="btt-meta-item"><span class="btt-meta-icon">\u2937</span> Depends: <strong>${escapeHtml(block.depends.join(', '))}</strong></div>`;
+    }
+    html += `</div>`;
+  }
+
+  blockTooltip.innerHTML = html;
+  blockTooltip.classList.remove('hidden');
+  positionTooltip(anchorEl);
+}
+
+function hideBlockTooltip() {
+  clearTimeout(tooltipTimer);
+  tooltipTimer = setTimeout(() => {
+    if (!blockTooltip.matches(':hover')) {
+      blockTooltip.classList.add('hidden');
+    }
+  }, 100);
+}
+
+// Keep tooltip open while mouse is over it (for scrolling)
+blockTooltip.addEventListener('mouseleave', () => {
+  blockTooltip.classList.add('hidden');
+});
+
+function extractFileHeader(content) {
+  const lines = content.split('\n');
+  const headerLines = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('#')) {
+      const clean = trimmed.replace(/^#+\s*/, '').replace(/^[=\-]+$/, '').trim();
+      if (clean) headerLines.push(clean);
+    } else if (trimmed === '' && headerLines.length > 0) {
+      continue;
+    } else if (trimmed === '') {
+      continue;
+    } else {
+      break;
+    }
+  }
+  return headerLines.slice(0, 5).join('\n') || null;
+}
+
+function buildTrendBar(history) {
+  const recent = history.slice(-20);
+  return `<div class="btt-trend-bar">${recent.map(r => {
+    const allPassed = r.failed === 0;
+    const cls = allPassed ? 'btt-trend-pass' : 'btt-trend-fail';
+    const title = `${r.passed}✓ ${r.failed}✗ — ${r.totalTime}ms`;
+    return `<span class="${cls}" title="${title}"></span>`;
+  }).join('')}</div>`;
+}
+
+function buildBlockTrendBar(blockHist) {
+  const recent = blockHist.slice(-20);
+  return `<div class="btt-trend-bar">${recent.map(h => {
+    const cls = h.status === 'passed' ? 'btt-trend-pass' : h.status === 'failed' ? 'btt-trend-fail' : 'btt-trend-skip';
+    const title = `${h.status} — ${h.timeMs}ms`;
+    return `<span class="${cls}" title="${title}"></span>`;
+  }).join('')}</div>`;
+}
+
+function formatTimeAgo(timestamp) {
+  const diff = Date.now() - timestamp;
+  if (diff < 60000) return 'just now';
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+  return `${Math.floor(diff / 86400000)}d ago`;
+}
+
+function positionTooltip(anchorEl) {
+  const rect = anchorEl.getBoundingClientRect();
+  const tooltipRect = blockTooltip.getBoundingClientRect();
+  let top = rect.top + (rect.height / 2) - (tooltipRect.height / 2);
+  let left = rect.right + 8;
+  if (top < 8) top = 8;
+  if (top + tooltipRect.height > window.innerHeight - 8) top = window.innerHeight - tooltipRect.height - 8;
+  if (left + tooltipRect.width > window.innerWidth - 8) left = rect.left - tooltipRect.width - 8;
+  blockTooltip.style.top = `${top}px`;
+  blockTooltip.style.left = `${left}px`;
+}
+
+function showGroupTooltip(file, fileIdx, groupName, groupBlocks, anchorEl) {
+  const totalAssertions = groupBlocks.reduce((s, { block }) => s + (block.assertions?.length || 0), 0);
+  const totalExtracts = groupBlocks.reduce((s, { block }) => s + (block.extracts?.length || 0), 0);
+  const deps = [...new Set(groupBlocks.flatMap(({ block }) => block.depends || []))];
+
+  let html = `<div class="btt-header">
+    <span class="btt-type-icon">\u229E</span>
+    <span class="btt-type-label">Group</span>
+    <span class="btt-name">${escapeHtml(groupName)}</span>
+  </div>`;
+
+  html += `<div class="btt-section">
+    <div class="btt-file-summary">
+      <span class="btt-badge btt-badge-test">\uD83E\uDDEA ${groupBlocks.length} Tests</span>
+      ${totalAssertions > 0 ? `<span class="btt-badge btt-badge-setup">✓ ${totalAssertions} Assertions</span>` : ''}
+      ${totalExtracts > 0 ? `<span class="btt-badge btt-badge-group">↤ ${totalExtracts} Extracts</span>` : ''}
+    </div>
+  </div>`;
+
+  if (deps.length > 0) {
+    html += `<div class="btt-section btt-meta">
+      <div class="btt-meta-item"><span class="btt-meta-icon">\u2937</span> Depends: <strong>${escapeHtml(deps.join(', '))}</strong></div>
+    </div>`;
+  }
+
+  html += `<div class="btt-section"><div class="btt-section-title">Tests <span class="btt-count">${groupBlocks.length}</span></div>`;
+  groupBlocks.forEach(({ block }) => {
+    const blockHist = getBlockRunHistory(file.name, block.name);
+    const lastStatus = blockHist.length > 0 ? blockHist[blockHist.length - 1].status : null;
+    const statusDot = lastStatus === 'passed' ? '\uD83D\uDFE2' : lastStatus === 'failed' ? '\uD83D\uDD34' : lastStatus === 'error' ? '\uD83D\uDFE0' : '\u26AA';
+    const timeStr = blockHist.length > 0 ? ` (${blockHist[blockHist.length - 1].timeMs}ms)` : '';
+    html += `<div class="btt-test-item">${statusDot} <span class="btt-test-name">${escapeHtml(block.name)}</span><span class="btt-test-time">${timeStr}</span></div>`;
+  });
+  html += `</div>`;
+
+  // Aggregate run history across all blocks in this group
+  const allBlockHists = groupBlocks.map(({ block }) => getBlockRunHistory(file.name, block.name));
+  const maxRuns = Math.max(...allBlockHists.map(h => h.length), 0);
+  if (maxRuns > 0) {
+    let totalPassed = 0, totalFailed = 0;
+    allBlockHists.forEach(hist => {
+      totalPassed += hist.filter(h => h.status === 'passed').length;
+      totalFailed += hist.filter(h => h.status === 'failed' || h.status === 'error').length;
+    });
+    const total = totalPassed + totalFailed;
+    const passRate = total > 0 ? Math.round((totalPassed / total) * 100) : 0;
+    const avgTime = Math.round(allBlockHists.flat().reduce((s, h) => s + h.timeMs, 0) / (allBlockHists.flat().length || 1));
+
+    // Build per-run trend (each bar = one run across all group blocks)
+    const runTrend = [];
+    for (let i = 0; i < maxRuns; i++) {
+      let passed = 0, failed = 0;
+      allBlockHists.forEach(hist => {
+        if (i < hist.length) {
+          if (hist[i].status === 'passed') passed++;
+          else failed++;
+        }
+      });
+      runTrend.push({ passed, failed, totalTime: 0 });
+    }
+
+    html += `<div class="btt-section">
+      <div class="btt-section-title">Run History <span class="btt-count">${maxRuns} runs</span></div>
+      <div class="btt-run-stats">
+        <span class="btt-stat">✓ ${totalPassed}</span>
+        <span class="btt-stat btt-stat-fail">✗ ${totalFailed}</span>
+        <span class="btt-stat">${passRate}%</span>
+        <span class="btt-stat">avg ${avgTime}ms</span>
+      </div>
+      <div class="btt-trend">${buildTrendBar(runTrend)}</div>
+    </div>`;
+  }
+
+  blockTooltip.innerHTML = html;
+  blockTooltip.classList.remove('hidden');
+  positionTooltip(anchorEl);
+}
+
+function showAllFilesTooltip(anchorEl) {
+  if (loadedFiles.length === 0) return;
+
+  let totalBlocks = 0, totalSetups = 0, totalTests = 0, totalTeardowns = 0;
+  let totalGroups = new Set();
+  let totalRuns = 0, totalPassed = 0, totalFailed = 0;
+
+  loadedFiles.forEach(file => {
+    const blocks = file.suite.blocks;
+    totalBlocks += blocks.length;
+    totalSetups += blocks.filter(b => b.block_type === 'setup').length;
+    totalTests += blocks.filter(b => b.block_type === 'test').length;
+    totalTeardowns += blocks.filter(b => b.block_type === 'teardown').length;
+    blocks.forEach(b => { if (b.group) totalGroups.add(b.group); });
+
+    const stats = getFileRunStats(file.name);
+    totalRuns += stats.totalRuns;
+    stats.history.forEach(r => { totalPassed += r.passed; totalFailed += r.failed; });
+  });
+
+  let html = `<div class="btt-header">
+    <span class="btt-type-icon">\uD83D\uDCDA</span>
+    <span class="btt-type-label">Workspace</span>
+    <span class="btt-name">${loadedFiles.length} Files Loaded</span>
+  </div>`;
+
+  html += `<div class="btt-section">
+    <div class="btt-file-summary">
+      <span class="btt-badge btt-badge-setup">⚙ ${totalSetups} Setup</span>
+      <span class="btt-badge btt-badge-test">\uD83E\uDDEA ${totalTests} Tests</span>
+      <span class="btt-badge btt-badge-teardown">\uD83D\uDDD1 ${totalTeardowns} Teardown</span>
+      ${totalGroups.size > 0 ? `<span class="btt-badge btt-badge-group">\u229E ${totalGroups.size} Groups</span>` : ''}
+    </div>
+  </div>`;
+
+  html += `<div class="btt-section"><div class="btt-section-title">Files</div>`;
+  loadedFiles.forEach(file => {
+    const stats = getFileRunStats(file.name);
+    const blockCount = file.suite.blocks.length;
+    const lastStatus = stats.totalRuns > 0 ? (stats.history[stats.history.length - 1].failed === 0 ? '\uD83D\uDFE2' : '\uD83D\uDD34') : '\u26AA';
+    html += `<div class="btt-test-item">
+      ${lastStatus} <span class="btt-test-name">${escapeHtml(file.name)}</span>
+      <span class="btt-test-time">${blockCount} blocks${stats.totalRuns > 0 ? ` · ${stats.totalRuns} runs` : ''}</span>
+    </div>`;
+  });
+  html += `</div>`;
+
+  if (totalRuns > 0) {
+    const total = totalPassed + totalFailed;
+    const passRate = total > 0 ? Math.round((totalPassed / total) * 100) : 0;
+
+    // Aggregate per-run trend across all files
+    const allHistory = loadedFiles.flatMap(f => (getFileRunStats(f.name).history || []).map(h => ({ ...h, file: f.name })));
+    allHistory.sort((a, b) => a.timestamp - b.timestamp);
+
+    html += `<div class="btt-section">
+      <div class="btt-section-title">Total Run History <span class="btt-count">${totalRuns} runs</span></div>
+      <div class="btt-run-stats">
+        <span class="btt-stat">✓ ${totalPassed}</span>
+        <span class="btt-stat btt-stat-fail">✗ ${totalFailed}</span>
+        <span class="btt-stat">${passRate}% pass rate</span>
+      </div>
+      <div class="btt-trend">${buildTrendBar(allHistory.slice(-20))}</div>
+    </div>`;
+  }
+
+  blockTooltip.innerHTML = html;
+  blockTooltip.classList.remove('hidden');
+  positionTooltip(anchorEl);
+}
+
+function showFileTooltip(file, fileIdx, anchorEl) {
+  const suite = file.suite;
+  const stats = getFileRunStats(file.name);
+
+  const headerComment = extractFileHeader(file.content);
+
+  const setups = suite.blocks.filter(b => b.block_type === 'setup');
+  const tests = suite.blocks.filter(b => b.block_type === 'test');
+  const teardowns = suite.blocks.filter(b => b.block_type === 'teardown');
+  const groups = [...new Set(tests.map(b => b.group).filter(Boolean))];
+
+  let html = `<div class="btt-header">
+    <span class="btt-type-icon">📄</span>
+    <span class="btt-name">${escapeHtml(file.name)}</span>
+  </div>`;
+
+  if (headerComment) {
+    html += `<div class="btt-desc">${escapeHtml(headerComment)}</div>`;
+  }
+
+  html += `<div class="btt-section">
+    <div class="btt-section-title">Test Plan</div>
+    <div class="btt-file-summary">
+      ${setups.length > 0 ? `<span class="btt-badge btt-badge-setup">⚙ ${setups.length} Setup</span>` : ''}
+      ${tests.length > 0 ? `<span class="btt-badge btt-badge-test">🧪 ${tests.length} Tests</span>` : ''}
+      ${teardowns.length > 0 ? `<span class="btt-badge btt-badge-teardown">🧹 ${teardowns.length} Teardown</span>` : ''}
+      ${groups.length > 0 ? `<span class="btt-badge btt-badge-group">⊞ ${groups.length} Groups</span>` : ''}
+    </div>
+  </div>`;
+
+  if (tests.length > 0) {
+    html += `<div class="btt-section"><div class="btt-section-title">Tests <span class="btt-count">${tests.length}</span></div>`;
+
+    const grouped = {};
+    const ungrouped = [];
+    tests.forEach(t => {
+      if (t.group) {
+        if (!grouped[t.group]) grouped[t.group] = [];
+        grouped[t.group].push(t);
+      } else {
+        ungrouped.push(t);
+      }
+    });
+
+    for (const [groupName, groupTests] of Object.entries(grouped)) {
+      html += `<div class="btt-test-group-label">⊞ ${escapeHtml(groupName)}</div>`;
+      groupTests.forEach(t => {
+        const blockHist = getBlockRunHistory(file.name, t.name);
+        const lastStatus = blockHist.length > 0 ? blockHist[blockHist.length - 1].status : null;
+        const statusDot = lastStatus === 'passed' ? '🟢' : lastStatus === 'failed' ? '🔴' : lastStatus === 'error' ? '🟠' : '⚪';
+        html += `<div class="btt-test-item">${statusDot} <span class="btt-test-name">${escapeHtml(t.name)}</span></div>`;
+      });
+    }
+    ungrouped.forEach(t => {
+      const blockHist = getBlockRunHistory(file.name, t.name);
+      const lastStatus = blockHist.length > 0 ? blockHist[blockHist.length - 1].status : null;
+      const statusDot = lastStatus === 'passed' ? '🟢' : lastStatus === 'failed' ? '🔴' : lastStatus === 'error' ? '🟠' : '⚪';
+      html += `<div class="btt-test-item">${statusDot} <span class="btt-test-name">${escapeHtml(t.name)}</span></div>`;
+    });
+    html += `</div>`;
+  }
+
+  if (stats.totalRuns > 0) {
+    const lastRun = stats.history[stats.history.length - 1];
+    const totalPassed = stats.history.reduce((sum, r) => sum + r.passed, 0);
+    const totalFailed = stats.history.reduce((sum, r) => sum + r.failed, 0);
+    const passRate = Math.round((totalPassed / (totalPassed + totalFailed || 1)) * 100);
+
+    html += `<div class="btt-section">
+      <div class="btt-section-title">Run History <span class="btt-count">${stats.totalRuns} runs</span></div>
+      <div class="btt-run-stats">
+        <span class="btt-stat">✓ ${totalPassed} passed</span>
+        <span class="btt-stat btt-stat-fail">✗ ${totalFailed} failed</span>
+        <span class="btt-stat">${passRate}% pass rate</span>
+      </div>
+      <div class="btt-trend">${buildTrendBar(stats.history)}</div>
+      <div class="btt-last-run">Last: ${formatTimeAgo(lastRun.timestamp)} — ${lastRun.passed}✓ ${lastRun.failed}✗ in ${lastRun.totalTime}ms</div>
+    </div>`;
+  }
+
+  blockTooltip.innerHTML = html;
+  blockTooltip.classList.remove('hidden');
+  positionTooltip(anchorEl);
+}
+
+// Persistent expand/collapse state: { "file-0": true, "file-0-grp-auth": false, ... }
+const treeExpandState = {};
+
+function renderFileTree() {
+  if (loadedFiles.length === 0) {
+    fileTree.innerHTML = '<div class="sidebar-empty">No files loaded</div>';
+    return;
+  }
+
+  // Save current expand state from DOM before rebuilding
+  fileTree.querySelectorAll('.file-node').forEach(fn => {
+    const key = `file-${fn.dataset.fileIdx}`;
+    treeExpandState[key] = fn.classList.contains('expanded');
+  });
+  fileTree.querySelectorAll('.group-node').forEach(gn => {
+    const key = gn.dataset.expandKey;
+    if (key) treeExpandState[key] = gn.classList.contains('expanded');
+  });
+
+  fileTree.innerHTML = '';
+  loadedFiles.forEach((file, fileIdx) => {
+    const fileKey = `file-${fileIdx}`;
+    const isFileExpanded = treeExpandState[fileKey] !== undefined ? treeExpandState[fileKey] : true;
+
+    const node = document.createElement('div');
+    node.className = `file-node${isFileExpanded ? ' expanded' : ''}`;
+    node.dataset.fileIdx = fileIdx;
+
+    const header = document.createElement('div');
+    header.className = 'file-node-header';
+    header.innerHTML = `
+      <span class="node-chevron">\u25B8</span>
+      <span class="node-icon">\uD83D\uDCC4</span>
+      <span class="node-name" title="${escapeAttr(file.name)}">${escapeHtml(file.name)}</span>
+      <button class="node-run" title="Run this file">\u25B6</button>
+      <button class="node-close" title="Close file">\u2715</button>
+    `;
+
+    header.addEventListener('click', (e) => {
+      if (e.target.closest('.node-run')) {
+        runSingleFile(fileIdx);
+        return;
+      }
+      if (e.target.closest('.node-close')) {
+        closeFile(fileIdx);
+        return;
+      }
+      if (currentMode === 'code') {
+        activeFileIndex = fileIdx;
+        syncBuilderToCode();
+      }
+      node.classList.toggle('expanded');
+      treeExpandState[fileKey] = node.classList.contains('expanded');
+    });
+
+    header.addEventListener('mouseenter', () => {
+      clearTimeout(tooltipTimer);
+      tooltipTimer = setTimeout(() => showFileTooltip(file, fileIdx, header), 300);
+    });
+    header.addEventListener('mouseleave', () => {
+      hideBlockTooltip();
+    });
+
+    const children = document.createElement('div');
+    children.className = 'file-node-children';
+
+    // Variables row
+    if (file.suite.variables && file.suite.variables.length > 0) {
+      const varItem = document.createElement('div');
+      varItem.className = 'block-item';
+      varItem.innerHTML = `
+        <span class="block-status"></span>
+        <span class="block-icon">\uD83D\uDD27</span>
+        <span class="block-name">@variables (${file.suite.variables.length})</span>
+      `;
+      varItem.addEventListener('click', () => {
+        $('#envSection').classList.add('expanded');
+      });
+      children.appendChild(varItem);
+    }
+
+    // Categorize blocks: setup, teardown, grouped tests, ungrouped tests
+    const setups = [], teardowns = [], ungroupedTests = [];
+    const groupMap = new Map(); // groupName -> [{block, blockIdx}]
+    file.suite.blocks.forEach((block, blockIdx) => {
+      if (block.block_type === 'setup') {
+        setups.push({ block, blockIdx });
+      } else if (block.block_type === 'teardown') {
+        teardowns.push({ block, blockIdx });
+      } else if (block.group) {
+        if (!groupMap.has(block.group)) groupMap.set(block.group, []);
+        groupMap.get(block.group).push({ block, blockIdx });
+      } else {
+        ungroupedTests.push({ block, blockIdx });
+      }
+    });
+
+    // Render setup blocks at top level
+    setups.forEach(({ block, blockIdx }) => {
+      children.appendChild(createBlockItem(file, fileIdx, block, blockIdx));
+    });
+
+    // Render grouped tests as collapsible group nodes
+    for (const [groupName, groupBlocks] of groupMap) {
+      const groupKey = `file-${fileIdx}-grp-${groupName}`;
+      const isGroupExpanded = treeExpandState[groupKey] !== undefined ? treeExpandState[groupKey] : false;
+
+      const groupNode = document.createElement('div');
+      groupNode.className = `group-node${isGroupExpanded ? ' expanded' : ''}`;
+      groupNode.dataset.expandKey = groupKey;
+      groupNode.dataset.groupName = groupName;
+
+      const groupHeader = document.createElement('div');
+      groupHeader.className = 'group-node-header';
+      groupHeader.innerHTML = `
+        <span class="node-chevron">\u25B8</span>
+        <span class="group-status"></span>
+        <span class="group-icon">\u229E</span>
+        <span class="group-name" title="${escapeAttr(groupName)}">${escapeHtml(groupName)}</span>
+        <span class="group-count">${groupBlocks.length}</span>
+        <button class="group-run" title="Run this group">\u25B6</button>
+      `;
+
+      groupHeader.addEventListener('click', (e) => {
+        if (e.target.closest('.group-run')) {
+          runGroup(fileIdx, groupName);
+          return;
+        }
+        groupNode.classList.toggle('expanded');
+        treeExpandState[groupKey] = groupNode.classList.contains('expanded');
+      });
+
+      groupHeader.addEventListener('mouseenter', () => {
+        clearTimeout(tooltipTimer);
+        tooltipTimer = setTimeout(() => showGroupTooltip(file, fileIdx, groupName, groupBlocks, groupHeader), 300);
+      });
+      groupHeader.addEventListener('mouseleave', () => {
+        hideBlockTooltip();
+      });
+
+      const groupChildren = document.createElement('div');
+      groupChildren.className = 'group-node-children';
+      groupBlocks.forEach(({ block, blockIdx }) => {
+        groupChildren.appendChild(createBlockItem(file, fileIdx, block, blockIdx));
+      });
+
+      groupNode.appendChild(groupHeader);
+      groupNode.appendChild(groupChildren);
+      children.appendChild(groupNode);
+    }
+
+    // Render ungrouped test blocks
+    ungroupedTests.forEach(({ block, blockIdx }) => {
+      children.appendChild(createBlockItem(file, fileIdx, block, blockIdx));
+    });
+
+    // Render teardown blocks at bottom
+    teardowns.forEach(({ block, blockIdx }) => {
+      children.appendChild(createBlockItem(file, fileIdx, block, blockIdx));
+    });
+
+    node.appendChild(header);
+    node.appendChild(children);
+    fileTree.appendChild(node);
+  });
+}
+
+function createBlockItem(file, fileIdx, block, blockIdx) {
+  const item = document.createElement('div');
+  item.className = 'block-item';
+  item.dataset.blockIdx = blockIdx;
+  const isDisabled = !!disabledBlocks[`${fileIdx}-${blockIdx}`];
+  if (isDisabled) item.classList.add('disabled');
+  if (fileIdx === activeFileIndex && blockIdx === activeBlockIndex) {
+    item.classList.add('active');
+  }
+
+  const status = getBlockStatus(fileIdx, blockIdx);
+  const statusClass = status ? `status-${status}` : '';
+
+  const descHtml = block.description ? `<span class="block-desc" title="${escapeAttr(block.description)}">${escapeHtml(block.description)}</span>` : '';
+  const depsHtml = block.depends && block.depends.length > 0 ? `<span class="block-depends" title="Depends: ${escapeAttr(block.depends.join(', '))}">⤷ ${escapeHtml(block.depends.join(', '))}</span>` : '';
+  item.innerHTML = `
+    <input type="checkbox" class="block-toggle" title="Enable/disable this step" ${isDisabled ? '' : 'checked'}>
+    <span class="block-status ${statusClass}"></span>
+    <span class="block-icon">${getBlockIcon(block.block_type)}</span>
+    <span class="block-name-group">
+      <span class="block-name" title="${escapeAttr(block.name)}">${escapeHtml(block.name || block.block_type)}</span>
+      ${descHtml}
+      ${depsHtml}
+    </span>
+    <button class="block-play" title="Run this block">\u25B6</button>
+  `;
+
+  const toggle = item.querySelector('.block-toggle');
+  toggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const key = `${fileIdx}-${blockIdx}`;
+    if (toggle.checked) {
+      delete disabledBlocks[key];
+    } else {
+      disabledBlocks[key] = true;
+    }
+    item.classList.toggle('disabled', !toggle.checked);
+    if (currentMode === 'code' && fileIdx === activeFileIndex) {
+      syncBuilderToCode();
+    }
+  });
+
+  item.addEventListener('click', (e) => {
+    if (e.target.closest('.block-toggle')) return;
+    if (e.target.closest('.block-play')) {
+      runSingleBlock(fileIdx, blockIdx);
+      return;
+    }
+    selectBlock(fileIdx, blockIdx);
+  });
+
+  item.addEventListener('mouseenter', () => {
+    clearTimeout(tooltipTimer);
+    tooltipTimer = setTimeout(() => showBlockTooltip(block, item), 300);
+  });
+  item.addEventListener('mouseleave', () => {
+    hideBlockTooltip();
+  });
+
+  return item;
+}
+
+function closeFile(fileIdx) {
+  // Clean up disabled blocks for this file and re-index remaining
+  const newDisabled = {};
+  Object.keys(disabledBlocks).forEach(key => {
+    const [fi, bi] = key.split('-').map(Number);
+    if (fi === fileIdx) return; // remove entries for closed file
+    const newFi = fi > fileIdx ? fi - 1 : fi;
+    newDisabled[`${newFi}-${bi}`] = true;
+  });
+  disabledBlocks = newDisabled;
+
+  loadedFiles.splice(fileIdx, 1);
+
+  if (activeFileIndex === fileIdx) {
+    activeFileIndex = -1;
+    activeBlockIndex = -1;
+  } else if (activeFileIndex > fileIdx) {
+    activeFileIndex--;
+  }
+
+  renderFileTree();
+  renderEnvVars();
+
+  if (loadedFiles.length === 0) {
+    testResultsBar.classList.add('hidden');
+  }
+}
+
+// --- Block Selection ---
+function selectBlock(fileIdx, blockIdx) {
+  activeFileIndex = fileIdx;
+  activeBlockIndex = blockIdx;
+
+  const file = loadedFiles[fileIdx];
+  if (!file) return;
+  const block = file.suite.blocks[blockIdx];
+  if (!block) return;
+
+  // Load request into editor
+  const req = block.request;
+  if (req) {
+    methodSelect.value = req.method || 'GET';
+    updateMethodColor();
+    urlInput.value = req.url || '';
+
+    headersContainer.innerHTML = '';
+    if (req.headers && req.headers.length > 0) {
+      req.headers.forEach(([k, v]) => headersContainer.appendChild(createHeaderRow(k, v)));
+    } else {
+      headersContainer.appendChild(createHeaderRow());
+    }
+
+    if (req.body) {
+      const isJson = req.body.trim().startsWith('{') || req.body.trim().startsWith('[');
+      bodyType.value = isJson ? 'json' : 'text';
+      bodyInput.value = req.body;
+      bodyInput.disabled = false;
+    } else {
+      bodyType.value = 'none';
+      bodyInput.value = '';
+      bodyInput.disabled = true;
+    }
+    bodyType.dispatchEvent(new Event('change'));
+  }
+
+  // Show response if block has been run
+  const br = file.results?.block_results?.[blockIdx];
+  if (br) {
+    if (br.response) {
+      displayResponse(br.response);
+      lastResponse = br.response;
+    } else if (br.error) {
+      displayError(br.error);
+      lastResponse = null;
+    }
+  }
+
+  // Show assertions tab if block has assertions, extracts, or run results
+  const hasDirectives = (block.assertions && block.assertions.length > 0) || (block.extracts && block.extracts.length > 0);
+  const hasResults = br && (br.assertion_results?.length > 0 || br.extract_results?.length > 0 || br.error);
+  if (hasDirectives || hasResults) {
+    assertionsTab.style.display = '';
+    renderAssertions(fileIdx, blockIdx);
+  } else {
+    assertionsTab.style.display = 'none';
+  }
+
+  updateActiveHighlight();
+
+  // If in code mode, refresh code editor with this file's content
+  if (currentMode === 'code' && loadedFiles[fileIdx]) {
+    syncBuilderToCode();
+  }
+}
+
+// --- Assertions Rendering ---
+function renderAssertions(fileIdx, blockIdx) {
+  const file = loadedFiles[fileIdx];
+  const block = file.suite.blocks[blockIdx];
+  const br = file.results?.block_results?.[blockIdx];
+
+  let html = '';
+
+  // Assertions
+  if (block.assertions && block.assertions.length > 0) {
+    html += '<div class="assertion-group"><div class="assertion-group-header">Assertions</div>';
+    block.assertions.forEach((assertion, i) => {
+      const assertionText = `${assertion.left} ${assertion.operator} ${assertion.right}`;
+      const ar = br?.assertion_results?.[i];
+      const passed = ar ? ar.passed : null;
+      const statusClass = passed === true ? 'passed' : passed === false ? 'failed' : '';
+      const icon = passed === true ? '\u2713' : passed === false ? '\u2717' : '\u25CB';
+
+      let detail = '';
+      if (ar && !ar.passed && ar.actual != null) {
+        detail = `<span class="assert-detail">got: ${escapeHtml(ar.actual)}</span>`;
+      }
+
+      html += `
+        <div class="assertion-row ${statusClass}">
+          <span class="assert-icon">${icon}</span>
+          <span class="assert-text">${escapeHtml(assertionText)}</span>
+          ${detail}
+        </div>
+      `;
+    });
+    html += '</div>';
+  }
+
+  // Extracts
+  if (block.extracts && block.extracts.length > 0) {
+    html += '<div class="assertion-group"><div class="assertion-group-header">Variable Extractions</div>';
+    block.extracts.forEach((extract, i) => {
+      const er = br?.extract_results?.[i];
+      const success = er ? er.success : null;
+      const stateClass = success === true ? 'extract-success' : success === false ? 'extract-failed' : '';
+      const icon = success === true ? '\u2713' : success === false ? '\u2717' : '\u26A1';
+      const val = er?.value ?? '\u2014';
+
+      html += `
+        <div class="extract-row ${stateClass}">
+          <span class="extract-icon">${icon}</span>
+          <span class="extract-var">${escapeHtml(extract.variable_name)}</span>
+          <span class="var-sep">=</span>
+          <span class="extract-val">${escapeHtml(val)}</span>
+        </div>
+      `;
+    });
+    html += '</div>';
+  }
+
+  // Error message from run
+  if (br?.error) {
+    html += `<div class="assertion-group"><div class="assertion-group-header">Error</div>
+      <div class="assertion-row failed"><span class="assert-icon">\u2717</span><span class="assert-text">${escapeHtml(br.error)}</span></div>
+    </div>`;
+  }
+
+  if (!html) {
+    html = '<div class="sidebar-empty" style="padding:20px">No assertions or extractions</div>';
+  }
+
+  assertionsContent.innerHTML = html;
+}
+
+// --- Run All Tests ---
+async function runAllTests() {
+  // If already running, abort
+  if (isRunning) {
+    if (abortRunController) abortRunController.abort();
+    return;
+  }
+
+  if (loadedFiles.length === 0) {
+    showToast('No files loaded', 'info');
+    return;
+  }
+
+  // Check all files for unresolved variables (only enabled blocks)
+  let allUnresolved = [];
+  for (let fi = 0; fi < loadedFiles.length; fi++) {
+    try {
+      const suite = getEnabledSuite(fi);
+      const unresolved = await invoke('check_variables', {
+        suite,
+        envVars: collectVariablesArray()
+      });
+      allUnresolved.push(...unresolved);
+    } catch {}
+  }
+  allUnresolved = [...new Set(allUnresolved)];
+  if (allUnresolved.length > 0) {
+    promptForVariables(allUnresolved);
+    return;
+  }
+
+  abortRunController = new AbortController();
+  const signal = abortRunController.signal;
+  setRunning(true);
+
+  // Reset results
+  loadedFiles.forEach(f => f.results = null);
+  renderFileTree();
+
+  let totalPassed = 0;
+  let totalFailed = 0;
+  let totalSkipped = 0;
+  let totalTimeMs = 0;
+  const allBlockResults = [];
+
+  // Pre-compute enabled blocks per file for pending display
+  const pendingByFile = [];
+  for (let fi = 0; fi < loadedFiles.length; fi++) {
+    const file = loadedFiles[fi];
+    const enabledMap = getEnabledIndexMap(fi);
+    pendingByFile.push(enabledMap.map(origIdx => {
+      const block = file.suite.blocks[origIdx];
+      return {
+        fileName: file.name,
+        name: block.name || block.block_type,
+        blockType: block.block_type,
+        fileIdx: fi,
+        blockIdx: origIdx
+      };
+    }));
+  }
+
+  // Only show current file's blocks as pending (not all future files)
+  let currentFilePending = pendingByFile[0] || [];
+  showTestResults(0, 0, 0, 0, [], currentFilePending);
+  testResultsDetails.classList.remove('hidden');
+
+  // Start listening for per-block progress events from Rust
+  await startBlockProgressListener();
+
+  try {
+    for (let fi = 0; fi < loadedFiles.length; fi++) {
+      if (signal.aborted) {
+        showToast('Run stopped', 'info');
+        break;
+      }
+
+      const file = loadedFiles[fi];
+      const suite = getEnabledSuite(fi);
+      if (!suite || suite.blocks.length === 0) continue;
+      try {
+        const results = await invoke('run_test_suite', {
+          suite,
+          extraVariables: collectVariablesArray()
+        });
+
+        // Remap results to align with original block indices
+        file.results = remapResults(fi, results);
+        pushRunHistory(file.name, results);
+        totalPassed += results.passed;
+        totalFailed += results.failed;
+        totalSkipped += results.skipped;
+        totalTimeMs += results.total_time_ms;
+
+        // Carry extracted variables forward to next files
+        if (results.final_variables) {
+          Object.entries(results.final_variables).forEach(([name, value]) => {
+            envVars[name] = value;
+          });
+        }
+
+        file.results.block_results.forEach((br, origIdx) => {
+          if (br) allBlockResults.push({ ...br, fileName: file.name, fileIdx: fi, blockIdx: origIdx });
+        });
+      } catch (err) {
+        showToast(`Error running ${file.name}: ${err}`, 'error');
+        const errorResults = file.suite.blocks.map((b, blockIdx) => {
+          if (disabledBlocks[`${fi}-${blockIdx}`]) return null;
+          return {
+            name: b.name,
+            block_type: b.block_type,
+            status: 'error',
+            response: null,
+            assertion_results: [],
+            extract_results: [],
+            error: String(err),
+            time_ms: 0
+          };
+        });
+        const enabledCount = errorResults.filter(Boolean).length;
+        file.results = {
+          passed: 0,
+          failed: enabledCount,
+          skipped: 0,
+          total_time_ms: 0,
+          block_results: errorResults,
+          final_variables: {}
+        };
+        totalFailed += enabledCount;
+        file.results.block_results.forEach((br, origIdx) => {
+          if (br) allBlockResults.push({ ...br, fileName: file.name, fileIdx: fi, blockIdx: origIdx });
+        });
+      }
+
+      // After file completes, show next file's blocks as pending
+      const nextPending = (fi + 1 < pendingByFile.length) ? pendingByFile[fi + 1] : [];
+
+      // Stream: update sidebar status dots + results bar after each file
+      updateBlockStatuses();
+      // Sync streaming counts with actual totals before rebuilding DOM
+      streamingCounts = { passed: totalPassed, failed: totalFailed, skipped: totalSkipped, timeMs: totalTimeMs };
+      showTestResults(totalPassed, totalFailed, totalSkipped, totalTimeMs, allBlockResults, nextPending);
+      testResultsDetails.classList.remove('hidden');
+    }
+
+    renderEnvVars();
+
+    // Re-render assertions for active block
+    if (activeFileIndex >= 0 && activeBlockIndex >= 0) {
+      renderAssertions(activeFileIndex, activeBlockIndex);
+      const br = loadedFiles[activeFileIndex]?.results?.block_results?.[activeBlockIndex];
+      if (br?.response) {
+        displayResponse(br.response);
+        lastResponse = br.response;
+      }
+    }
+
+    if (!signal.aborted) {
+      if (totalFailed === 0) {
+        showToast(`All ${totalPassed} tests passed!`, 'success');
+      } else {
+        showToast(`${totalFailed} test(s) failed`, 'error');
+      }
+    }
+  } finally {
+    stopBlockProgressListener();
+    setRunning(false);
+    refreshHistoryIfVisible();
+  }
+}
+
+runAllBtn.addEventListener('click', runAllTests);
+
+// --- Run Single Block ---
+async function runSingleBlock(fileIdx, blockIdx) {
+  const file = loadedFiles[fileIdx];
+  if (!file) return;
+  const block = file.suite.blocks[blockIdx];
+  if (!block || !block.request) return;
+
+  selectBlock(fileIdx, blockIdx);
+  sendBtn.disabled = true;
+  sendBtn.classList.add('loading');
+
+  try {
+    // Run through the test suite engine so assertions, extracts, and variables work
+    const singleSuite = { variables: file.suite.variables, blocks: [block] };
+    const results = await invoke('run_test_suite', {
+      suite: singleSuite,
+      extraVariables: collectVariablesArray()
+    });
+
+    // Store result at the correct original block index
+    if (!file.results) {
+      file.results = {
+        passed: 0, failed: 0, skipped: 0, total_time_ms: 0,
+        block_results: new Array(file.suite.blocks.length).fill(null),
+        final_variables: {}
+      };
+    }
+    const br = results.block_results?.[0];
+    if (br) {
+      file.results.block_results[blockIdx] = br;
+      // Carry extracted variables to env
+      if (results.final_variables) {
+        Object.entries(results.final_variables).forEach(([name, value]) => {
+          envVars[name] = value;
+        });
+      }
+    }
+
+    updateBlockStatuses();
+    renderEnvVars();
+
+    if (br?.response) {
+      lastResponse = br.response;
+      displayResponse(br.response);
+    } else if (br?.error) {
+      displayError(br.error);
+    }
+
+    // Update assertions panel
+    renderAssertions(fileIdx, blockIdx);
+
+    const status = br?.status || 'error';
+    showToast(`${block.name}: ${status}`, status === 'passed' ? 'success' : 'error');
+  } catch (err) {
+    displayError(err);
+    showToast(String(err), 'error');
+  } finally {
+    sendBtn.disabled = false;
+    sendBtn.classList.remove('loading');
+    refreshHistoryIfVisible();
+  }
+}
+
+// --- Test Results Bar ---
+function showTestResults(passed, failed, skipped, timeMs, blockResults, pendingBlocks) {
+  testResultsBar.classList.remove('hidden');
+
+  const pendingCount = pendingBlocks ? pendingBlocks.length : 0;
+  const total = passed + failed + skipped + pendingCount;
+
+  $('#resultsPassed').textContent = passed;
+  $('#resultsFailed').textContent = failed;
+  $('#resultsSkipped').textContent = skipped;
+  $('#resultsTotalTime').textContent = pendingCount > 0 ? '…' : timeMs;
+
+  if (total > 0) {
+    $('#progressPassed').style.width = `${(passed / total) * 100}%`;
+    $('#progressFailed').style.width = `${(failed / total) * 100}%`;
+    $('#progressSkipped').style.width = `${(skipped / total) * 100}%`;
+  } else {
+    $('#progressPassed').style.width = '0%';
+    $('#progressFailed').style.width = '0%';
+    $('#progressSkipped').style.width = '0%';
+  }
+
+  // Render details
+  testResultsDetails.innerHTML = '';
+
+  // Completed results
+  blockResults.forEach(br => {
+    const row = document.createElement('div');
+    const viewKey = `${br.fileIdx}-${br.blockIdx}`;
+    const isViewed = viewedResults.has(viewKey);
+    row.className = `result-detail-row${isViewed ? ' viewed' : ''}`;
+
+    const assertionCount = br.assertion_results?.length || 0;
+    const assertionPassed = br.assertion_results?.filter(a => a.passed).length || 0;
+    const allPassed = assertionCount > 0 && assertionPassed === assertionCount;
+    const assertClass = assertionCount === 0 ? '' : allPassed ? 'all-passed' : 'has-failed';
+    const assertText = assertionCount > 0 ? `${assertionPassed}/${assertionCount}` : '';
+
+    const extractCount = br.extract_results?.length || 0;
+    const extractOk = br.extract_results?.filter(e => e.success).length || 0;
+    const extractText = extractCount > 0 ? `${extractOk}/${extractCount} vars` : '';
+
+    // Determine failure reason
+    let failReasonHtml = '';
+    if (br.status === 'failed' || br.status === 'error') {
+      const failedAssertions = br.assertion_results?.filter(a => !a.passed) || [];
+      const hasAssertionFail = failedAssertions.length > 0;
+      const hasError = !!br.error;
+      const httpStatus = br.response?.status;
+      const isHttpError = httpStatus && httpStatus >= 400;
+
+      if (hasError) {
+        failReasonHtml = `<span class="detail-fail-reason fail-error" title="${escapeAttr(br.error)}">⚠ Error</span>`;
+      } else if (isHttpError && hasAssertionFail) {
+        failReasonHtml = `<span class="detail-fail-reason fail-both" title="HTTP ${httpStatus} + ${failedAssertions.length} assertion(s) failed">${httpStatus} + ✗${failedAssertions.length}</span>`;
+      } else if (isHttpError && !hasAssertionFail) {
+        failReasonHtml = `<span class="detail-fail-reason fail-status" title="HTTP ${httpStatus}">HTTP ${httpStatus}</span>`;
+      } else if (hasAssertionFail) {
+        failReasonHtml = `<span class="detail-fail-reason fail-assertion" title="${escapeAttr(failedAssertions.map(a => a.assertion || `${a.actual} ≠ ${a.expected}`).join(', '))}">✗ ${failedAssertions.length} assert</span>`;
+      }
+    }
+
+    const viewedIcon = isViewed ? '<span class="detail-viewed" title="Viewed">👁</span>' : '';
+
+    row.innerHTML = `
+      <span class="detail-status ${br.status}"></span>
+      <span class="detail-name">${escapeHtml(br.fileName ? br.fileName + ' \u2192 ' : '')}${escapeHtml(br.name)}</span>
+      ${failReasonHtml}
+      ${assertText ? `<span class="detail-assertions ${assertClass}">${assertText}</span>` : ''}
+      ${extractText ? `<span class="detail-extracts">${extractText}</span>` : ''}
+      <span class="detail-time">${br.time_ms} ms</span>
+      ${viewedIcon}
+    `;
+
+    if (br.fileIdx !== undefined && br.blockIdx !== undefined) {
+      row.style.cursor = 'pointer';
+      row.addEventListener('click', () => {
+        viewedResults.add(viewKey);
+        row.classList.add('viewed');
+        if (!row.querySelector('.detail-viewed')) {
+          row.insertAdjacentHTML('beforeend', '<span class="detail-viewed" title="Viewed">👁</span>');
+        }
+        selectBlock(br.fileIdx, br.blockIdx);
+        if (currentMode === 'code') setMode('builder');
+      });
+    }
+
+    testResultsDetails.appendChild(row);
+  });
+
+  // Pending / running rows — initially all shown as queued, Rust events will promote to running/completed
+  if (pendingBlocks) {
+    pendingBlocks.forEach(pb => {
+      const row = document.createElement('div');
+      row.className = 'result-detail-row queued';
+      row.dataset.blockName = pb.name;
+      row.dataset.fileIdx = pb.fileIdx;
+      row.dataset.blockIdx = pb.blockIdx;
+      row.innerHTML = `
+        <span class="detail-status queued"></span>
+        <span class="detail-name">${escapeHtml(pb.fileName ? pb.fileName + ' \u2192 ' : '')}${escapeHtml(pb.name)}</span>
+        <span class="detail-time queued-label"></span>
+      `;
+      testResultsDetails.appendChild(row);
+    });
+  }
+
+  // Auto-expand details if there are failures
+  if (failed > 0) {
+    testResultsDetails.classList.remove('hidden');
+  }
+}
+
+// --- Block Progress Streaming ---
+// Listens for Tauri "block-progress" events and updates result rows in-place.
+let blockProgressUnlisten = null;
+let streamingCounts = { passed: 0, failed: 0, skipped: 0, timeMs: 0 };
+
+async function startBlockProgressListener() {
+  streamingCounts = { passed: 0, failed: 0, skipped: 0, timeMs: 0 };
+  blockProgressUnlisten = await listen('block-progress', (event) => {
+    const p = event.payload;
+    // Find the pending row by block name
+    const row = testResultsDetails.querySelector(`.result-detail-row[data-block-name="${CSS.escape(p.name)}"]`);
+    if (!row) return;
+
+    if (p.status === 'running') {
+      // Transition from queued → running
+      row.className = 'result-detail-row pending';
+      const dot = row.querySelector('.detail-status');
+      if (dot) dot.className = 'detail-status running';
+      const timeEl = row.querySelector('.detail-time');
+      if (timeEl) { timeEl.className = 'detail-time pending-dots'; timeEl.textContent = ''; }
+    } else {
+      // Completed: passed/failed/error/skipped — update in place
+      row.className = 'result-detail-row';
+      row.style.cursor = 'pointer';
+
+      const dot = row.querySelector('.detail-status');
+      if (dot) dot.className = `detail-status ${p.status}`;
+
+      const timeEl = row.querySelector('.detail-time');
+      if (timeEl) { timeEl.className = 'detail-time'; timeEl.textContent = `${p.time_ms} ms`; }
+
+      // Add failure reason badge
+      if (p.status === 'failed' || p.status === 'error') {
+        const failSpan = document.createElement('span');
+        const hasAssertFail = p.assertion_total > 0 && p.assertion_passed < p.assertion_total;
+        const isHttpError = p.http_status && p.http_status >= 400;
+        const hasError = !!p.error;
+
+        if (hasError) {
+          failSpan.className = 'detail-fail-reason fail-error';
+          failSpan.title = p.error;
+          failSpan.textContent = '⚠ Error';
+        } else if (isHttpError && hasAssertFail) {
+          failSpan.className = 'detail-fail-reason fail-both';
+          failSpan.title = `HTTP ${p.http_status} + ${p.assertion_total - p.assertion_passed} assertion(s) failed`;
+          failSpan.textContent = `${p.http_status} + ✗${p.assertion_total - p.assertion_passed}`;
+        } else if (isHttpError) {
+          failSpan.className = 'detail-fail-reason fail-status';
+          failSpan.title = `HTTP ${p.http_status}`;
+          failSpan.textContent = `HTTP ${p.http_status}`;
+        } else if (hasAssertFail) {
+          failSpan.className = 'detail-fail-reason fail-assertion';
+          failSpan.textContent = `✗ ${p.assertion_total - p.assertion_passed} assert`;
+        }
+        if (failSpan.textContent) {
+          const nameEl = row.querySelector('.detail-name');
+          if (nameEl) nameEl.after(failSpan);
+        }
+      }
+
+      // Add assertion/extract info
+      if (p.assertion_total > 0) {
+        const allPassed = p.assertion_passed === p.assertion_total;
+        const assertSpan = document.createElement('span');
+        assertSpan.className = `detail-assertions ${allPassed ? 'all-passed' : 'has-failed'}`;
+        assertSpan.textContent = `${p.assertion_passed}/${p.assertion_total}`;
+        timeEl.parentNode.insertBefore(assertSpan, timeEl);
+      }
+      if (p.extract_total > 0) {
+        const extSpan = document.createElement('span');
+        extSpan.className = 'detail-extracts';
+        extSpan.textContent = `${p.extract_ok}/${p.extract_total} vars`;
+        timeEl.parentNode.insertBefore(extSpan, timeEl);
+      }
+
+      // Make clickable to inspect results and mark viewed
+      const fIdx = parseInt(row.dataset.fileIdx);
+      const bIdx = parseInt(row.dataset.blockIdx);
+      row.addEventListener('click', () => {
+        const vk = `${fIdx}-${bIdx}`;
+        viewedResults.add(vk);
+        row.classList.add('viewed');
+        if (!row.querySelector('.detail-viewed')) {
+          row.insertAdjacentHTML('beforeend', '<span class="detail-viewed" title="Viewed">👁</span>');
+        }
+        selectBlock(fIdx, bIdx);
+        if (currentMode === 'code') setMode('builder');
+      });
+
+      // Update streaming counts and progress bar
+      if (p.status === 'passed') streamingCounts.passed++;
+      else if (p.status === 'failed' || p.status === 'error') streamingCounts.failed++;
+      else if (p.status === 'skipped') streamingCounts.skipped++;
+      streamingCounts.timeMs += p.time_ms;
+
+      const sc = streamingCounts;
+      const pendingLeft = testResultsDetails.querySelectorAll('.result-detail-row.pending, .result-detail-row.queued').length;
+      const total = sc.passed + sc.failed + sc.skipped + pendingLeft;
+      $('#resultsPassed').textContent = sc.passed;
+      $('#resultsFailed').textContent = sc.failed;
+      $('#resultsSkipped').textContent = sc.skipped;
+      $('#resultsTotalTime').textContent = pendingLeft > 0 ? '…' : sc.timeMs;
+      if (total > 0) {
+        $('#progressPassed').style.width = `${(sc.passed / total) * 100}%`;
+        $('#progressFailed').style.width = `${(sc.failed / total) * 100}%`;
+        $('#progressSkipped').style.width = `${(sc.skipped / total) * 100}%`;
+      }
+
+      // Update sidebar status dots
+      updateBlockStatuses();
+    }
+
+    // Force browser repaint via requestAnimationFrame
+    requestAnimationFrame(() => {});
+  });
+}
+
+function stopBlockProgressListener() {
+  if (blockProgressUnlisten) {
+    blockProgressUnlisten();
+    blockProgressUnlisten = null;
+  }
+}
+
+// Toggle test results details
+testResultsSummary.addEventListener('click', () => {
+  testResultsDetails.classList.toggle('hidden');
+});
+
+// --- Env File Management ---
+
+function renderEnvVars() {
+  // Collect all variables defined across all loaded .http files
+  const definedVars = {};
+  loadedFiles.forEach(file => {
+    if (file.suite.variables) {
+      file.suite.variables.forEach(([name, value]) => {
+        definedVars[name] = value;
+      });
+    }
+  });
+
+  // Merge with env vars (env overrides .http defaults)
+  const merged = {};
+  Object.entries(definedVars).forEach(([name, httpDefault]) => {
+    const envVal = envVars[name];
+    if (envVal !== undefined && envVal !== '') {
+      merged[name] = { value: envVal, source: 'env', status: 'set' };
+    } else {
+      const isPlaceholder = httpDefault.startsWith('your-') || httpDefault === '' || httpDefault.includes('your-');
+      merged[name] = { value: httpDefault, source: 'http', status: isPlaceholder ? 'empty' : 'set' };
+    }
+  });
+
+  // Also show env vars not in any .http file
+  Object.entries(envVars).forEach(([name, value]) => {
+    if (!merged[name]) {
+      merged[name] = { value, source: 'env', status: value ? 'set' : 'empty' };
+    }
+  });
+
+  const entries = Object.entries(merged);
+
+  if (entries.length === 0) {
+    envList.innerHTML = '<div class="sidebar-empty">No .env file loaded</div>';
+    return;
+  }
+
+  // Show env file path if loaded
+  let html = '';
+  if (envFilePath) {
+    const shortPath = envFilePath.split(/[/\\]/).pop();
+    html += `<div class="env-file-path" title="${escapeAttr(envFilePath)}">\uD83D\uDCC4 ${escapeHtml(shortPath)}</div>`;
+  }
+
+  envList.innerHTML = html;
+
+  entries.forEach(([name, v]) => {
+    const row = document.createElement('div');
+    row.className = 'var-row';
+
+    const statusColor = v.status === 'set' ? 'var(--green)' : 'var(--red)';
+    const statusTitle = v.status === 'set' ? 'Value set' : 'Value not set';
+    const sourceIcon = v.source === 'env' ? '\uD83D\uDD10' : '\uD83D\uDCC4';
+    const sourceTitle = v.source === 'env' ? 'From .env file' : 'Default from .http file';
+
+    row.innerHTML = `
+      <span class="var-status" style="color:${statusColor}" title="${statusTitle}">\u25CF</span>
+      <span class="var-icon" title="${sourceTitle}">${sourceIcon}</span>
+      <input class="var-name" value="${escapeAttr(name)}" spellcheck="false" data-old-name="${escapeAttr(name)}">
+      <span class="var-sep">=</span>
+      <input class="var-value" value="${escapeAttr(v.value)}" spellcheck="false" placeholder="enter value..." data-var-name="${escapeAttr(name)}">
+      <button class="var-delete" title="Delete variable">\u2715</button>
+    `;
+
+    const nameInput = row.querySelector('.var-name');
+    const valueInput = row.querySelector('.var-value');
+    const deleteBtn = row.querySelector('.var-delete');
+
+    nameInput.addEventListener('change', () => {
+      const oldName = nameInput.dataset.oldName;
+      const newName = nameInput.value.trim();
+      if (newName && newName !== oldName) {
+        envVars[newName] = envVars[oldName] !== undefined ? envVars[oldName] : v.value;
+        delete envVars[oldName];
+        renderEnvVars();
+      }
+    });
+
+    valueInput.addEventListener('change', () => {
+      envVars[name] = valueInput.value;
+      renderEnvVars();
+    });
+
+    deleteBtn.addEventListener('click', () => {
+      delete envVars[name];
+      renderEnvVars();
+    });
+
+    envList.appendChild(row);
+  });
+
+  // Add built-in variables at bottom
+  const builtins = ['$timestamp', '$uuid', '$randomInt'];
+  builtins.forEach(name => {
+    const row = document.createElement('div');
+    row.className = 'var-row builtin';
+    row.innerHTML = `
+      <span class="var-status" style="color:var(--text-muted)">\u25CF</span>
+      <span class="var-icon">\u2699</span>
+      <span class="var-name" style="cursor:default;border:none">${name}</span>
+      <span class="var-sep">=</span>
+      <span class="var-value" style="cursor:default;border:none;font-style:italic">(auto)</span>
+    `;
+    envList.appendChild(row);
+  });
+}
+
+// --- Load .env file ---
+loadEnvBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  envFileInput.click();
+});
+
+envFileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const content = await file.text();
+  try {
+    envVars = {};
+    content.split('\n').forEach(line => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) return;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx > 0) {
+        const key = trimmed.substring(0, eqIdx).trim();
+        let value = trimmed.substring(eqIdx + 1).trim();
+        // Strip quotes
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1);
+        }
+        envVars[key] = value;
+      }
+    });
+    envFilePath = file.name;
+    renderEnvVars();
+    showToast(`Loaded ${Object.keys(envVars).length} variables from ${file.name}`, 'success');
+  } catch (err) {
+    showToast(`Failed to load .env: ${err}`, 'error');
+  }
+  envFileInput.value = '';
+});
+
+// --- Save .env file ---
+saveEnvBtn.addEventListener('click', async (e) => {
+  e.stopPropagation();
+
+  // Collect all variables: from .http files + env overrides + manually added
+  const allVars = {};
+  loadedFiles.forEach(file => {
+    if (file.suite.variables) {
+      file.suite.variables.forEach(([name, value]) => {
+        allVars[name] = envVars[name] !== undefined ? envVars[name] : value;
+      });
+    }
+  });
+  // Include any env-only vars (manually added or from .env file)
+  Object.entries(envVars).forEach(([name, value]) => {
+    allVars[name] = value;
+  });
+
+  // Generate .env content
+  let content = '# Request Pilot environment variables\n# Edit values below and save\n\n';
+  Object.entries(allVars).sort(([a], [b]) => a.localeCompare(b)).forEach(([key, value]) => {
+    if (value.includes(' ') || value.includes('#') || value.includes('=')) {
+      content += `${key}="${value}"\n`;
+    } else {
+      content += `${key}=${value}\n`;
+    }
+  });
+
+  // Use a download approach since we can't write to arbitrary paths from webview
+  const blob = new Blob([content], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = envFilePath || '.env';
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('Env file downloaded', 'success');
+});
+
+addEnvVarBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const name = `NEW_VAR_${Object.keys(envVars).length + 1}`;
+  envVars[name] = '';
+  renderEnvVars();
+  $('#envSection').classList.add('expanded');
+  // Focus the newly added name input
+  const inputs = envList.querySelectorAll('.var-name');
+  const lastInput = inputs[inputs.length - 1];
+  if (lastInput && lastInput.tagName === 'INPUT') {
+    lastInput.focus();
+    lastInput.select();
+  }
+});
+
+clearEnvBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (Object.keys(envVars).length === 0) {
+    showToast('No variables to clear', 'info');
+    return;
+  }
+  envVars = {};
+  envFilePath = '';
+  renderEnvVars();
+  showToast('All variables cleared', 'success');
+});
+
+// --- Run Group ---
+async function runGroup(fileIdx, groupName) {
+  const file = loadedFiles[fileIdx];
+  if (!file) return;
+
+  // Build a suite with setups + group blocks + teardowns (respecting disabled)
+  const groupBlocks = [];
+  const groupBlockIndices = [];
+  file.suite.blocks.forEach((block, blockIdx) => {
+    if (disabledBlocks[`${fileIdx}-${blockIdx}`]) return;
+    if (block.block_type === 'setup' || block.block_type === 'teardown' || block.group === groupName) {
+      groupBlocks.push(block);
+      groupBlockIndices.push(blockIdx);
+    }
+  });
+
+  if (groupBlocks.length === 0) {
+    showToast('All steps in this group are disabled', 'info');
+    return;
+  }
+
+  const suite = { variables: file.suite.variables, blocks: groupBlocks };
+
+  try {
+    const unresolved = await invoke('check_variables', { suite, envVars: collectVariablesArray() });
+    if (unresolved && unresolved.length > 0) {
+      promptForVariables(unresolved);
+      return;
+    }
+  } catch {}
+
+  setRunning(true);
+
+  // Clear only group block results
+  if (file.results) {
+    groupBlockIndices.forEach(idx => {
+      if (file.results.block_results) file.results.block_results[idx] = null;
+    });
+  }
+  updateBlockStatuses();
+
+  // Show group blocks as pending in results panel
+  const pendingBlocks = groupBlockIndices.map(origIdx => {
+    const block = file.suite.blocks[origIdx];
+    return {
+      fileName: file.name,
+      name: block.name || block.block_type,
+      blockType: block.block_type,
+      fileIdx,
+      blockIdx: origIdx
+    };
+  });
+  showTestResults(0, 0, 0, 0, [], pendingBlocks);
+  testResultsDetails.classList.remove('hidden');
+
+  await startBlockProgressListener();
+
+  try {
+    const results = await invoke('run_test_suite', { suite, extraVariables: collectVariablesArray() });
+
+    // Merge results into existing file results
+    if (!file.results) {
+      file.results = { block_results: new Array(file.suite.blocks.length).fill(null), passed: 0, failed: 0, skipped: 0, total_time_ms: 0 };
+    }
+    results.block_results.forEach(br => {
+      const matchIdx = groupBlockIndices.find(idx => file.suite.blocks[idx].name === br.name);
+      if (matchIdx !== undefined) file.results.block_results[matchIdx] = br;
+    });
+
+    if (results.final_variables) {
+      Object.entries(results.final_variables).forEach(([name, value]) => { envVars[name] = value; });
+    }
+
+    updateBlockStatuses();
+    renderEnvVars();
+
+    const blockResultsForDisplay = [];
+    groupBlockIndices.forEach(origIdx => {
+      const br = file.results.block_results[origIdx];
+      if (br) blockResultsForDisplay.push({ ...br, fileName: file.name, fileIdx, blockIdx: origIdx });
+    });
+    showTestResults(results.passed, results.failed, results.skipped, results.total_time_ms, blockResultsForDisplay);
+  } catch (err) {
+    showToast(`Group run failed: ${err}`, 'error');
+  } finally {
+    stopBlockProgressListener();
+    setRunning(false);
+  }
+}
+
+// --- Run Single File ---
+async function runSingleFile(fileIdx) {
+  const file = loadedFiles[fileIdx];
+  if (!file) return;
+
+  const suite = getEnabledSuite(fileIdx);
+  if (!suite || suite.blocks.length === 0) {
+    showToast('All steps are disabled', 'info');
+    return;
+  }
+
+  // Check for unresolved variables (only enabled blocks)
+  try {
+    const unresolved = await invoke('check_variables', {
+      suite,
+      envVars: collectVariablesArray()
+    });
+    if (unresolved && unresolved.length > 0) {
+      promptForVariables(unresolved);
+      return;
+    }
+  } catch {}
+
+  setRunning(true);
+
+  file.results = null;
+  updateBlockStatuses();
+
+  // Show all enabled blocks as pending
+  const enabledMap = getEnabledIndexMap(fileIdx);
+  const pendingBlocks = enabledMap.map(origIdx => {
+    const block = file.suite.blocks[origIdx];
+    return {
+      fileName: file.name,
+      name: block.name || block.block_type,
+      blockType: block.block_type,
+      fileIdx,
+      blockIdx: origIdx
+    };
+  });
+  showTestResults(0, 0, 0, 0, [], pendingBlocks);
+  testResultsDetails.classList.remove('hidden');
+
+  // Start listening for per-block progress
+  await startBlockProgressListener();
+
+  try {
+    const results = await invoke('run_test_suite', {
+      suite,
+      extraVariables: collectVariablesArray()
+    });
+
+    // Remap results to align with original block indices
+    file.results = remapResults(fileIdx, results);
+    pushRunHistory(file.name, results);
+
+    // Carry extracted variables forward
+    if (results.final_variables) {
+      Object.entries(results.final_variables).forEach(([name, value]) => {
+        envVars[name] = value;
+      });
+    }
+
+    updateBlockStatuses();
+    renderEnvVars();
+
+    // Final reconciliation — rebuild results bar with full data
+    const blockResultsForDisplay = [];
+    file.results.block_results.forEach((br, origIdx) => {
+      if (br) blockResultsForDisplay.push({ ...br, fileName: file.name, fileIdx, blockIdx: origIdx });
+    });
+    showTestResults(results.passed, results.failed, results.skipped, results.total_time_ms, blockResultsForDisplay);
+
+    // Select first enabled block with results
+    const firstResultIdx = file.results.block_results.findIndex(br => br != null);
+    if (firstResultIdx >= 0) {
+      selectBlock(fileIdx, firstResultIdx);
+    }
+  } catch (err) {
+    showToast(`Error running ${file.name}: ${err}`, 'error');
+  } finally {
+    stopBlockProgressListener();
+    setRunning(false);
+    refreshHistoryIfVisible();
+  }
+}
+
+// --- Variable Validation ---
+async function checkUnresolvedVars(fileIdx) {
+  const suite = getEnabledSuite(fileIdx);
+  if (!suite) return [];
+
+  try {
+    const unresolved = await invoke('check_variables', {
+      suite,
+      envVars: collectVariablesArray()
+    });
+    return unresolved;
+  } catch {
+    return [];
+  }
+}
+
+function promptForVariables(unresolved) {
+  const names = unresolved.join(', ');
+  showToast(`Missing variables: ${names}. Set them in the Environment panel or load a .env file.`, 'error');
+
+  // Highlight the env section and scroll to it
+  $('#envSection').classList.add('expanded');
+
+  // Add the missing variables to envVars with empty values so they show up red
+  unresolved.forEach(name => {
+    if (envVars[name] === undefined) {
+      envVars[name] = '';
+    }
+  });
+  renderEnvVars();
+}
+
+// --- Toast ---
+function showToast(message, type = 'info') {
+  const container = $('#toastContainer');
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(10px)';
+    toast.style.transition = 'all .25s ease';
+    setTimeout(() => toast.remove(), 250);
+  }, 3000);
+}
+
+// --- Utilities ---
+
+function escapeAttr(str) {
+  return String(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
+function truncateUrl(url) {
+  try {
+    const u = new URL(url);
+    const path = u.pathname + u.search;
+    return path.length > 35 ? path.slice(0, 35) + '\u2026' : path || url;
+  } catch {
+    return url.length > 40 ? url.slice(0, 40) + '\u2026' : url;
+  }
+}
+
+// --- Mode Toggle (Builder / Code) ---
+modeToggle.addEventListener('click', (e) => {
+  const btn = e.target.closest('.mode-btn');
+  if (!btn || btn.dataset.mode === currentMode) return;
+  switchMode(btn.dataset.mode);
+});
+
+async function switchMode(mode) {
+  if (mode === currentMode) return;
+
+  // When leaving code mode, sync code back to builder
+  if (currentMode === 'code') {
+    const ok = await syncCodeToBuilder();
+    if (!ok) return;
+  }
+
+  // When leaving history mode, close detail panel
+  if (currentMode === 'history') {
+    closeHistoryDetail();
+  }
+
+  // When entering code mode, sync builder to code editor
+  if (mode === 'code') {
+    await syncBuilderToCode();
+  }
+
+  currentMode = mode;
+
+  modeToggle.querySelectorAll('.mode-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === mode);
+  });
+
+  // Hide all mode-specific panels
+  urlBar.classList.add('hidden');
+  splitPanels.classList.add('hidden');
+  codeEditorPanel.classList.add('hidden');
+  historyPanel.classList.add('hidden');
+
+  // Show the appropriate panels
+  if (mode === 'builder') {
+    urlBar.classList.remove('hidden');
+    splitPanels.classList.remove('hidden');
+  } else if (mode === 'code') {
+    codeEditorPanel.classList.remove('hidden');
+  } else if (mode === 'history') {
+    historyPanel.classList.remove('hidden');
+    loadHistory();
+  }
+}
+
+async function syncBuilderToCode() {
+  if (activeFileIndex >= 0 && loadedFiles[activeFileIndex]) {
+    const file = loadedFiles[activeFileIndex];
+    try {
+      // Use raw file content as base, then apply disabled markers
+      if (file.content) {
+        const content = applyDisabledFlags(file.content, activeFileIndex);
+        codeEditor.value = content;
+        codeEditorContent = content;
+      } else {
+        // No raw content — generate from suite
+        const content = await invoke('generate_http', { suite: buildSuiteWithDisabledFlags(activeFileIndex) });
+        codeEditor.value = content;
+        codeEditorContent = content;
+      }
+      codeEditorFilename.textContent = file.name;
+    } catch (err) {
+      showToast(`Failed to generate: ${err}`, 'error');
+    }
+  } else {
+    codeEditor.value = '';
+    codeEditorContent = '';
+    codeEditorFilename.textContent = 'untitled.http';
+  }
+  codeEditorModified = false;
+  codeEditor.classList.remove('modified');
+  updateHighlight();
+}
+
+// Apply # @disabled markers to raw file content based on disabledBlocks state
+function applyDisabledFlags(content, fileIdx) {
+  const lines = content.split('\n');
+  const result = [];
+  let blockIdx = -1;
+  let needsDisabledMarker = false;
+  let hasDisabledMarker = false;
+  let inVariablesBlock = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+
+    if (trimmed.startsWith('@variables')) {
+      inVariablesBlock = true;
+    }
+
+    // Detect block separator
+    if (trimmed.startsWith('###')) {
+      inVariablesBlock = false;
+      blockIdx++;
+      needsDisabledMarker = !!disabledBlocks[`${fileIdx}-${blockIdx}`];
+      hasDisabledMarker = false;
+      result.push(lines[i]);
+      continue;
+    }
+
+    // Check if this line is an existing # @disabled marker
+    if (trimmed === '# @disabled') {
+      hasDisabledMarker = true;
+      if (needsDisabledMarker) {
+        result.push(lines[i]); // keep it
+      }
+      // else skip it (block was re-enabled)
+      continue;
+    }
+
+    // If we're at a non-comment, non-empty line after ### and need a disabled marker, inject it
+    if (needsDisabledMarker && !hasDisabledMarker && blockIdx >= 0 &&
+        trimmed !== '' && !trimmed.startsWith('#') && !trimmed.startsWith('@') && !inVariablesBlock) {
+      // Insert # @disabled before the request line
+      result.push('# @disabled');
+      hasDisabledMarker = true;
+    }
+
+    result.push(lines[i]);
+  }
+  return result.join('\n');
+}
+
+// Build suite with disabled flags set on blocks for code generation
+function buildSuiteWithDisabledFlags(fileIdx) {
+  const file = loadedFiles[fileIdx];
+  if (!file) return { variables: [], blocks: [] };
+  const blocks = file.suite.blocks.map((block, blockIdx) => ({
+    ...block,
+    disabled: !!disabledBlocks[`${fileIdx}-${blockIdx}`]
+  }));
+  return { variables: file.suite.variables, blocks };
+}
+
+async function syncCodeToBuilder() {
+  const content = codeEditor.value;
+  if (!content.trim()) return true;
+
+  try {
+    const suite = await invoke('parse_test_file', { content });
+
+    if (activeFileIndex >= 0 && loadedFiles[activeFileIndex]) {
+      loadedFiles[activeFileIndex].suite = suite;
+      loadedFiles[activeFileIndex].content = content;
+      loadedFiles[activeFileIndex].results = null;
+    } else {
+      const name = codeEditorFilename.textContent || 'untitled.http';
+      loadedFiles.push({ name, content, suite, results: null });
+      activeFileIndex = loadedFiles.length - 1;
+    }
+
+    // Sync disabled state from parsed # @disabled directives
+    syncDisabledFromSuite(activeFileIndex);
+
+    renderFileTree();
+    renderEnvVars();
+
+    if (suite.blocks.length > 0) {
+      selectBlock(activeFileIndex, 0);
+    }
+
+    codeEditorContent = content;
+    codeEditorModified = false;
+    codeEditor.classList.remove('modified');
+    return true;
+  } catch (err) {
+    showToast(`Parse error: ${err}`, 'error');
+    return false;
+  }
+}
+
+// Sync disabledBlocks state from suite's block.disabled flags
+function syncDisabledFromSuite(fileIdx) {
+  const file = loadedFiles[fileIdx];
+  if (!file) return;
+  file.suite.blocks.forEach((block, blockIdx) => {
+    const key = `${fileIdx}-${blockIdx}`;
+    if (block.disabled) {
+      disabledBlocks[key] = true;
+    } else {
+      delete disabledBlocks[key];
+    }
+  });
+}
+
+// --- Syntax Highlighting ---
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function highlightVariables(html) {
+  return html.replace(/(\{\{)(.*?)(\}\})/g, (_, open, name, close) => {
+    return `<span class="hl-variable">${open}${name}${close}</span>`;
+  });
+}
+
+function highlightJsonLine(line) {
+  const escaped = escapeHtml(line);
+  let result = escaped
+    .replace(/("(?:[^"\\]|\\.)*")\s*:/g, '<span class="hl-string">$1</span>:')
+    .replace(/:\s*("(?:[^"\\]|\\.)*")/g, ': <span class="hl-string">$1</span>')
+    .replace(/:\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/g, ': <span class="hl-number">$1</span>')
+    .replace(/:\s*\b(true|false|null)\b/g, ': <span class="hl-keyword">$1</span>')
+    .replace(/([{}\[\]])/g, '<span class="hl-brace">$1</span>');
+  // Standalone values in arrays
+  result = result
+    .replace(/(,\s*)("(?:[^"\\]|\\.)*")/g, '$1<span class="hl-string">$2</span>')
+    .replace(/(,\s*)(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/g, '$1<span class="hl-number">$2</span>')
+    .replace(/(,\s*)\b(true|false|null)\b/g, '$1<span class="hl-keyword">$2</span>');
+  return highlightVariables(result);
+}
+
+function highlightHttpCode(text) {
+  const lines = text.split('\n');
+  let inJsonBody = false;
+  let inVariablesBlock = false;
+
+  return lines.map(line => {
+    // Separator lines: ###
+    if (/^###/.test(line)) {
+      inJsonBody = false;
+      inVariablesBlock = false;
+      const escaped = escapeHtml(line);
+      // Check for block types
+      const btMatch = escaped.match(/(@(?:setup|test|teardown|variables))\b/);
+      if (btMatch) {
+        const highlighted = escaped.replace(btMatch[1], `<span class="hl-block-type">${btMatch[1]}</span>`);
+        return `<span class="hl-separator">${highlightVariables(highlighted)}</span>`;
+      }
+      return `<span class="hl-separator">${highlightVariables(escaped)}</span>`;
+    }
+
+    // @variables at start of line
+    if (/^@variables\b/.test(line)) {
+      inJsonBody = false;
+      inVariablesBlock = true;
+      const escaped = escapeHtml(line);
+      return escaped.replace(/^(@variables)/, '<span class="hl-block-type">$1</span>');
+    }
+
+    // Variable assignment lines (both "@name = value" and "name = value" inside variables block)
+    if (inVariablesBlock && /^\w+\s*=/.test(line)) {
+      const escaped = escapeHtml(line);
+      return highlightVariables(escaped.replace(/^(\w+)(\s*=\s*)(.*)$/, '<span class="hl-header-name">$1</span><span class="hl-operator">$2</span><span class="hl-header-value">$3</span>'));
+    }
+
+    // Directive lines: # @assert, # @extract, # @name, # @description, # @group, # @depends
+    if (/^#\s*@(assert|extract|name|description|group|depends)\b/.test(line)) {
+      inJsonBody = false;
+      const escaped = escapeHtml(line);
+      const withOps = escaped.replace(/(==|!=|&gt;=|&lt;=|&gt;|&lt;|contains|matches|exists|isType)/g, '<span class="hl-operator">$1</span>');
+      return highlightVariables(`<span class="hl-directive">${withOps}</span>`);
+    }
+
+    // Disabled directive: # @disabled
+    if (/^#\s*@disabled\s*$/.test(line)) {
+      inJsonBody = false;
+      return `<span class="hl-disabled">${escapeHtml(line)}</span>`;
+    }
+
+    // Comment lines: # (but not directives)
+    if (/^#/.test(line)) {
+      inJsonBody = false;
+      return `<span class="hl-comment">${highlightVariables(escapeHtml(line))}</span>`;
+    }
+
+    // HTTP method lines: METHOD URL
+    const methodMatch = line.match(/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(.*)$/);
+    if (methodMatch) {
+      inJsonBody = false;
+      inVariablesBlock = false;
+      return `<span class="hl-method">${escapeHtml(methodMatch[1])}</span> ${highlightVariables(escapeHtml(methodMatch[2]).replace(/^(\S+)/, '<span class="hl-url">$1</span>'))}`;
+    }
+
+    // Header lines: Name: value (only when not in JSON body)
+    if (!inJsonBody && /^[A-Za-z][\w-]*\s*:/.test(line)) {
+      const colonIdx = line.indexOf(':');
+      const name = line.substring(0, colonIdx);
+      const value = line.substring(colonIdx + 1);
+      return `<span class="hl-header-name">${escapeHtml(name)}</span>:${highlightVariables(`<span class="hl-header-value">${escapeHtml(value)}</span>`)}`;
+    }
+
+    // Detect start of JSON body
+    if (/^\s*[\[{]/.test(line)) {
+      inJsonBody = true;
+    }
+
+    // JSON body or blank lines
+    if (inJsonBody) {
+      return highlightJsonLine(line);
+    }
+
+    // Variable assignment lines like @baseUrl = ...
+    if (/^@\w+/.test(line)) {
+      const escaped = escapeHtml(line);
+      return highlightVariables(escaped.replace(/^(@\w+)(\s*=\s*)(.*)$/, '<span class="hl-header-name">$1</span><span class="hl-operator">$2</span><span class="hl-header-value">$3</span>'));
+    }
+
+    // Blank or unrecognized lines
+    if (line.trim() === '') {
+      inJsonBody = false;
+      if (inVariablesBlock) inVariablesBlock = false;
+    }
+    return highlightVariables(escapeHtml(line));
+  }).join('\n');
+}
+
+function updateLineNumbers(text) {
+  const count = text.split('\n').length;
+  const nums = [];
+  for (let i = 1; i <= count; i++) nums.push(i);
+  codeLineNumbers.textContent = nums.join('\n');
+}
+
+function updateHighlight() {
+  const text = codeEditor.value;
+  codeEditorHighlightCode.innerHTML = highlightHttpCode(text) + '\n';
+  updateLineNumbers(text);
+  syncEditorScroll();
+}
+
+function syncEditorScroll() {
+  codeEditorHighlight.scrollTop = codeEditor.scrollTop;
+  codeEditorHighlight.scrollLeft = codeEditor.scrollLeft;
+  codeLineNumbers.scrollTop = codeEditor.scrollTop;
+}
+
+// --- Code Editor Events ---
+codeEditor.addEventListener('input', () => {
+  codeEditorModified = codeEditor.value !== codeEditorContent;
+  codeEditor.classList.toggle('modified', codeEditorModified);
+  updateHighlight();
+});
+
+codeEditor.addEventListener('scroll', syncEditorScroll);
+
+codeEditor.addEventListener('keydown', (e) => {
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    const start = codeEditor.selectionStart;
+    const end = codeEditor.selectionEnd;
+    codeEditor.value = codeEditor.value.substring(0, start) + '  ' + codeEditor.value.substring(end);
+    codeEditor.selectionStart = codeEditor.selectionEnd = start + 2;
+    codeEditor.dispatchEvent(new Event('input'));
+  }
+});
+
+codeSaveBtn.addEventListener('click', async () => {
+  await syncCodeToBuilder();
+  showToast('File saved', 'success');
+});
+
+codeRevertBtn.addEventListener('click', () => {
+  codeEditor.value = codeEditorContent;
+  codeEditorModified = false;
+  codeEditor.classList.remove('modified');
+  updateHighlight();
+  showToast('Reverted to last saved', 'info');
+});
+
+// --- New File ---
+newFileBtn.addEventListener('click', () => {
+  const template = `### @variables
+@baseUrl = https://api.example.com
+
+### @test Health Check
+GET {{baseUrl}}/health
+
+# @assert response.status == 200
+`;
+
+  const name = 'untitled.http';
+
+  invoke('parse_test_file', { content: template }).then(parsedSuite => {
+    loadedFiles.push({ name, content: template, suite: parsedSuite, results: null });
+    activeFileIndex = loadedFiles.length - 1;
+    activeBlockIndex = -1;
+
+    renderFileTree();
+    renderEnvVars();
+
+    // Switch to code mode for editing
+    switchMode('code');
+    codeEditor.value = template;
+    codeEditorContent = template;
+    codeEditorFilename.textContent = name;
+    codeEditorModified = false;
+    codeEditor.classList.remove('modified');
+    updateHighlight();
+
+    codeEditor.focus();
+
+    showToast('New file created — edit in code mode', 'success');
+  }).catch(err => {
+    showToast(`Error: ${err}`, 'error');
+  });
+});
+
+// --- History Tab ---
+
+function refreshHistoryIfVisible() {
+  if (currentMode === 'history') loadHistory();
+}
+
+function buildHistoryFilter() {
+  const filter = {};
+  const method = historyMethodFilter.value;
+  if (method) filter.method = method;
+  const status = historyStatusFilter.value;
+  if (status === '2xx') { filter.status_min = 200; filter.status_max = 299; }
+  else if (status === '3xx') { filter.status_min = 300; filter.status_max = 399; }
+  else if (status === '4xx') { filter.status_min = 400; filter.status_max = 499; }
+  else if (status === '5xx') { filter.status_min = 500; filter.status_max = 599; }
+  const source = historySourceFilter.value;
+  if (source) filter.source = source;
+  const urlSearch = historyUrlSearch.value.trim();
+  if (urlSearch) filter.url_contains = urlSearch;
+  return filter;
+}
+
+async function loadHistory() {
+  try {
+    const filter = buildHistoryFilter();
+    const hasFilter = Object.keys(filter).length > 0;
+    historyCache = hasFilter
+      ? await invoke('get_filtered_history', { filter })
+      : await invoke('get_history');
+    renderHistoryStats(historyCache);
+    renderHistoryLog(historyCache);
+    historyCountBadge.textContent = historyCache.length;
+  } catch (err) {
+    historyCache = [];
+    renderHistoryStats([]);
+    renderHistoryLog([]);
+    historyCountBadge.textContent = '0';
+  }
+}
+
+function historyPercentile(arr, p) {
+  if (arr.length === 0) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const idx = Math.ceil(p / 100 * sorted.length) - 1;
+  return sorted[Math.max(0, idx)];
+}
+
+function renderPercentileBar(label, value, max) {
+  const pct = max > 0 ? (value / max) * 100 : 0;
+  const color = value < 200 ? 'var(--green)' : value < 500 ? 'var(--orange)' : 'var(--red)';
+  return `
+    <div class="hist-perc-bar">
+      <span class="hist-perc-label">${label}</span>
+      <div class="hist-perc-track">
+        <div class="hist-perc-fill" style="width:${pct}%;background:${color}"></div>
+      </div>
+      <span class="hist-perc-value">${value}ms</span>
+    </div>`;
+}
+
+function renderHistoryStats(entries) {
+  if (entries.length === 0) {
+    historyStats.innerHTML = '<div class="history-stats-empty">No history entries</div>';
+    return;
+  }
+  const total = entries.length;
+  const success = entries.filter(e => e.status >= 200 && e.status < 400).length;
+  const client4xx = entries.filter(e => e.status >= 400 && e.status < 500).length;
+  const server5xx = entries.filter(e => e.status >= 500).length;
+  const times = entries.map(e => e.response_time_ms).filter(t => t > 0);
+  const avgTime = times.length > 0 ? Math.round(times.reduce((a, b) => a + b, 0) / times.length) : 0;
+  const p50 = historyPercentile(times, 50);
+  const p90 = historyPercentile(times, 90);
+  const p95 = historyPercentile(times, 95);
+  const p99 = historyPercentile(times, 99);
+  const maxTime = times.length > 0 ? Math.max(...times) : 0;
+  const methods = {};
+  entries.forEach(e => { methods[e.method] = (methods[e.method] || 0) + 1; });
+  const methodChips = Object.entries(methods)
+    .sort((a, b) => b[1] - a[1])
+    .map(([m, count]) => `<span class="hist-method-chip method-${m}">${m} <span class="method-chip-count">${count}</span></span>`)
+    .join('');
+  const maxForBar = maxTime || 1;
+  historyStats.innerHTML = `
+    <div class="history-stat-cards">
+      <div class="hist-stat-card">
+        <div class="hist-stat-value">${total}</div>
+        <div class="hist-stat-label">Total Requests</div>
+      </div>
+      <div class="hist-stat-card">
+        <div class="hist-stat-value hist-stat-success">${success}</div>
+        <div class="hist-stat-label">Success (2xx/3xx)</div>
+      </div>
+      <div class="hist-stat-card">
+        <div class="hist-stat-value hist-stat-warning">${client4xx}</div>
+        <div class="hist-stat-label">Client Errors (4xx)</div>
+      </div>
+      <div class="hist-stat-card">
+        <div class="hist-stat-value hist-stat-danger">${server5xx}</div>
+        <div class="hist-stat-label">Server Errors (5xx)</div>
+      </div>
+      <div class="hist-stat-card">
+        <div class="hist-stat-value">${avgTime}<span class="hist-stat-unit">ms</span></div>
+        <div class="hist-stat-label">Avg Response Time</div>
+      </div>
+    </div>
+    <div class="history-stat-details">
+      <div class="history-percentiles">
+        <div class="hist-section-title">Response Time Percentiles</div>
+        ${renderPercentileBar('P50', p50, maxForBar)}
+        ${renderPercentileBar('P90', p90, maxForBar)}
+        ${renderPercentileBar('P95', p95, maxForBar)}
+        ${renderPercentileBar('P99', p99, maxForBar)}
+        ${renderPercentileBar('Max', maxTime, maxForBar)}
+      </div>
+      <div class="history-methods">
+        <div class="hist-section-title">HTTP Methods</div>
+        <div class="hist-method-chips">${methodChips}</div>
+      </div>
+    </div>`;
+}
+
+function renderHistoryLog(entries) {
+  historyLog.innerHTML = '';
+  // Reset selection state on re-render
+  historySelectedIds.clear();
+  updateHistoryCompareBtn();
+
+  if (entries.length === 0) {
+    historyLog.innerHTML = `<div class="history-empty"><div class="empty-icon">📊</div><p>No history entries match your filters</p></div>`;
+    return;
+  }
+
+  const groupBy = historyGroupBySelect.value;
+  switch (groupBy) {
+    case 'domain-path': renderGroupedByDomainPath(entries); break;
+    case 'url': renderGroupedByUrl(entries); break;
+    case 'status': renderGroupedByStatus(entries); break;
+    case 'source': renderGroupedBySource(entries); break;
+    default: renderFlatList(entries); break;
+  }
+}
+
+function renderGroupedByUrl(entries) {
+  const groups = new Map();
+  entries.forEach(entry => {
+    const key = `${entry.method} ${entry.url}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(entry);
+  });
+  groups.forEach((groupEntries, key) => {
+    const group = document.createElement('div');
+    group.className = 'hist-group';
+    group.dataset.groupKey = key;
+    const isExpanded = historyExpandedGroups.has(key);
+    if (isExpanded) group.classList.add('expanded');
+    const successCount = groupEntries.filter(e => e.status >= 200 && e.status < 400).length;
+    const failCount = groupEntries.length - successCount;
+    const avgTime = Math.round(groupEntries.reduce((sum, e) => sum + e.response_time_ms, 0) / groupEntries.length);
+    const firstEntry = groupEntries[0];
+    const header = document.createElement('div');
+    header.className = 'hist-group-header';
+    header.innerHTML = `
+      <span class="hist-group-arrow">${isExpanded ? '▾' : '▸'}</span>
+      <span class="hist-entry-method method-${firstEntry.method}">${firstEntry.method}</span>
+      <span class="hist-group-url" title="${escapeAttr(firstEntry.url)}">${escapeHtml(firstEntry.url)}</span>
+      <span class="hist-group-count">${groupEntries.length}</span>
+      <span class="hist-group-time">${avgTime}ms</span>
+      <span class="hist-group-success">✓${successCount}</span>
+      ${failCount > 0 ? `<span class="hist-group-fail">✗${failCount}</span>` : ''}
+    `;
+    header.addEventListener('click', () => {
+      if (historyExpandedGroups.has(key)) {
+        historyExpandedGroups.delete(key);
+      } else {
+        historyExpandedGroups.add(key);
+      }
+      group.classList.toggle('expanded');
+      header.querySelector('.hist-group-arrow').textContent = group.classList.contains('expanded') ? '▾' : '▸';
+    });
+    const body = document.createElement('div');
+    body.className = 'hist-group-body';
+    groupEntries.forEach(entry => body.appendChild(createHistoryEntryRow(entry)));
+    group.appendChild(header);
+    group.appendChild(body);
+    historyLog.appendChild(group);
+  });
+}
+
+function renderFlatList(entries) {
+  entries.forEach(entry => historyLog.appendChild(createHistoryEntryRow(entry)));
+}
+
+function renderGroupedByDomainPath(entries) {
+  const domainMap = new Map();
+
+  entries.forEach(entry => {
+    let domain, path;
+    try {
+      const u = new URL(entry.url);
+      domain = u.origin;
+      path = u.pathname;
+    } catch {
+      domain = '(invalid URL)';
+      path = entry.url;
+    }
+    if (!domainMap.has(domain)) domainMap.set(domain, new Map());
+    const pathMap = domainMap.get(domain);
+    if (!pathMap.has(path)) pathMap.set(path, []);
+    pathMap.get(path).push(entry);
+  });
+
+  const sortedDomains = [...domainMap.entries()].sort((a, b) => {
+    const countA = [...a[1].values()].reduce((s, arr) => s + arr.length, 0);
+    const countB = [...b[1].values()].reduce((s, arr) => s + arr.length, 0);
+    return countB - countA;
+  });
+
+  for (const [domain, pathMap] of sortedDomains) {
+    const domainEntries = [...pathMap.values()].flat();
+    const domainKey = `domain:${domain}`;
+    const isDomainExpanded = historyExpandedGroups.has(domainKey);
+
+    const successCount = domainEntries.filter(e => e.status >= 200 && e.status < 400).length;
+    const failCount = domainEntries.length - successCount;
+    const avgTime = Math.round(domainEntries.reduce((s, e) => s + e.response_time_ms, 0) / domainEntries.length);
+
+    const domainGroup = document.createElement('div');
+    domainGroup.className = 'hist-domain-group' + (isDomainExpanded ? ' expanded' : '');
+    domainGroup.dataset.groupKey = domainKey;
+
+    const domainHeader = document.createElement('div');
+    domainHeader.className = 'hist-domain-header';
+    domainHeader.innerHTML = `
+      <span class="hist-group-arrow">${isDomainExpanded ? '▾' : '▸'}</span>
+      <span class="hist-domain-name">${escapeHtml(domain)}</span>
+      <span class="hist-group-count">${domainEntries.length}</span>
+      <span class="hist-group-time">${avgTime}ms</span>
+      <span class="hist-group-success">✓${successCount}</span>
+      ${failCount > 0 ? `<span class="hist-group-fail">✗${failCount}</span>` : ''}
+    `;
+
+    domainHeader.addEventListener('click', () => {
+      if (historyExpandedGroups.has(domainKey)) {
+        historyExpandedGroups.delete(domainKey);
+      } else {
+        historyExpandedGroups.add(domainKey);
+      }
+      domainGroup.classList.toggle('expanded');
+      domainHeader.querySelector('.hist-group-arrow').textContent =
+        domainGroup.classList.contains('expanded') ? '▾' : '▸';
+    });
+
+    const domainBody = document.createElement('div');
+    domainBody.className = 'hist-domain-body';
+
+    const sortedPaths = [...pathMap.entries()].sort((a, b) => b[1].length - a[1].length);
+
+    for (const [path, pathEntries] of sortedPaths) {
+      const pathKey = `path:${domain}${path}`;
+      const isPathExpanded = historyExpandedGroups.has(pathKey);
+      const pathSuccess = pathEntries.filter(e => e.status >= 200 && e.status < 400).length;
+      const pathFail = pathEntries.length - pathSuccess;
+      const pathAvg = Math.round(pathEntries.reduce((s, e) => s + e.response_time_ms, 0) / pathEntries.length);
+
+      const pathGroup = document.createElement('div');
+      pathGroup.className = 'hist-path-group' + (isPathExpanded ? ' expanded' : '');
+      pathGroup.dataset.groupKey = pathKey;
+
+      const pathHeader = document.createElement('div');
+      pathHeader.className = 'hist-path-header';
+      pathHeader.innerHTML = `
+        <span class="hist-group-arrow">${isPathExpanded ? '▾' : '▸'}</span>
+        <span class="hist-path-name">${escapeHtml(path)}</span>
+        <span class="hist-group-count">${pathEntries.length}</span>
+        <span class="hist-group-time">${pathAvg}ms</span>
+        <span class="hist-group-success">✓${pathSuccess}</span>
+        ${pathFail > 0 ? `<span class="hist-group-fail">✗${pathFail}</span>` : ''}
+      `;
+
+      pathHeader.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (historyExpandedGroups.has(pathKey)) {
+          historyExpandedGroups.delete(pathKey);
+        } else {
+          historyExpandedGroups.add(pathKey);
+        }
+        pathGroup.classList.toggle('expanded');
+        pathHeader.querySelector('.hist-group-arrow').textContent =
+          pathGroup.classList.contains('expanded') ? '▾' : '▸';
+      });
+
+      const pathBody = document.createElement('div');
+      pathBody.className = 'hist-path-body';
+      pathEntries.forEach(entry => pathBody.appendChild(createHistoryEntryRow(entry)));
+
+      pathGroup.appendChild(pathHeader);
+      pathGroup.appendChild(pathBody);
+      domainBody.appendChild(pathGroup);
+    }
+
+    domainGroup.appendChild(domainHeader);
+    domainGroup.appendChild(domainBody);
+    historyLog.appendChild(domainGroup);
+  }
+}
+
+function renderGroupedByStatus(entries) {
+  const groups = new Map();
+  entries.forEach(entry => {
+    const key = entry.status >= 200 && entry.status < 300 ? '2xx Success'
+      : entry.status >= 300 && entry.status < 400 ? '3xx Redirect'
+      : entry.status >= 400 && entry.status < 500 ? '4xx Client Error'
+      : entry.status >= 500 ? '5xx Server Error'
+      : 'Error/Unknown';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(entry);
+  });
+
+  const order = ['2xx Success', '3xx Redirect', '4xx Client Error', '5xx Server Error', 'Error/Unknown'];
+  for (const statusGroup of order) {
+    const groupEntries = groups.get(statusGroup);
+    if (!groupEntries || groupEntries.length === 0) continue;
+    renderGenericGroup(statusGroup, groupEntries, `status:${statusGroup}`);
+  }
+}
+
+function renderGroupedBySource(entries) {
+  const groups = new Map();
+  entries.forEach(entry => {
+    const key = entry.source === 'test-run' ? 'Test Run' : 'Manual';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(entry);
+  });
+  for (const [name, groupEntries] of groups) {
+    renderGenericGroup(name, groupEntries, `source:${name}`);
+  }
+}
+
+function renderGenericGroup(title, groupEntries, groupKey) {
+  const group = document.createElement('div');
+  group.className = 'hist-group';
+  group.dataset.groupKey = groupKey;
+  const isExpanded = historyExpandedGroups.has(groupKey);
+  if (isExpanded) group.classList.add('expanded');
+
+  const successCount = groupEntries.filter(e => e.status >= 200 && e.status < 400).length;
+  const failCount = groupEntries.length - successCount;
+  const avgTime = Math.round(groupEntries.reduce((sum, e) => sum + e.response_time_ms, 0) / groupEntries.length);
+
+  const header = document.createElement('div');
+  header.className = 'hist-group-header';
+  header.innerHTML = `
+    <span class="hist-group-arrow">${isExpanded ? '▾' : '▸'}</span>
+    <span class="hist-group-title">${escapeHtml(title)}</span>
+    <span class="hist-group-count">${groupEntries.length}</span>
+    <span class="hist-group-time">${avgTime}ms</span>
+    <span class="hist-group-success">✓${successCount}</span>
+    ${failCount > 0 ? `<span class="hist-group-fail">✗${failCount}</span>` : ''}
+  `;
+
+  header.addEventListener('click', () => {
+    if (historyExpandedGroups.has(groupKey)) {
+      historyExpandedGroups.delete(groupKey);
+    } else {
+      historyExpandedGroups.add(groupKey);
+    }
+    group.classList.toggle('expanded');
+    header.querySelector('.hist-group-arrow').textContent =
+      group.classList.contains('expanded') ? '▾' : '▸';
+  });
+
+  const body = document.createElement('div');
+  body.className = 'hist-group-body';
+  groupEntries.forEach(entry => body.appendChild(createHistoryEntryRow(entry)));
+
+  group.appendChild(header);
+  group.appendChild(body);
+  historyLog.appendChild(group);
+}
+
+function createHistoryEntryRow(entry) {
+  const row = document.createElement('div');
+  const isViewed = viewedHistoryEntries.has(entry.seq);
+  row.className = `hist-entry-row${isViewed ? ' viewed' : ''}`;
+  const statusClass = getHistoryStatusClass(entry.status);
+  const sourceBadge = entry.source === 'test-run'
+    ? '<span class="hist-source-badge test-run">Test Run</span>'
+    : '<span class="hist-source-badge manual">Manual</span>';
+  const blockName = entry.block_name ? `<span class="hist-block-name">${escapeHtml(entry.block_name)}</span>` : '';
+  const timeColor = entry.response_time_ms < 200 ? 'var(--green)' : entry.response_time_ms < 500 ? 'var(--orange)' : 'var(--red)';
+  const viewedIcon = isViewed ? '<span class="hist-viewed" title="Viewed">👁</span>' : '';
+  row.innerHTML = `
+    <input type="checkbox" class="hist-entry-checkbox" data-seq="${entry.seq}" title="Select for comparison">
+    <span class="hist-entry-seq">#${entry.seq}</span>
+    <span class="hist-entry-status ${statusClass}">${entry.status || 'ERR'}</span>
+    <span class="hist-entry-method method-${entry.method}">${entry.method}</span>
+    <span class="hist-entry-url" title="${escapeAttr(entry.url)}">${escapeHtml(truncateUrl(entry.url))}</span>
+    <span class="hist-entry-time" style="color:${timeColor}">${entry.response_time_ms}ms</span>
+    ${sourceBadge}
+    ${blockName}
+    <span class="hist-entry-timestamp">${formatHistoryTime(entry.timestamp)}</span>
+    ${viewedIcon}
+  `;
+  // Checkbox for comparison selection
+  const checkbox = row.querySelector('.hist-entry-checkbox');
+  checkbox.checked = historySelectedIds.has(entry.seq);
+  checkbox.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (checkbox.checked) {
+      if (historySelectedIds.size >= 2) {
+        // Deselect oldest, keep latest + new
+        const oldest = [...historySelectedIds][0];
+        historySelectedIds.delete(oldest);
+        historyLog.querySelector(`.hist-entry-checkbox[data-seq="${oldest}"]`)
+          && (historyLog.querySelector(`.hist-entry-checkbox[data-seq="${oldest}"]`).checked = false);
+      }
+      historySelectedIds.add(entry.seq);
+    } else {
+      historySelectedIds.delete(entry.seq);
+    }
+    updateHistoryCompareBtn();
+  });
+  row.addEventListener('click', (e) => {
+    if (e.target.closest('.hist-entry-checkbox')) return;
+    viewedHistoryEntries.add(entry.seq);
+    row.classList.add('viewed');
+    if (!row.querySelector('.hist-viewed')) {
+      row.insertAdjacentHTML('beforeend', '<span class="hist-viewed" title="Viewed">👁</span>');
+    }
+    showHistoryDetail(entry);
+  });
+  return row;
+}
+
+function getHistoryStatusClass(status) {
+  if (!status || status === 0) return 'hist-status-err';
+  if (status >= 200 && status < 300) return 'hist-status-2xx';
+  if (status >= 300 && status < 400) return 'hist-status-3xx';
+  if (status >= 400 && status < 500) return 'hist-status-4xx';
+  return 'hist-status-5xx';
+}
+
+function formatHistoryTime(isoString) {
+  if (!isoString) return '';
+  const date = new Date(isoString);
+  const now = new Date();
+  const diffMs = now - date;
+  const diffMin = Math.floor(diffMs / 60000);
+  const diffHr = Math.floor(diffMs / 3600000);
+  if (diffMin < 1) return 'just now';
+  if (diffMin < 60) return `${diffMin}m ago`;
+  if (diffHr < 24) return `${diffHr}h ago`;
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function showHistoryDetail(entry) {
+  historyDetailOverlay.classList.remove('hidden');
+  const statusClass = getHistoryStatusClass(entry.status);
+  const timeColor = entry.response_time_ms < 200 ? 'var(--green)' : entry.response_time_ms < 500 ? 'var(--orange)' : 'var(--red)';
+  historyDetailTitle.innerHTML = `
+    <span class="hist-entry-method method-${entry.method}">${entry.method}</span>
+    <span class="hist-entry-status ${statusClass}">${entry.status || 'ERR'}</span>
+    <span style="color:${timeColor};font-family:var(--font-mono);font-size:12px">${entry.response_time_ms}ms</span>
+    <span style="color:var(--text-muted);font-size:12px">${formatBytes(entry.response_size_bytes || 0)}</span>
+  `;
+  const reqHeaders = (entry.request_headers || []).map(([k, v]) =>
+    `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`
+  ).join('');
+  const respHeaders = (entry.response_headers || []).map(([k, v]) =>
+    `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`
+  ).join('');
+  let reqBody = entry.request_body || '(no body)';
+  try { if (entry.request_body) reqBody = JSON.stringify(JSON.parse(entry.request_body), null, 2); } catch {}
+  let respBody = entry.response_body || '(no body)';
+  try { if (entry.response_body) respBody = JSON.stringify(JSON.parse(entry.response_body), null, 2); } catch {}
+  historyDetailBody.innerHTML = `
+    <div class="hist-detail-url">
+      <span class="hist-entry-method method-${entry.method}">${entry.method}</span>
+      <span class="hist-detail-full-url">${escapeHtml(entry.url)}</span>
+    </div>
+    <div class="hist-detail-meta">
+      <span class="hist-entry-seq">#${entry.seq}</span>
+      <span class="hist-source-badge ${entry.source === 'test-run' ? 'test-run' : 'manual'}">${entry.source === 'test-run' ? 'Test Run' : 'Manual'}</span>
+      ${entry.block_name ? `<span class="hist-block-name">${escapeHtml(entry.block_name)}</span>` : ''}
+      <span class="hist-entry-timestamp">${formatHistoryTime(entry.timestamp)}</span>
+      ${entry.run_id ? `<span class="hist-run-id" title="Run ID: ${escapeAttr(entry.run_id)}">🔗 Run</span>` : ''}
+    </div>
+    <div class="hist-detail-section">
+      <div class="hist-detail-section-title">Request Headers</div>
+      ${reqHeaders ? `<table class="hist-detail-headers"><thead><tr><th>Header</th><th>Value</th></tr></thead><tbody>${reqHeaders}</tbody></table>` : '<div class="hist-detail-empty">No headers</div>'}
+    </div>
+    <div class="hist-detail-section">
+      <div class="hist-detail-section-title">Request Body</div>
+      <pre class="hist-detail-body-pre">${escapeHtml(reqBody)}</pre>
+    </div>
+    <div class="hist-detail-section">
+      <div class="hist-detail-section-title">Response Headers</div>
+      ${respHeaders ? `<table class="hist-detail-headers"><thead><tr><th>Header</th><th>Value</th></tr></thead><tbody>${respHeaders}</tbody></table>` : '<div class="hist-detail-empty">No headers</div>'}
+    </div>
+    <div class="hist-detail-section">
+      <div class="hist-detail-section-title">Response Body</div>
+      <pre class="hist-detail-body-pre">${escapeHtml(respBody)}</pre>
+    </div>`;
+}
+
+function closeHistoryDetail() {
+  historyDetailOverlay.classList.add('hidden');
+}
+
+function updateHistoryCompareBtn() {
+  const btn = document.getElementById('historyCompareBtn');
+  const count = document.getElementById('historySelectedCount');
+  if (btn) {
+    btn.classList.toggle('hidden', historySelectedIds.size < 2);
+  }
+  if (count) {
+    count.textContent = historySelectedIds.size > 0 ? `${historySelectedIds.size} selected` : '';
+    count.classList.toggle('hidden', historySelectedIds.size === 0);
+  }
+}
+
+function openHistoryComparison() {
+  if (historySelectedIds.size < 2) return;
+  const [seqA, seqB] = [...historySelectedIds];
+  const entryA = historyCache.find(e => e.seq === seqA);
+  const entryB = historyCache.find(e => e.seq === seqB);
+  if (entryA && entryB) openComparisonOverlay(entryA, entryB);
+}
+
+// --- Autocomplete State ---
+let acSuggestions = [];
+let acDomainPaths = [];
+let acActiveIndex = -1;
+let acDebounceTimer = null;
+const autocompleteDropdown = $('#autocompleteDropdown');
+
+async function fetchAutocompleteSuggestions(prefix) {
+  if (!prefix || prefix.length < 2) {
+    hideAutocomplete();
+    return;
+  }
+  try {
+    const [urlsResult, pathsResult] = await Promise.allSettled([
+      invoke('suggest_urls', { prefix }),
+      invoke('suggest_domain_paths', { prefix }),
+    ]);
+    acSuggestions = urlsResult.status === 'fulfilled' ? urlsResult.value : [];
+    acDomainPaths = pathsResult.status === 'fulfilled' ? pathsResult.value : [];
+    if (acSuggestions.length === 0 && acDomainPaths.length === 0) {
+      hideAutocomplete();
+      return;
+    }
+    acActiveIndex = acDomainPaths.length > 0 ? -1 : 0;
+    renderAutocomplete(prefix);
+  } catch {
+    hideAutocomplete();
+  }
+}
+
+function renderAutocomplete(prefix) {
+  const prefixLower = prefix.toLowerCase();
+  let html = '';
+  let totalItems = 0;
+
+  // --- Quick Paths section (top 5 domain→path) ---
+  if (acDomainPaths.length > 0) {
+    html += '<div class="ac-section-label">Top Paths</div>';
+    acDomainPaths.forEach((dp, idx) => {
+      const dpUrl = dp.domain_path;
+      const matchEnd = dpUrl.toLowerCase().indexOf(prefixLower) !== -1
+        ? dpUrl.toLowerCase().indexOf(prefixLower) + prefix.length
+        : prefix.length;
+      const matchPart = dpUrl.substring(0, Math.min(matchEnd, dpUrl.length));
+      const restPart = dpUrl.substring(Math.min(matchEnd, dpUrl.length));
+      const itemIdx = idx;
+
+      html += `<div class="autocomplete-item ac-domain-path${itemIdx === acActiveIndex ? ' active' : ''}" data-index="${itemIdx}" data-type="path">
+        <span class="autocomplete-url"><span class="ac-match">${escapeHtml(matchPart)}</span><span class="ac-completion">${escapeHtml(restPart)}</span></span>
+        <span class="ac-path-meta">${dp.frequency}× · ${dp.url_count} URL${dp.url_count !== 1 ? 's' : ''}</span>
+      </div>`;
+      totalItems++;
+    });
+  }
+
+  // --- Full URL suggestions ---
+  if (acSuggestions.length > 0) {
+    if (acDomainPaths.length > 0) {
+      html += '<div class="ac-section-divider"></div>';
+      html += '<div class="ac-section-label">URLs</div>';
+    }
+    acSuggestions.forEach((s, idx) => {
+      const url = s.url;
+      const matchEnd = url.toLowerCase().indexOf(prefixLower) !== -1
+        ? url.toLowerCase().indexOf(prefixLower) + prefix.length
+        : prefix.length;
+      const matchPart = url.substring(0, Math.min(matchEnd, url.length));
+      const restPart = url.substring(Math.min(matchEnd, url.length));
+      const itemIdx = acDomainPaths.length + idx;
+
+      html += `<div class="autocomplete-item${itemIdx === acActiveIndex ? ' active' : ''}" data-index="${itemIdx}" data-type="url">
+        <span class="autocomplete-url"><span class="ac-match">${escapeHtml(matchPart)}</span><span class="ac-completion">${escapeHtml(restPart)}</span></span>
+        <span class="autocomplete-freq">${s.frequency}×</span>
+      </div>`;
+      totalItems++;
+    });
+  }
+
+  html += '<div class="autocomplete-hint">↑↓ Navigate · Tab Accept segment · Enter Accept · Esc Dismiss</div>';
+
+  autocompleteDropdown.innerHTML = html;
+  autocompleteDropdown.classList.remove('hidden');
+
+  autocompleteDropdown.querySelectorAll('.autocomplete-item').forEach(item => {
+    item.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const idx = parseInt(item.dataset.index);
+      const type = item.dataset.type;
+      if (type === 'path') {
+        acceptDomainPathSuggestion(idx);
+      } else {
+        acceptSuggestion(idx - acDomainPaths.length);
+      }
+    });
+  });
+
+  updateGhostText(prefix);
+}
+
+function hideAutocomplete() {
+  autocompleteDropdown.classList.add('hidden');
+  acSuggestions = [];
+  acDomainPaths = [];
+  acActiveIndex = -1;
+  removeGhostText();
+}
+
+function acceptSuggestion(index) {
+  if (index < 0 || index >= acSuggestions.length) return;
+  const suggestion = acSuggestions[index];
+  const fullUrl = suggestion.url;
+  const nextSepIdx = findNextSeparatorBoundary(fullUrl, historyUrlSearch.value.length);
+  const accepted = fullUrl.substring(0, nextSepIdx);
+
+  historyUrlSearch.value = accepted;
+  historyUrlSearch.focus();
+
+  if (accepted === fullUrl) {
+    hideAutocomplete();
+    loadHistory();
+  } else {
+    fetchAutocompleteSuggestions(accepted);
+  }
+}
+
+function acceptFullSuggestion(index) {
+  if (index < 0 || index >= acSuggestions.length) return;
+  historyUrlSearch.value = acSuggestions[index].url;
+  hideAutocomplete();
+  loadHistory();
+}
+
+function acceptDomainPathSuggestion(index) {
+  if (index < 0 || index >= acDomainPaths.length) return;
+  const domainPath = acDomainPaths[index].domain_path;
+  historyUrlSearch.value = domainPath;
+  historyUrlSearch.focus();
+  fetchAutocompleteSuggestions(domainPath);
+}
+
+function findNextSeparatorBoundary(url, fromIndex) {
+  const separators = ['/', '.', ':', '?', '&', '='];
+  let i = fromIndex;
+  while (i < url.length && separators.includes(url[i])) i++;
+  while (i < url.length && !separators.includes(url[i])) i++;
+  if (i < url.length && separators.includes(url[i])) i++;
+  return i;
+}
+
+function updateGhostText(prefix) {
+  removeGhostText();
+  if (!prefix) return;
+
+  // Pick the best suggestion for ghost text:
+  // 1. If user has actively selected something, use that
+  // 2. Otherwise use the first URL suggestion (most relevant for inline completion)
+  // 3. Fall back to first domain path
+  let suggestion;
+  if (acActiveIndex >= 0 && acActiveIndex < acDomainPaths.length) {
+    suggestion = acDomainPaths[acActiveIndex].domain_path;
+  } else if (acActiveIndex >= acDomainPaths.length) {
+    const urlIdx = acActiveIndex - acDomainPaths.length;
+    if (urlIdx >= 0 && urlIdx < acSuggestions.length) {
+      suggestion = acSuggestions[urlIdx].url;
+    }
+  } else if (acSuggestions.length > 0) {
+    suggestion = acSuggestions[0].url;
+  } else if (acDomainPaths.length > 0) {
+    suggestion = acDomainPaths[0].domain_path;
+  }
+  if (!suggestion) return;
+
+  if (!suggestion.toLowerCase().startsWith(prefix.toLowerCase())) return;
+  const completion = suggestion.substring(prefix.length);
+  if (!completion) return;
+
+  const ghost = document.createElement('div');
+  ghost.className = 'ghost-text';
+  ghost.innerHTML = `<span class="ghost-prefix">${escapeHtml(prefix)}</span><span class="ghost-completion">${escapeHtml(completion)}</span>`;
+
+  const wrapper = historyUrlSearch.closest('.history-search-wrapper');
+  if (wrapper) wrapper.appendChild(ghost);
+}
+
+function removeGhostText() {
+  const wrapper = historyUrlSearch.closest('.history-search-wrapper');
+  if (wrapper) {
+    const ghost = wrapper.querySelector('.ghost-text');
+    if (ghost) ghost.remove();
+  }
+}
+
+// --- History Event Listeners ---
+historyMethodFilter.addEventListener('change', loadHistory);
+historyStatusFilter.addEventListener('change', loadHistory);
+historySourceFilter.addEventListener('change', loadHistory);
+historyGroupBySelect.addEventListener('change', () => renderHistoryLog(historyCache));
+let historySearchTimeout;
+historyUrlSearch.addEventListener('input', () => {
+  const value = historyUrlSearch.value.trim();
+
+  clearTimeout(historySearchTimeout);
+  historySearchTimeout = setTimeout(loadHistory, 300);
+
+  clearTimeout(acDebounceTimer);
+  acDebounceTimer = setTimeout(() => fetchAutocompleteSuggestions(value), 150);
+});
+
+historyUrlSearch.addEventListener('keydown', (e) => {
+  if (autocompleteDropdown.classList.contains('hidden')) return;
+  const totalItems = acDomainPaths.length + acSuggestions.length;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    acActiveIndex = Math.min(acActiveIndex + 1, totalItems - 1);
+    renderAutocomplete(historyUrlSearch.value);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    acActiveIndex = Math.max(acActiveIndex - 1, -1);
+    renderAutocomplete(historyUrlSearch.value);
+  } else if (e.key === 'Tab') {
+    e.preventDefault();
+    if (acActiveIndex >= 0 && acActiveIndex < acDomainPaths.length) {
+      acceptDomainPathSuggestion(acActiveIndex);
+    } else if (acActiveIndex >= acDomainPaths.length) {
+      acceptSuggestion(acActiveIndex - acDomainPaths.length);
+    } else if (acActiveIndex === -1) {
+      // No selection — accept ghost text (first URL suggestion, or first domain path)
+      if (acSuggestions.length > 0) {
+        acceptSuggestion(0);
+      } else if (acDomainPaths.length > 0) {
+        acceptDomainPathSuggestion(0);
+      }
+    }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (acActiveIndex >= 0 && acActiveIndex < acDomainPaths.length) {
+      acceptDomainPathSuggestion(acActiveIndex);
+      loadHistory();
+    } else if (acActiveIndex >= acDomainPaths.length) {
+      acceptFullSuggestion(acActiveIndex - acDomainPaths.length);
+    } else if (acActiveIndex === -1) {
+      // No selection — accept full first suggestion
+      if (acSuggestions.length > 0) {
+        acceptFullSuggestion(0);
+      } else if (acDomainPaths.length > 0) {
+        acceptDomainPathSuggestion(0);
+        loadHistory();
+      }
+    }
+  } else if (e.key === 'Escape') {
+    hideAutocomplete();
+  }
+});
+
+historyUrlSearch.addEventListener('blur', () => {
+  setTimeout(hideAutocomplete, 200);
+});
+
+historyUrlSearch.addEventListener('focus', () => {
+  const value = historyUrlSearch.value.trim();
+  if (value.length >= 2) {
+    fetchAutocompleteSuggestions(value);
+  }
+});
+
+$('#historyCompareBtn').addEventListener('click', openHistoryComparison);
+
+$('#historyExpandAllBtn').addEventListener('click', () => {
+  historyLog.querySelectorAll('.hist-group, .hist-domain-group, .hist-path-group').forEach(g => {
+    g.classList.add('expanded');
+    const arrow = g.querySelector(':scope > .hist-group-header .hist-group-arrow, :scope > .hist-domain-header .hist-group-arrow, :scope > .hist-path-header .hist-group-arrow');
+    if (arrow) arrow.textContent = '▾';
+    if (g.dataset.groupKey) historyExpandedGroups.add(g.dataset.groupKey);
+  });
+});
+
+$('#historyCollapseAllBtn').addEventListener('click', () => {
+  historyExpandedGroups.clear();
+  historyLog.querySelectorAll('.hist-group, .hist-domain-group, .hist-path-group').forEach(g => {
+    g.classList.remove('expanded');
+    const arrow = g.querySelector(':scope > .hist-group-header .hist-group-arrow, :scope > .hist-domain-header .hist-group-arrow, :scope > .hist-path-header .hist-group-arrow');
+    if (arrow) arrow.textContent = '▸';
+  });
+});
+
+$('#historyRefreshBtn').addEventListener('click', loadHistory);
+
+$('#historyClearBtn').addEventListener('click', async () => {
+  if (historyCache.length === 0) {
+    showToast('No history to clear', 'info');
+    return;
+  }
+  try {
+    await invoke('clear_history');
+    historyCache = [];
+    historyExpandedGroups.clear();
+    renderHistoryStats([]);
+    renderHistoryLog([]);
+    historyCountBadge.textContent = '0';
+    showToast('History cleared', 'success');
+  } catch (err) {
+    showToast(`Failed to clear history: ${err}`, 'error');
+  }
+});
+
+$('#historyDetailCloseBtn').addEventListener('click', closeHistoryDetail);
+historyDetailOverlay.addEventListener('click', (e) => {
+  if (e.target === historyDetailOverlay) closeHistoryDetail();
+});
+
+// --- Keyboard Shortcuts ---
+document.addEventListener('keydown', (e) => {
+  // Ctrl+Enter -> Send
+  if (e.ctrlKey && !e.shiftKey && e.key === 'Enter') {
+    e.preventDefault();
+    sendRequest();
+  }
+  // Ctrl+Shift+Enter -> Run All
+  if (e.ctrlKey && e.shiftKey && e.key === 'Enter') {
+    e.preventDefault();
+    runAllTests();
+  }
+  // Ctrl+L -> Focus URL
+  if (e.ctrlKey && e.key === 'l') {
+    e.preventDefault();
+    urlInput.focus();
+    urlInput.select();
+  }
+  // Ctrl+O -> Open file
+  if (e.ctrlKey && e.key === 'o') {
+    e.preventDefault();
+    fileInput.click();
+  }
+  // Ctrl+S -> Save (code mode)
+  if (e.ctrlKey && e.key === 's') {
+    e.preventDefault();
+    if (currentMode === 'code') {
+      syncCodeToBuilder();
+      showToast('File saved', 'success');
+    }
+  }
+  // Escape -> close history detail or leave history
+  if (e.key === 'Escape' && currentMode === 'history') {
+    if (!historyDetailOverlay.classList.contains('hidden')) {
+      closeHistoryDetail();
+    } else {
+      switchMode('builder');
+    }
+  }
+});
+
+// --- Initialize ---
+renderEnvVars();

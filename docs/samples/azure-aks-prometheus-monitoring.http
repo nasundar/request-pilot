@@ -1,0 +1,167 @@
+# ============================================================
+# Azure AKS + Prometheus — Integrated Monitoring E2E Test
+# End-to-end test that verifies AKS monitoring integration:
+#   1. Authenticate with Azure AD (setup)
+#   2. Verify cluster and workspace health (setup)
+#   3. Query Prometheus metrics collected from AKS
+#   4. Test alerting rules for AKS workloads
+#   5. Validate data collection rules
+#
+# Prerequisites:
+#   - AKS cluster with Azure Monitor (Managed Prometheus) enabled
+#   - Azure AD app registration with Monitoring Reader + AKS Reader
+# ============================================================
+
+@variables
+tenant_id = your-tenant-id
+client_id = your-client-id
+client_secret = your-client-secret
+subscription_id = your-subscription-id
+resource_group = your-resource-group
+cluster_name = your-aks-cluster
+workspace_name = your-amw-workspace
+aks_api = 2024-01-01
+monitor_api = 2023-04-03
+mgmt_api = https://management.azure.com
+query_endpoint = https://your-workspace.prometheusquery.monitor.azure.com
+
+### @setup Fetch Azure AD Token
+# @description Authenticates using client credentials flow to get a bearer token
+POST https://login.microsoftonline.com/{{tenant_id}}/oauth2/v2.0/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope=https://management.azure.com/.default
+
+# @extract access_token = $.access_token
+# @assert status == 200
+# @assert $.access_token != null
+
+### @setup Verify AKS Cluster is Running
+# @description Confirms the AKS cluster is accessible and in Running state
+GET {{mgmt_api}}/subscriptions/{{subscription_id}}/resourceGroups/{{resource_group}}/providers/Microsoft.ContainerService/managedClusters/{{cluster_name}}?api-version={{aks_api}}
+Authorization: Bearer {{access_token}}
+
+# @extract cluster_id = $.id
+# @assert status == 200
+# @assert $.properties.provisioningState == Succeeded
+# @assert $.properties.powerState.code == Running
+
+### @setup Verify Azure Monitor Workspace
+# @description Validates the Azure Monitor workspace is provisioned
+GET {{mgmt_api}}/subscriptions/{{subscription_id}}/resourceGroups/{{resource_group}}/providers/Microsoft.Monitor/accounts/{{workspace_name}}?api-version={{monitor_api}}
+Authorization: Bearer {{access_token}}
+
+# @extract workspace_id = $.id
+# @assert status == 200
+# @assert $.properties.provisioningState == Succeeded
+
+### @test AKS Node Metrics — kubelet_running_pods
+# @description Query the number of running pods reported by kubelet
+GET {{query_endpoint}}/api/v1/query?query=kubelet_running_pods
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.data.resultType == vector
+
+### @test AKS Container CPU — Rate Over 5m
+# @description Check container CPU usage rate aggregated by namespace
+GET {{query_endpoint}}/api/v1/query?query=sum(rate(container_cpu_usage_seconds_total{namespace!=""}[5m])) by (namespace)
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.status == success
+
+### @test AKS Container Memory — Working Set
+# @description Query container memory working set across all pods
+GET {{query_endpoint}}/api/v1/query?query=sum(container_memory_working_set_bytes{container!=""}) by (pod)
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.status == success
+
+### @test AKS API Server — Request Rate
+# @description Monitor Kubernetes API server request rate
+GET {{query_endpoint}}/api/v1/query?query=sum(rate(apiserver_request_total[5m])) by (verb, code)
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.status == success
+
+### @test AKS CoreDNS — Query Rate
+# @description Check CoreDNS query rate for DNS performance monitoring
+GET {{query_endpoint}}/api/v1/query?query=sum(rate(coredns_dns_requests_total[5m])) by (server, type)
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.status == success
+
+### @test AKS Network — Bytes Transmitted
+# @description Network I/O for the cluster nodes
+GET {{query_endpoint}}/api/v1/query?query=sum(rate(node_network_transmit_bytes_total[5m])) by (instance)
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.status == success
+
+### @test AKS PVC — Volume Usage
+# @description Check persistent volume claim usage percentages
+GET {{query_endpoint}}/api/v1/query?query=(kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.status == success
+
+### @test List Data Collection Rules
+# @description Verify data collection rules linked to the AKS cluster
+GET {{mgmt_api}}/subscriptions/{{subscription_id}}/resourceGroups/{{resource_group}}/providers/Microsoft.Insights/dataCollectionRules?api-version=2022-06-01
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+
+### @test List Data Collection Rule Associations
+# @description Check which DCRs are associated with the AKS cluster
+GET {{mgmt_api}}{{cluster_id}}/providers/Microsoft.Insights/dataCollectionRuleAssociations?api-version=2022-06-01
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+
+### @test Create Alert Rule — High Pod Restart Count
+# @description Create a Prometheus alert rule for pod restart spikes
+PUT {{mgmt_api}}/subscriptions/{{subscription_id}}/resourceGroups/{{resource_group}}/providers/Microsoft.AlertsManagement/prometheusRuleGroups/rp-test-aks-alerts?api-version=2023-03-01
+Authorization: Bearer {{access_token}}
+Content-Type: application/json
+
+{
+  "location": "eastus",
+  "properties": {
+    "scopes": ["{{workspace_id}}"],
+    "interval": "PT1M",
+    "rules": [
+      {
+        "alert": "HighPodRestartCount",
+        "expression": "increase(kube_pod_container_status_restarts_total[1h]) > 5",
+        "for": "PT5M",
+        "severity": 3,
+        "labels": {
+          "source": "request-pilot-e2e"
+        },
+        "annotations": {
+          "summary": "Pod {{ $labels.pod }} has restarted more than 5 times in 1 hour"
+        }
+      }
+    ]
+  }
+}
+
+# @extract alert_rule_id = $.id
+# @assert status >= 200
+# @assert status <= 201
+
+### @teardown Delete Test Alert Rule
+# @description Cleans up the alert rule created during tests
+DELETE {{mgmt_api}}{{alert_rule_id}}?api-version=2023-03-01
+Authorization: Bearer {{access_token}}
+
+# @assert status >= 200
+# @assert status <= 204

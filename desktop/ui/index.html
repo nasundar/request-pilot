@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Request Pilot</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Top toolbar -->
+  <header class="toolbar">
+    <div class="toolbar-left">
+      <span class="app-logo">✈</span>
+      <span class="app-title">Request Pilot</span>
+    </div>
+    <div class="toolbar-center">
+      <div class="mode-toggle" id="modeToggle">
+        <button class="mode-btn active" data-mode="builder" title="Form-based editor">🔧 Builder</button>
+        <button class="mode-btn" data-mode="code" title="Raw .http editor">📝 Code</button>
+        <button class="mode-btn" data-mode="history" title="Request history &amp; stats">📊 History</button>
+      </div>
+      <button class="btn btn-primary btn-sm" id="runAllBtn" title="Run all tests (Ctrl+Shift+Enter)">
+        <span class="btn-label">▶ Run All</span>
+      </button>
+    </div>
+    <div class="toolbar-right">
+      <button class="btn btn-ghost btn-sm" id="newFileBtn" title="Create new .http file">📄 New File</button>
+      <button class="btn btn-ghost btn-sm" id="openFileBtn" title="Open .http file (Ctrl+O)">
+        📂 Open File
+      </button>
+    </div>
+  </header>
+
+  <!-- App body: sidebar + main -->
+  <div class="app-body">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <!-- FILES section -->
+      <div class="sidebar-section" id="filesSection">
+        <div class="sidebar-section-header" data-section="files">
+          <span class="section-chevron">▸</span>
+          <span class="section-icon">📁</span>
+          <span class="section-title">FILES</span>
+          <button class="btn-icon-sm sidebar-action" id="addFileBtn" title="Load more files">+</button>
+        </div>
+        <div class="sidebar-section-body" id="fileTree">
+          <div class="sidebar-empty">No files loaded</div>
+        </div>
+      </div>
+
+      <!-- ENV section -->
+      <div class="sidebar-section expanded" id="envSection">
+        <div class="sidebar-section-header" data-section="env">
+          <span class="section-chevron">▸</span>
+          <span class="section-icon">🔐</span>
+          <span class="section-title">ENVIRONMENT</span>
+          <button class="btn-icon-sm sidebar-action" id="addEnvVarBtn" title="Add variable">+</button>
+          <button class="btn-icon-sm sidebar-action" id="clearEnvBtn" title="Clear all variables">🗑</button>
+          <button class="btn-icon-sm sidebar-action" id="loadEnvBtn" title="Load .env file">📂</button>
+          <button class="btn-icon-sm sidebar-action" id="saveEnvBtn" title="Save .env file">💾</button>
+        </div>
+        <div class="sidebar-section-body" id="envList">
+          <div class="sidebar-empty">No .env file loaded</div>
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- Sidebar resize handle -->
+    <div class="sidebar-resize-handle" id="sidebarResizeHandle"></div>
+
+    <!-- Main content area -->
+    <main class="main-area">
+      <!-- URL Bar -->
+      <div class="url-bar">
+        <select id="methodSelect" class="method-select">
+          <option value="GET">GET</option>
+          <option value="POST">POST</option>
+          <option value="PUT">PUT</option>
+          <option value="PATCH">PATCH</option>
+          <option value="DELETE">DELETE</option>
+          <option value="HEAD">HEAD</option>
+          <option value="OPTIONS">OPTIONS</option>
+        </select>
+        <input type="text" id="urlInput" class="url-input" placeholder="https://api.example.com/endpoint" spellcheck="false">
+        <button id="sendBtn" class="btn btn-primary send-btn">
+          <span class="send-icon">▶</span> Send
+        </button>
+      </div>
+
+      <!-- Code Editor Panel (hidden by default) -->
+      <div id="codeEditorPanel" class="code-editor-panel hidden">
+        <div class="code-editor-toolbar">
+          <span class="code-editor-filename" id="codeEditorFilename">untitled.http</span>
+          <div class="code-editor-actions">
+            <button class="btn btn-ghost btn-xs" id="codeSaveBtn" title="Save changes">💾 Save</button>
+            <button class="btn btn-ghost btn-xs" id="codeRevertBtn" title="Revert to last saved">↩ Revert</button>
+          </div>
+        </div>
+        <div class="code-editor-container" id="codeEditorContainer">
+          <div class="code-editor-line-numbers" id="codeLineNumbers"></div>
+          <div class="code-editor-wrapper">
+            <pre class="code-editor-highlight" id="codeEditorHighlight"><code id="codeEditorHighlightCode"></code></pre>
+            <textarea id="codeEditor" class="code-editor" spellcheck="false" placeholder="### @variables&#10;@baseUrl = https://api.example.com&#10;&#10;### @test My First Test&#10;GET {{baseUrl}}/api/health&#10;&#10;# @assert response.status == 200"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <!-- History Panel (hidden by default) -->
+      <div id="historyPanel" class="history-panel hidden">
+        <div class="history-header">
+          <div class="history-header-title">
+            <h2>Request History</h2>
+            <span class="history-count-badge" id="historyCountBadge">0</span>
+          </div>
+          <div class="history-actions">
+            <span class="history-selected-count hidden" id="historySelectedCount"></span>
+            <button class="btn btn-primary btn-xs hidden" id="historyCompareBtn" title="Compare selected requests">⚖ Compare</button>
+            <button class="btn btn-ghost btn-xs" id="historyExpandAllBtn" title="Expand all groups">⊞ Expand All</button>
+            <button class="btn btn-ghost btn-xs" id="historyCollapseAllBtn" title="Collapse all groups">⊟ Collapse All</button>
+            <button class="btn btn-ghost btn-xs" id="historyRefreshBtn" title="Refresh">🔄 Refresh</button>
+            <button class="btn btn-ghost btn-xs" id="historyClearBtn" title="Clear all history">🗑 Clear</button>
+          </div>
+        </div>
+        <div class="history-filters">
+          <select id="historyMethodFilter" class="history-filter-select">
+            <option value="">All Methods</option>
+            <option value="GET">GET</option>
+            <option value="POST">POST</option>
+            <option value="PUT">PUT</option>
+            <option value="PATCH">PATCH</option>
+            <option value="DELETE">DELETE</option>
+            <option value="HEAD">HEAD</option>
+            <option value="OPTIONS">OPTIONS</option>
+          </select>
+          <select id="historyStatusFilter" class="history-filter-select">
+            <option value="">All Status</option>
+            <option value="2xx">2xx Success</option>
+            <option value="3xx">3xx Redirect</option>
+            <option value="4xx">4xx Client Error</option>
+            <option value="5xx">5xx Server Error</option>
+          </select>
+          <select id="historySourceFilter" class="history-filter-select">
+            <option value="">All Sources</option>
+            <option value="manual">Manual</option>
+            <option value="test-run">Test Run</option>
+          </select>
+          <div class="history-search-wrapper">
+            <input type="text" id="historyUrlSearch" class="history-url-search" placeholder="Search URL..." spellcheck="false" autocomplete="off">
+            <div class="autocomplete-dropdown hidden" id="autocompleteDropdown"></div>
+          </div>
+          <select id="historyGroupBySelect" class="history-filter-select">
+            <option value="domain-path" selected>Domain → Path</option>
+            <option value="url">Full URL</option>
+            <option value="status">Status Code</option>
+            <option value="source">Source</option>
+            <option value="none">Flat List</option>
+          </select>
+        </div>
+        <div class="history-stats" id="historyStats"></div>
+        <div class="history-log" id="historyLog"></div>
+        <!-- Detail slide-over -->
+        <div class="history-detail-overlay hidden" id="historyDetailOverlay">
+          <div class="history-detail-panel">
+            <div class="history-detail-header">
+              <button class="btn btn-ghost btn-xs" id="historyDetailCloseBtn">← Back</button>
+              <span class="history-detail-title" id="historyDetailTitle"></span>
+            </div>
+            <div class="history-detail-body" id="historyDetailBody"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Split panels: request + response -->
+      <div class="split-panels">
+        <!-- Request Panel -->
+        <section class="panel request-panel" id="requestPanel">
+          <div class="panel-header">
+            <span class="panel-title">REQUEST</span>
+          </div>
+          <div class="sub-tabs">
+            <button class="sub-tab active" data-subtab="req-headers">Headers</button>
+            <button class="sub-tab" data-subtab="req-body">Body</button>
+          </div>
+          <div class="sub-content active" id="subtab-req-headers">
+            <div id="headersContainer" class="kv-container">
+              <div class="kv-row">
+                <input type="checkbox" class="kv-toggle" checked title="Enable this header">
+                <input type="text" class="kv-key" placeholder="Header name" spellcheck="false">
+                <input type="text" class="kv-value" placeholder="Header value" spellcheck="false">
+                <button class="btn-icon kv-remove" title="Remove">×</button>
+              </div>
+            </div>
+            <button id="addHeaderBtn" class="btn btn-ghost btn-sm add-row-btn">+ Add Header</button>
+          </div>
+          <div class="sub-content" id="subtab-req-body">
+            <div class="body-controls">
+              <select id="bodyType" class="body-type-select">
+                <option value="none">None</option>
+                <option value="json">JSON</option>
+                <option value="text">Raw Text</option>
+                <option value="form">Form URL-Encoded</option>
+              </select>
+            </div>
+            <textarea id="bodyInput" class="body-input" placeholder="Request body..." spellcheck="false" disabled></textarea>
+          </div>
+        </section>
+
+        <!-- Panel resize handle -->
+        <div class="resize-handle" id="panelResizeHandle"></div>
+
+        <!-- Response Panel -->
+        <section class="panel response-panel" id="responsePanel">
+          <div class="panel-header">
+            <span class="panel-title">RESPONSE</span>
+            <div id="responseMeta" class="response-meta hidden">
+              <span id="responseStatusBadge" class="status-badge"></span>
+              <span class="meta-separator">·</span>
+              <span id="responseTime" class="meta-item">0 ms</span>
+              <span class="meta-separator">·</span>
+              <span id="responseSize" class="meta-item">0 B</span>
+            </div>
+          </div>
+
+          <!-- Empty state -->
+          <div id="responseEmpty" class="empty-state">
+            <div class="empty-icon">📡</div>
+            <p>Send a request to see the response</p>
+          </div>
+
+          <!-- Response content -->
+          <div id="responseContent" class="response-content hidden">
+            <div class="sub-tabs">
+              <button class="sub-tab active" data-subtab="resp-body">Body</button>
+              <button class="sub-tab" data-subtab="resp-headers">Headers</button>
+              <button class="sub-tab" data-subtab="resp-assertions" id="assertionsTab" style="display:none">Assertions</button>
+            </div>
+            <div class="sub-content active" id="subtab-resp-body">
+              <div class="response-body-toolbar">
+                <button class="btn btn-ghost btn-xs" id="expandAllBtn" title="Expand all">⊞ Expand All</button>
+                <button class="btn btn-ghost btn-xs" id="collapseAllBtn" title="Collapse all">⊟ Collapse All</button>
+                <button class="btn btn-ghost btn-xs" id="copyBtn" title="Copy to clipboard">📋 Copy</button>
+              </div>
+              <div id="responseBody" class="response-body"></div>
+            </div>
+            <div class="sub-content" id="subtab-resp-headers">
+              <table class="headers-table">
+                <thead><tr><th>Header</th><th>Value</th></tr></thead>
+                <tbody id="responseHeadersBody"></tbody>
+              </table>
+            </div>
+            <div class="sub-content" id="subtab-resp-assertions">
+              <div id="assertionsContent" class="assertions-content"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Test Results Bar -->
+      <div id="testResultsBar" class="test-results-bar hidden">
+        <div class="test-results-summary" id="testResultsSummary">
+          <div class="test-results-stats">
+            <span class="result-stat passed">✓ <span id="resultsPassed">0</span> passed</span>
+            <span class="result-stat failed">✗ <span id="resultsFailed">0</span> failed</span>
+            <span class="result-stat skipped">○ <span id="resultsSkipped">0</span> skipped</span>
+            <span class="result-stat time">— <span id="resultsTotalTime">0</span> ms</span>
+          </div>
+          <div class="test-progress-bar" id="testProgressBar">
+            <div class="progress-passed" id="progressPassed"></div>
+            <div class="progress-failed" id="progressFailed"></div>
+            <div class="progress-skipped" id="progressSkipped"></div>
+          </div>
+        </div>
+        <div class="test-results-details hidden" id="testResultsDetails"></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Loading overlay -->
+  <div id="loadingOverlay" class="loading-overlay hidden">
+    <div class="spinner"></div>
+    <span class="loading-text">Running tests…</span>
+  </div>
+
+  <!-- Toast container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <!-- Hidden file input for .http files -->
+  <input type="file" id="fileInput" accept=".http,.rest,.txt" multiple style="display:none">
+  <input type="file" id="envFileInput" style="display:none">
+
+  <!-- Comparison overlay -->
+  <div id="compareOverlay" class="compare-overlay hidden">
+    <div class="compare-panel">
+      <div class="compare-header">
+        <h2>Request Comparison</h2>
+        <div class="compare-tabs">
+          <button class="compare-tab-btn active" data-ctab="request">Request</button>
+          <button class="compare-tab-btn" data-ctab="response">Response</button>
+        </div>
+        <button id="btnCloseCompare" class="btn-icon" title="Close">✕</button>
+      </div>
+      <div id="compareTabRequest" class="compare-content compare-tab-content active"></div>
+      <div id="compareTabResponse" class="compare-content compare-tab-content hidden"></div>
+    </div>
+  </div>
+
+  <div class="block-tooltip hidden" id="blockTooltip"></div>
+
+  <script src="comparison.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

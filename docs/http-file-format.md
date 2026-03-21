@@ -1,0 +1,376 @@
+# `.http` File Format Reference
+
+Request Pilot uses an enhanced `.http` file format that is backwards-compatible with standard `.http` parsers (VS Code REST Client, IntelliJ, etc.) while adding directives for E2E integration testing.
+
+---
+
+## File Structure
+
+A `.http` file is divided into **blocks** separated by `###`. Each block represents either a variables definition or a request.
+
+```
+@variables               ← variables block (define ALL variables here)
+key = value
+
+### @setup Setup Step     ← block separator + type + name
+# @description Brief explanation of what this step does
+GET https://example.com   ← request line
+Header: value             ← headers
+
+body                      ← request body (blank line separates headers from body)
+
+# @extract var = $.path   ← extract directive
+# @assert status == 200   ← assert directive
+
+### @test Test Step       ← next block
+...
+
+### @teardown Cleanup
+# @disabled               ← block is skipped when disabled
+...
+```
+
+### Test Plan Header
+
+Start every `.http` file with a structured comment block listing all test scenarios:
+
+```http
+# ============================================================
+# Feature Name — E2E Tests
+#
+# Brief description of what this file tests.
+#
+# Test Scenarios:
+#   Setup:
+#     1. Auth step — description
+#   Tests:
+#     [group-name]
+#       - Test name — what it validates
+#   Teardown:
+#     1. Cleanup — what it removes
+#
+# Prerequisites:
+#   - Required access / infrastructure
+# ============================================================
+```
+
+This header is displayed in the desktop app when hovering over the file in the sidebar, providing a quick overview of all test scenarios without opening the file.
+
+---
+
+## Variables Block
+
+The `@variables` block defines static key-value pairs that can be referenced throughout the file with `{{variableName}}` syntax. **All variables used in the file should be defined here** so they are visible and manageable in one place.
+
+```http
+@variables
+base_url = https://api.example.com
+auth_token = Bearer my-secret-token
+timeout = 5000
+```
+
+**Rules:**
+- Must appear before the first `###` separator
+- One variable per line: `key = value`
+- Lines starting with `#` are comments (ignored)
+- Empty lines are ignored
+- Variable names are case-sensitive
+
+---
+
+## Block Types
+
+Each block after `###` can have a type annotation on its first non-empty line:
+
+| Type | Syntax | Execution | Purpose |
+|------|--------|-----------|---------|
+| **setup** | `@setup [Name]` | **Sequential** (first, top → bottom) | Initialize state, create test data, extract variables for later steps |
+| **test** | `@test [Name]` | **Parallel-safe** (after all setups) | Core test assertions — each test should be independent |
+| **teardown** | `@teardown [Name]` | **Sequential** (last, always runs) | Clean up, delete test data |
+| **request** | *(no annotation)* | Sequential (in order) | Plain request (no test semantics) |
+
+**Execution rules:**
+- **Setup blocks** run first, **sequentially in file order** — each setup can use variables extracted by the previous one (e.g., authenticate → create resource → create child resource)
+- If any setup block fails, all test blocks are **skipped**
+- **Test blocks** run after all setups — they are **parallel-safe**, meaning each test must be self-contained and should not depend on another test's result. Tests should only rely on variables set during the setup phase.
+- **Teardown blocks** always run (**sequentially in file order**), even when setups/tests fail — use reverse dependency order (delete child before parent)
+
+---
+
+## Request Format
+
+Each block contains an HTTP request in standard format:
+
+```http
+METHOD URL
+Header-Name: Header-Value
+Another-Header: Another-Value
+
+{
+  "optional": "request body"
+}
+```
+
+**Supported methods:** `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`
+
+**Examples:**
+
+```http
+### Simple GET
+GET https://api.example.com/users
+
+### POST with JSON body
+POST https://api.example.com/users
+Content-Type: application/json
+Authorization: Bearer {{auth_token}}
+
+{
+  "name": "John Doe",
+  "email": "john@example.com"
+}
+
+### PUT with form data
+PUT https://api.example.com/settings
+Content-Type: application/x-www-form-urlencoded
+
+theme=dark&language=en
+```
+
+### URL Encoding
+
+Request Pilot automatically percent-encodes special characters in URL query strings before sending (spaces → `%20`, `{` → `%7B`, `}` → `%7D`, etc.). You can write URLs with literal special characters and they will be encoded at send time.
+
+However, for complex query values containing spaces, braces, or parentheses (common in PromQL, LogQL, etc.), prefer using **POST with form-urlencoded body** instead of GET with query parameters:
+
+```http
+### GET with simple query (works fine)
+GET {{endpoint}}/api/v1/query?query=up
+
+### POST for complex queries (recommended)
+POST {{endpoint}}/api/v1/query_range
+Content-Type: application/x-www-form-urlencoded
+
+query=rate({"system.cpu.time"}[5m])&start={{start}}&end={{end}}&step={{step}}
+```
+
+---
+
+## Directives
+
+Directives are special comments that control test behavior. They use the `# @` prefix so standard `.http` parsers treat them as comments.
+
+### `# @name`
+
+Gives the request block a human-readable name (used in UI and results).
+
+```http
+# @name Create new user
+POST https://api.example.com/users
+```
+
+### `# @assert`
+
+Validates response values. If any assertion fails, the block is marked as failed.
+
+```http
+# @assert status == 200
+# @assert $.name == John
+# @assert $.items.length > 0
+# @assert $.email contains @example.com
+```
+
+**Syntax:** `# @assert <path> <operator> <value>`
+
+#### Assertion Paths
+
+| Path | Description | Example |
+|------|-------------|---------|
+| `status` | HTTP response status code | `status == 200` |
+| `$.field` | Top-level JSON body field | `$.name == John` |
+| `$.parent.child` | Nested JSON field | `$.user.profile.name == John` |
+| `$[index].field` | Array element access | `$[0].id == 1` |
+| `$.field.length` | Array/string length | `$.items.length > 0` |
+| `$.headers.name` | Response header (case-insensitive) | `$.headers.content-type contains json` |
+
+> **Note:** In assert paths, `status` is shorthand for `response.status`, and `$.field` is shorthand for `response.body.field`. The full `response.` prefix also works.
+
+#### Assertion Operators
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `==` | Equal (numeric or string) | `status == 200` |
+| `!=` | Not equal | `status != 404` |
+| `>` | Greater than (numeric) | `status > 199` |
+| `<` | Less than (numeric) | `status < 300` |
+| `>=` | Greater than or equal | `status >= 200` |
+| `<=` | Less than or equal | `status <= 299` |
+| `contains` | String contains | `$.name contains test` |
+
+**Special values:**
+- `null` — check if a field is null: `# @assert $.token == null`
+- `!null` — check if a field is not null: `# @assert $.token != null`
+
+### `# @extract`
+
+Saves a response value into a variable for use in subsequent blocks.
+
+```http
+# @extract user_id = $.id
+# @extract auth_token = $.access_token
+# @extract item_count = $.items.length
+```
+
+**Syntax:** `# @extract <variable_name> = <json_path>`
+
+Extracted variables are immediately available via `{{variable_name}}` in all following blocks.
+
+### `# @description`
+
+Provides a human-readable description for a block. Displayed as a subtitle in the sidebar and preserved in code mode.
+
+```http
+### @setup Authenticate
+# @description Fetches an OAuth2 token using client credentials flow
+POST https://login.microsoftonline.com/{{tenant_id}}/oauth2/v2.0/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope={{scope}}
+```
+
+### `# @disabled`
+
+Marks a block as disabled. Disabled blocks are skipped during execution but remain in the file for reference. Toggle in the UI sidebar or add/remove the directive in code mode.
+
+```http
+### @test Experimental Endpoint
+# @disabled
+GET {{base_url}}/experimental/feature-flag
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+```
+
+### `# @group`
+
+Assigns a block to a named group. Blocks in the same group are **parallel-safe** — they can execute concurrently. Use with `# @depends` to create execution chains between groups.
+
+```http
+### @test Validate Order
+# @group validation
+GET {{base_url}}/orders/{{order_id}}
+
+# @assert status == 200
+
+### @test Validate Invoice
+# @group validation
+GET {{base_url}}/invoices/{{invoice_id}}
+
+# @assert status == 200
+```
+
+Both blocks above belong to group `validation` and can run in parallel.
+
+### `# @depends`
+
+Declares that this block (or its group) must wait for the named group or block to complete before executing. Use to create sequential chains between otherwise parallel groups.
+
+```http
+### @test Create Resources
+# @group create
+POST {{base_url}}/resources
+# @extract resource_id = $.id
+# @assert status == 201
+
+### @test Validate Resources
+# @group validate
+# @depends create
+GET {{base_url}}/resources/{{resource_id}}
+# @assert status == 200
+
+### @test Generate Report
+# @depends validate
+GET {{base_url}}/report
+# @assert status == 200
+```
+
+**Execution flow:** `create` group runs first → `validate` group runs after `create` completes → `Generate Report` runs after `validate` completes. Groups can depend on other groups, forming a nested execution chain.
+
+---
+
+## Variable Interpolation
+
+Use `{{variableName}}` anywhere in the URL, headers, or body to insert a variable value.
+
+```http
+@variables
+base_url = https://api.example.com
+api_key = sk-12345
+
+###
+GET {{base_url}}/users?key={{api_key}}
+Authorization: Bearer {{api_key}}
+```
+
+### Variable Resolution Order
+
+1. **Extracted variables** (from `# @extract` in prior blocks)
+2. **User-defined variables** (set in the UI's Variables panel)
+3. **Static variables** (from the `@variables` block)
+4. **Built-in variables** (see below)
+
+If a variable is not found, `{{variableName}}` is left as-is (not replaced).
+
+### Built-in Variables
+
+| Variable | Description | Example Output |
+|----------|-------------|---------------|
+| `{{$timestamp}}` | Current Unix timestamp (seconds) | `1710694104` |
+| `{{$uuid}}` | Random UUID v4 | `a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d` |
+| `{{$randomInt}}` | Random integer 0–9999 | `4217` |
+
+```http
+POST https://api.example.com/events
+Content-Type: application/json
+
+{
+  "event_id": "{{$uuid}}",
+  "timestamp": {{$timestamp}},
+  "priority": {{$randomInt}}
+}
+```
+
+---
+
+## Comments
+
+Lines starting with `#` or `//` are treated as comments. Comments are stripped in different contexts:
+
+| Context | Behavior |
+|---------|----------|
+| **Before request line** | Skipped (used for naming if no `# @name`) |
+| **In header section** | Skipped entirely |
+| **In body section** | **Trailing** comments and empty lines are stripped from the end of the body. Comments in the **middle** of a body are preserved (e.g., YAML with `#` comments). |
+| **Between blocks** | Belong to the previous block — use an empty `###` separator to avoid them leaking into the body |
+
+```http
+# This is a comment (before request line)
+GET https://api.example.com/health
+# This comment is in the header section (ignored)
+Authorization: Bearer token
+
+body content here
+# ← This trailing comment is stripped from the body
+
+# @assert status == 200   ← This IS a directive (# @assert)
+```
+
+> **Important:** Section decoration comments between blocks (like `# ====` or `# Group: xxx`) must be placed **after** a `###` separator to avoid becoming part of the previous block's request body. Use an empty `###` line to start a comment-only separator block.
+
+---
+
+## Full Example
+
+See the [`samples/`](samples/) folder for complete working examples:
+- [`azure-managed-prometheus.http`](samples/azure-managed-prometheus.http) — PromQL queries, rule groups, alert rules
+- [`azure-aks-cluster.http`](samples/azure-aks-cluster.http) — AKS cluster operations, node pools, upgrade profiles
+- [`azure-aks-prometheus-monitoring.http`](samples/azure-aks-prometheus-monitoring.http) — Integrated AKS + Prometheus monitoring E2E tests

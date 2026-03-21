@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RequestPilot</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body data-theme="dark">
+
+  <!-- HEADER -->
+  <header class="app-header">
+    <div class="brand">
+      <svg class="logo" width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="14" cy="14" r="4" fill="currentColor" />
+        <path d="M14 2a12 12 0 0 1 0 24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" />
+        <path d="M14 6a8 8 0 0 1 0 16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" />
+        <path d="M14 10a4 4 0 0 1 0 8" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" />
+      </svg>
+      <h1>RequestPilot</h1>
+    </div>
+    <div class="btn-group">
+      <button class="popout-btn" id="btn-popout" title="Open in new tab (resizable)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+        </svg>
+      </button>
+      <button class="theme-toggle" id="btn-theme" title="Toggle light/dark theme">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+        </svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+      </button>
+      <button class="btn-icon" id="btn-import" title="Import rules">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="17 8 12 3 7 8" />
+          <line x1="12" y1="3" x2="12" y2="15" />
+        </svg>
+      </button>
+      <button class="btn-icon" id="btn-export" title="Export rules">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
+      </button>
+      <button class="btn btn-primary" id="btn-add">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="5" x2="12" y2="19" />
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+        Add Rule
+      </button>
+    </div>
+    <input type="file" id="file-import" accept=".json" class="hidden" />
+  </header>
+
+  <!-- TABS -->
+  <nav class="tab-bar">
+    <button class="tab-btn active" data-tab="rules">Rules</button>
+    <button class="tab-btn" data-tab="log">Filtered Log</button>
+    <button class="tab-btn" data-tab="stats">Stats</button>
+  </nav>
+
+  <!-- RULES TAB CONTENT -->
+  <section id="tab-rules" class="tab-content active">
+    <main id="rules-container"></main>
+    <div id="empty-state" class="empty-state hidden">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+        <line x1="12" y1="8" x2="12" y2="16" />
+        <line x1="8" y1="12" x2="16" y2="12" />
+      </svg>
+      <p>No rules yet.</p>
+      <p class="sub">Click <strong>Add Rule</strong> to get started.</p>
+    </div>
+  </section>
+
+  <!-- LOG TAB CONTENT -->
+  <section id="tab-log" class="tab-content hidden">
+    <div class="log-header">
+      <h2>Network Log <span id="log-count" class="log-count"></span></h2>
+      <div class="log-actions">
+        <span id="selection-count" class="selection-count hidden">0 selected</span>
+        <button id="btn-compare" class="btn btn-primary btn-sm hidden">Compare</button>
+        <button id="btn-pause-log"class="btn btn-ghost btn-sm" title="Pause logging">⏸ Pause</button>
+        <button id="btn-export-log" class="btn btn-ghost btn-sm" title="Export log">↓ Export</button>
+        <button id="btn-import-log" class="btn btn-ghost btn-sm" title="Import log">↑ Import</button>
+        <button id="btn-clear-log" class="btn btn-ghost btn-sm">Clear</button>
+        <input type="file" id="file-import-log" accept=".json,.har" class="hidden" />
+      </div>
+    </div>
+    <div class="log-filters">
+      <div class="filter-group">
+        <label class="filter-label">Rules:</label>
+        <div class="key-picker-wrapper">
+          <button id="btn-rule-picker" class="filter-select key-picker-btn">All rules ▾</button>
+          <div id="rule-picker-dropdown" class="key-picker-dropdown hidden">
+            <div class="key-picker-actions">
+              <button id="btn-rules-all" class="btn btn-ghost btn-sm">Select All</button>
+              <button id="btn-rules-none" class="btn btn-ghost btn-sm">Deselect All</button>
+            </div>
+            <div id="rule-picker-list" class="key-picker-list"></div>
+          </div>
+        </div>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">Method:</label>
+        <select id="filter-method" class="filter-select">
+          <option value="">All</option>
+          <option value="GET">GET</option>
+          <option value="POST">POST</option>
+          <option value="PUT">PUT</option>
+          <option value="DELETE">DELETE</option>
+          <option value="PATCH">PATCH</option>
+          <option value="OPTIONS">OPTIONS</option>
+          <option value="HEAD">HEAD</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">Status:</label>
+        <select id="filter-status" class="filter-select">
+          <option value="">All</option>
+          <option value="2xx">2xx Success</option>
+          <option value="3xx">3xx Redirect</option>
+          <option value="4xx">4xx Client Error</option>
+          <option value="5xx">5xx Server Error</option>
+          <option value="err">Error</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">Match Keys:</label>
+        <div class="key-picker-wrapper">
+          <button id="btn-key-picker" class="filter-select key-picker-btn">All keys ▾</button>
+          <div id="key-picker-dropdown" class="key-picker-dropdown hidden">
+            <div class="key-picker-actions">
+              <button id="btn-keys-all" class="btn btn-ghost btn-sm">Select All</button>
+              <button id="btn-keys-none" class="btn btn-ghost btn-sm">Deselect All</button>
+            </div>
+            <div id="key-picker-list" class="key-picker-list">
+              <!-- populated dynamically -->
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">Min Match:</label>
+        <select id="filter-similarity" class="filter-select">
+          <option value="0">All</option>
+          <option value="50">≥ 50%</option>
+          <option value="60">≥ 60%</option>
+          <option value="70">≥ 70%</option>
+          <option value="80">≥ 80%</option>
+          <option value="90">≥ 90%</option>
+          <option value="100">100%</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">Show Headers:</label>
+        <div class="key-picker-wrapper">
+          <button id="btn-display-headers" class="filter-select key-picker-btn">None ▾</button>
+          <div id="display-headers-dropdown" class="key-picker-dropdown hidden">
+            <div class="key-picker-actions">
+              <button id="btn-dh-all" class="btn btn-ghost btn-sm">Select All</button>
+              <button id="btn-dh-none" class="btn btn-ghost btn-sm">Deselect All</button>
+            </div>
+            <div id="display-headers-list" class="key-picker-list">
+              <!-- populated dynamically -->
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">Group By:</label>
+        <select id="group-by-header" class="filter-select">
+          <option value="">None</option>
+          <option value="url">URL</option>
+          <!-- populated dynamically -->
+        </select>
+      </div>
+      <div class="filter-group">
+        <label class="method-chip" style="margin:0;font-size:11px;">
+          <input type="checkbox" id="hide-url" /> Hide URL
+        </label>
+      </div>
+    </div>
+    <div id="log-container"></div>
+    <div id="log-empty"class="empty-state hidden">
+      <p>No network requests captured yet.</p>
+      <p class="sub">Requests will appear here as you browse.</p>
+    </div>
+  </section>
+
+  <!-- STATS TAB CONTENT -->
+  <section id="tab-stats" class="tab-content hidden">
+    <div id="stats-content"></div>
+  </section>
+
+  <!-- MODAL -->
+  <div id="modal-overlay" class="modal-overlay hidden">
+    <div class="modal">
+      <h2 id="modal-title">Add Rule</h2>
+      <form id="rule-form" autocomplete="off">
+
+        <!-- Rule Type -->
+        <label>Rule Type</label>
+        <div id="type-selector" class="type-selector">
+          <button type="button" class="type-btn active" data-type="modify-headers">Modify Headers</button>
+          <button type="button" class="type-btn" data-type="block">Block</button>
+          <button type="button" class="type-btn" data-type="redirect">Redirect</button>
+        </div>
+        <input type="hidden" id="input-type" value="modify-headers" />
+
+        <!-- URL Pattern -->
+        <label for="input-url">URL Pattern</label>
+        <input id="input-url" type="text" placeholder="e.g. https://api.example.com/*" required />
+        <p class="hint">Supports <code>*</code> wildcards.</p>
+
+        <!-- Redirect URL -->
+        <div id="redirect-section" class="hidden">
+          <label for="input-redirect">Redirect To</label>
+          <input id="input-redirect" type="text" placeholder="https://new-api.example.com/v2" />
+        </div>
+
+        <!-- Headers -->
+        <div id="headers-section">
+          <label>Headers</label>
+          <div id="headers-list" class="headers-list"></div>
+          <button type="button" id="btn-add-header" class="btn btn-ghost btn-sm">+ Add Header</button>
+        </div>
+
+        <!-- Method Filter -->
+        <label>Methods (optional)</label>
+        <div id="method-filter" class="method-filter">
+          <label class="method-chip"><input type="checkbox" value="get" /> GET</label>
+          <label class="method-chip"><input type="checkbox" value="post" /> POST</label>
+          <label class="method-chip"><input type="checkbox" value="put" /> PUT</label>
+          <label class="method-chip"><input type="checkbox" value="delete" /> DELETE</label>
+          <label class="method-chip"><input type="checkbox" value="patch" /> PATCH</label>
+          <label class="method-chip"><input type="checkbox" value="options" /> OPTIONS</label>
+          <label class="method-chip"><input type="checkbox" value="head" /> HEAD</label>
+        </div>
+        <p class="hint">Leave unchecked to match all methods.</p>
+
+        <!-- Form Actions -->
+        <div class="form-actions">
+          <button type="button" id="btn-cancel" class="btn btn-ghost">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save</button>
+        </div>
+
+      </form>
+    </div>
+  </div>
+
+  <!-- COMPARISON OVERLAY -->
+  <div id="compare-overlay" class="compare-overlay hidden">
+    <div class="compare-panel">
+      <div class="compare-header">
+        <h2>Request Comparison</h2>
+        <div class="compare-tabs">
+          <button class="compare-tab-btn active" data-ctab="request">Request</button>
+          <button class="compare-tab-btn" data-ctab="response">Response</button>
+        </div>
+        <button id="btn-close-compare" class="btn-icon" title="Close">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+      <div id="compare-tab-request" class="compare-content compare-tab-content active"></div>
+      <div id="compare-tab-response" class="compare-content compare-tab-content hidden"></div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

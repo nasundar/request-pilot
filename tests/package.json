@@ -1,0 +1,16 @@
+{
+  "name": "request-pilot",
+  "version": "1.0.0",
+  "description": "A Manifest V3 Edge browser extension for developers — inject headers, block endpoints, redirect requests, and monitor live traffic, all from your toolbar.",
+  "main": "background.js",
+  "scripts": {
+    "test": "jest --verbose"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "jest": "^30.3.0",
+    "jest-environment-jsdom": "^30.3.0"
+  }
+}

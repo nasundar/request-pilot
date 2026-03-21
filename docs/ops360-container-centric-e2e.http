@@ -1,0 +1,528 @@
+# ============================================================
+# Ops360 Container-Centric — E2E Tests
+#
+# Validates that Ops360 metric queries flowing through
+# PromWebApi correctly set the X-Ms-Is-Ops360-Query response
+# header against a resource-centric (container-centric) AMW.
+#
+# Ops360 metrics: system.cpu.time, system.disk.io,
+# system.disk.operations, system.disk.operation_time,
+# system.filesystem.usage, system.memory.usage,
+# system.network.io, system.network.errors,
+# system.network.dropped, system.uptime.
+#
+# IsOps360Query uses AND logic across all Select() calls:
+#   all Ops360 → true | any non-Ops360 → false
+#
+# Execution model:
+#   @setup  — sequential (auth → resolve endpoint → auth)
+#   @test   — grouped parallel (see @group directives)
+#   @teardown — none (read-only queries)
+#
+# Prerequisites:
+#   - Azure AD service principal with:
+#       • "Monitoring Reader" on the target AMW
+#       • "Reader" on the AMW resource (for ARM GET)
+#   - AMW must have container/Ops360 metrics ingested
+# ============================================================
+
+@variables
+# --- Authentication ---
+tenant_id = your-tenant-id
+client_id = your-client-id
+client_secret = your-client-secret
+arm_scope = https://management.azure.com/.default
+prometheus_scope = https://prometheus.monitor.azure.com/.default
+
+# --- Azure Monitor Workspace ---
+amw_resource_id = /subscriptions/1f3fa6d2-851c-4a91-9087-1a050f3a9c38/resourceGroups/ai_naga-otel-demo-cumulative-explicit_c8db58a7-1361-4cc2-a0ff-d952b743715e_managed/providers/Microsoft.Monitor/accounts/managed-Naga-OTEL-Demo-Cumulative-Explic-amw
+arm_api_version = 2023-04-03
+
+# --- Extracted at runtime (populated by @setup blocks) ---
+arm_token =
+query_endpoint =
+access_token =
+
+# --- Time Range (adjust to a recent window with data) ---
+start = 2026-03-17T19:00:00Z
+end = 2026-03-17T19:05:00Z
+step = 60
+
+# ============================================================
+#  SETUP — Sequential: Auth → Resolve Endpoint → Auth
+# ============================================================
+
+### @setup Authenticate against ARM
+# @name Fetch ARM Access Token
+# @description Obtains OAuth2 token for Azure Resource Manager to retrieve AMW properties
+POST https://login.microsoftonline.com/{{tenant_id}}/oauth2/v2.0/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope={{arm_scope}}
+
+# @extract arm_token = $.access_token
+# @assert status == 200
+# @assert $.access_token != null
+# @assert $.token_type == Bearer
+
+### @setup Resolve Prometheus Query Endpoint from AMW
+# @name Get AMW Resource Properties
+# @description Calls ARM GET for Microsoft.Monitor/accounts to extract the Prometheus query endpoint URL dynamically
+GET https://management.azure.com{{amw_resource_id}}?api-version={{arm_api_version}}
+Authorization: Bearer {{arm_token}}
+
+# @extract query_endpoint = $.properties.metrics.prometheusQueryEndpoint
+# @assert status == 200
+# @assert $.properties.metrics.prometheusQueryEndpoint != null
+# @assert $.properties.provisioningState == Succeeded
+
+### @setup Authenticate against Prometheus
+# @name Fetch Prometheus Access Token
+# @description Obtains OAuth2 token scoped to Prometheus query endpoint for all subsequent tests
+POST https://login.microsoftonline.com/{{tenant_id}}/oauth2/v2.0/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope={{prometheus_scope}}
+
+# @extract access_token = $.access_token
+# @assert status == 200
+# @assert $.access_token != null
+# @assert $.token_type == Bearer
+
+# ============================================================
+#  TESTS — All groups run in parallel after setup completes
+# ============================================================
+
+# --------------------------------------------------
+# Group: ops360-instant
+# Instant queries for each Ops360 metric — all parallel
+# --------------------------------------------------
+
+### @test Ops360 Instant - system.cpu.time
+# @name Query system.cpu.time (instant)
+# @description Raw instant query for system.cpu.time — recognized Ops360 metric matched in Ops360MetricsMap during QW Select()
+# @group ops360-instant
+GET {{query_endpoint}}/api/v1/query?query=system_cpu_time
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Instant - system.cpu.time with rate
+# @name Query rate(system.cpu.time) (instant)
+# @description Wraps system.cpu.time in rate() to verify PromQL functions do not interfere with Ops360 detection
+# @group ops360-instant
+POST {{query_endpoint}}/api/v1/query
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=rate(system_cpu_time[5m])
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Instant - system.memory.usage
+# @name Query system.memory.usage (instant)
+# @description Gauge-type Ops360 metric reporting memory utilization by state (used, free, cached)
+# @group ops360-instant
+GET {{query_endpoint}}/api/v1/query?query=system_memory_usage
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Instant - system.network.io
+# @name Query system.network.io (instant)
+# @description Tracks bytes transmitted/received per network interface — validates Ops360 classification for network I/O
+# @group ops360-instant
+GET {{query_endpoint}}/api/v1/query?query=system_network_io
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Instant - system.disk.io
+# @name Query system.disk.io (instant)
+# @description Measures disk read/write bytes — validates Ops360 detection for disk I/O metrics
+# @group ops360-instant
+GET {{query_endpoint}}/api/v1/query?query=system_disk_io
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Instant - system.filesystem.usage
+# @name Query system.filesystem.usage (instant)
+# @description Gauge metric reporting bytes used per mount point for container disk capacity monitoring
+# @group ops360-instant
+GET {{query_endpoint}}/api/v1/query?query=system_filesystem_usage
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Instant - system.uptime
+# @name Query system.uptime (instant)
+# @description Host uptime in seconds — simplest Ops360 gauge, smoke test for container host availability
+# @group ops360-instant
+GET {{query_endpoint}}/api/v1/query?query=system_uptime
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+# --------------------------------------------------
+# Group: ops360-range
+# Range queries for each Ops360 metric — all parallel
+# --------------------------------------------------
+
+### @test Ops360 Range - system.cpu.time
+# @name Query system.cpu.time (range)
+# @description Range query through QF → QW pipeline ensuring the Ops360 header survives the codec round-trip
+# @group ops360-range
+POST {{query_endpoint}}/api/v1/query_range
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=system_cpu_time&start={{start}}&end={{end}}&step={{step}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Range - rate of system.cpu.time
+# @name Query rate(system.cpu.time) (range)
+# @description Range query with rate() — confirms matrix result and Ops360 header via QF DecodeResponse → EncodeResponse
+# @group ops360-range
+POST {{query_endpoint}}/api/v1/query_range
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=rate(system_cpu_time[5m])&start={{start}}&end={{end}}&step={{step}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.data.resultType == matrix
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Range - system.memory.usage
+# @name Query system.memory.usage (range)
+# @description Gauge metric without rate() — verifies Ops360 flag in the range query path
+# @group ops360-range
+POST {{query_endpoint}}/api/v1/query_range
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=system_memory_usage&start={{start}}&end={{end}}&step={{step}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Range - rate of system.network.io
+# @name Query rate(system.network.io) (range)
+# @description Counter-type Ops360 metric wrapped in rate() for network throughput over time
+# @group ops360-range
+POST {{query_endpoint}}/api/v1/query_range
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=rate(system_network_io[5m])&start={{start}}&end={{end}}&step={{step}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Range - rate of system.disk.io
+# @name Query rate(system.disk.io) (range)
+# @description Full pipeline test from QF through QW for disk I/O rate
+# @group ops360-range
+POST {{query_endpoint}}/api/v1/query_range
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=rate(system_disk_io[5m])&start={{start}}&end={{end}}&step={{step}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Range - system.disk.operations
+# @name Query rate(system.disk.operations) (range)
+# @description Disk IOPS — counts completed disk operations, part of Ops360 container infra set
+# @group ops360-range
+POST {{query_endpoint}}/api/v1/query_range
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=rate(system_disk_operations[5m])&start={{start}}&end={{end}}&step={{step}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Range - system.disk.operation_time
+# @name Query rate(system.disk.operation_time) (range)
+# @description Disk operation latency — time spent on disk ops, identifies I/O bottlenecks in containers
+# @group ops360-range
+POST {{query_endpoint}}/api/v1/query_range
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=rate(system_disk_operation_time[5m])&start={{start}}&end={{end}}&step={{step}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Range - system.network.errors
+# @name Query rate(system.network.errors) (range)
+# @description Network error rate — errored packets per interface for container network health
+# @group ops360-range
+POST {{query_endpoint}}/api/v1/query_range
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=rate(system_network_errors[5m])&start={{start}}&end={{end}}&step={{step}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Range - system.network.dropped
+# @name Query rate(system.network.dropped) (range)
+# @description Dropped packets per interface — indicates network saturation in container hosts
+# @group ops360-range
+POST {{query_endpoint}}/api/v1/query_range
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=rate(system_network_dropped[5m])&start={{start}}&end={{end}}&step={{step}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+# --------------------------------------------------
+# Group: non-ops360
+# Non-Ops360 metrics must return header: false
+# --------------------------------------------------
+
+### @test Non-Ops360 Instant - up metric
+# @name Query 'up' metric (instant)
+# @description 'up' is NOT in Ops360MetricsMap — mdmClient ANDs initial true with IsOps360Metric("up")=false
+# @group non-ops360
+GET {{query_endpoint}}/api/v1/query?query=up
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == false
+
+### @test Non-Ops360 Range - up metric
+# @name Query 'up' metric (range)
+# @description Confirms negative Ops360 case through query_range pipeline including QF codec aggregation
+# @group non-ops360
+POST {{query_endpoint}}/api/v1/query_range
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=up&start={{start}}&end={{end}}&step={{step}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == false
+
+# --------------------------------------------------
+# Group: mixed-query
+# Mixed Ops360 + non-Ops360 → AND logic → false
+# --------------------------------------------------
+
+### @test Mixed Query - Ops360 and non-Ops360 in expression
+# @name Mixed system_cpu_time + up (range)
+# @description Two Select() calls: system_cpu_time→AND true, up→AND false = false. QF aggregates via atomic.Bool AND.
+# @group mixed-query
+POST {{query_endpoint}}/api/v1/query_range
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=system_cpu_time * on() group_left up&start={{start}}&end={{end}}&step={{step}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == false
+
+# --------------------------------------------------
+# Group: aggregations
+# PromQL aggregations over Ops360 metrics — header: true
+# --------------------------------------------------
+
+### @test Ops360 Aggregation - sum by cpu
+# @name Aggregated sum by cpu (range)
+# @description sum() grouped by 'cpu' over rate(system_cpu_time) — single Ops360 metric so header is true
+# @group aggregations
+POST {{query_endpoint}}/api/v1/query_range
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=sum by (cpu) (rate(system_cpu_time[5m]))&start={{start}}&end={{end}}&step={{step}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.data.resultType == matrix
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Aggregation - avg memory
+# @name Aggregated avg memory (range)
+# @description avg(system_memory_usage) — label-dropping aggregation preserves Ops360 classification
+# @group aggregations
+POST {{query_endpoint}}/api/v1/query_range
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=avg(system_memory_usage)&start={{start}}&end={{end}}&step={{step}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.data.resultType == matrix
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Aggregation - topk network io
+# @name TopK network io (instant)
+# @description topk(5) over rate(system_network_io) — validates topk retains the Ops360 header
+# @group aggregations
+POST {{query_endpoint}}/api/v1/query
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=topk(5, rate(system_network_io[5m]))
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+# --------------------------------------------------
+# Group: metadata
+# Labels & Series endpoints for Ops360 metrics
+# --------------------------------------------------
+
+### @test Labels for system.cpu.time
+# @name Get label names for system_cpu_time
+# @description Retrieves label names on system_cpu_time to validate expected labels (cpu, state, job, instance)
+# @group metadata
+POST {{query_endpoint}}/api/v1/labels
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+match[]=system_cpu_time
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.data.length > 0
+
+### @test Label Values for __name__
+# @name Get all metric names
+# @description Lists all metric names in the AMW — should contain Ops360 OTel host metrics
+# @group metadata
+GET {{query_endpoint}}/api/v1/label/__name__/values
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.data.length > 0
+
+### @test Series for system.cpu.time
+# @name Get series for system_cpu_time
+# @description Returns all time series matching system_cpu_time — each is a unique label combination
+# @group metadata
+POST {{query_endpoint}}/api/v1/series
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+match[]=system_cpu_time&start={{start}}&end={{end}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.data.length > 0
+
+### @test Series for system.memory.usage
+# @name Get series for system_memory_usage
+# @description Returns all time series for system_memory_usage — validates presence with expected label dimensions
+# @group metadata
+POST {{query_endpoint}}/api/v1/series
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+match[]=system_memory_usage&start={{start}}&end={{end}}
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.data.length > 0
+
+# --------------------------------------------------
+# Group: stats
+# Queries with stats=all — Ops360 header must survive
+# --------------------------------------------------
+
+### @test Ops360 Range with Stats - system.cpu.time
+# @name Query system.cpu.time with stats (range)
+# @description stats=all requests execution statistics — confirms stats do not interfere with Ops360 header injection
+# @group stats
+POST {{query_endpoint}}/api/v1/query_range
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=rate(system_cpu_time[5m])&start={{start}}&end={{end}}&step={{step}}&stats=all
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.data.resultType == matrix
+# @assert $.headers.x-ms-is-ops360-query == true
+
+### @test Ops360 Instant with Stats - system.memory.usage
+# @name Query system.memory.usage with stats (instant)
+# @description Validates Ops360 header in instant query path when stats are computed alongside
+# @group stats
+POST {{query_endpoint}}/api/v1/query
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=system_memory_usage&stats=all
+
+# @assert status == 200
+# @assert $.status == success
+# @assert $.headers.x-ms-is-ops360-query == true
+
+# --------------------------------------------------
+# Group: error-cases
+# Error handling validation
+# --------------------------------------------------
+
+### @test Invalid PromQL Returns 400
+# @name Malformed PromQL returns 400
+# @description Syntactically invalid PromQL (unclosed bracket) — parser rejects before metric resolution
+# @group error-cases
+POST {{query_endpoint}}/api/v1/query
+Authorization: Bearer {{access_token}}
+Content-Type: application/x-www-form-urlencoded
+
+query=rate(system_cpu_time[)
+
+# @assert status == 400
+# @assert $.status == error
+# @assert $.errorType != null
+
+### @test Unauthorized Without Token
+# @name Missing auth returns 401
+# @description Query with no Authorization header — confirms auth is enforced at the gateway level
+# @group error-cases
+GET {{query_endpoint}}/api/v1/query?query=system_cpu_time
+
+# @assert status == 401

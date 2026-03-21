@@ -1,0 +1,8 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for Request Pilot",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}
