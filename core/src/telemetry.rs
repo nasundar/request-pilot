@@ -420,9 +420,9 @@ pub struct TelemetryCollector {
     // Metric accumulators
     suite_outcome: Option<String>,
     suite_duration_ms: u64,
-    block_counts: Vec<(String, String, String)>, // (file, block_type, outcome)
-    block_durations: Vec<(String, String, u64)>, // (file, block_type, duration_ms)
-    assertion_counts: Vec<(String, String)>,      // (file, outcome)
+    block_counts: Vec<(String, String, String, String, String)>, // (file, block_type, outcome, block_name, group)
+    block_durations: Vec<(String, String, u64, String, String)>, // (file, block_type, duration_ms, block_name, group)
+    assertion_counts: Vec<(String, String, String, String)>,      // (file, outcome, block_name, group)
     file_name: String,
     start_time_ns: u64,
 }
@@ -529,6 +529,8 @@ impl TelemetryCollector {
             self.assertion_counts.push((
                 self.file_name.clone(),
                 if *passed { "pass" } else { "fail" }.to_string(),
+                name.to_string(),
+                group.unwrap_or("").to_string(),
             ));
         }
 
@@ -670,15 +672,20 @@ impl TelemetryCollector {
         });
 
         // Metric accumulators
+        let group_str = group.unwrap_or("").to_string();
         self.block_counts.push((
             self.file_name.clone(),
             block_type.to_string(),
             outcome.to_string(),
+            name.to_string(),
+            group_str.clone(),
         ));
         self.block_durations.push((
             self.file_name.clone(),
             block_type.to_string(),
             duration_ms,
+            name.to_string(),
+            group_str,
         ));
     }
 
@@ -851,25 +858,32 @@ impl TelemetryCollector {
         }
 
         // rp.block.runs (counter) — aggregate by (file, block_type, outcome)
-        let mut block_agg: HashMap<(String, String, String), i64> = HashMap::new();
-        for (file, bt, outcome) in &self.block_counts {
+        let mut block_agg: HashMap<(String, String, String, String, String), i64> = HashMap::new();
+        for (file, bt, outcome, bname, group) in &self.block_counts {
             *block_agg
-                .entry((file.clone(), bt.clone(), outcome.clone()))
+                .entry((file.clone(), bt.clone(), outcome.clone(), bname.clone(), group.clone()))
                 .or_insert(0) += 1;
         }
         if !block_agg.is_empty() {
             let data_points: Vec<_> = block_agg
                 .iter()
-                .map(|((file, bt, outcome), count)| OtlpNumberDataPoint {
-                    attributes: vec![
+                .map(|((file, bt, outcome, bname, group), count)| {
+                    let mut attrs = vec![
                         kv_str("file", file),
                         kv_str("block_type", bt),
                         kv_str("outcome", outcome),
-                    ],
-                    start_time_unix_nano: start_ns.clone(),
-                    time_unix_nano: now_ns.clone(),
-                    as_int: Some(*count),
-                    as_double: None,
+                        kv_str("block_name", bname),
+                    ];
+                    if !group.is_empty() {
+                        attrs.push(kv_str("group", group));
+                    }
+                    OtlpNumberDataPoint {
+                        attributes: attrs,
+                        start_time_unix_nano: start_ns.clone(),
+                        time_unix_nano: now_ns.clone(),
+                        as_int: Some(*count),
+                        as_double: None,
+                    }
                 })
                 .collect();
             metrics.push(OtlpMetric {
@@ -886,23 +900,31 @@ impl TelemetryCollector {
         }
 
         // rp.block.duration (histogram) — aggregate by (file, block_type)
-        let mut dur_agg: HashMap<(String, String), Vec<u64>> = HashMap::new();
-        for (file, bt, dur) in &self.block_durations {
+        let mut dur_agg: HashMap<(String, String, String, String), Vec<u64>> = HashMap::new();
+        for (file, bt, dur, bname, group) in &self.block_durations {
             dur_agg
-                .entry((file.clone(), bt.clone()))
+                .entry((file.clone(), bt.clone(), bname.clone(), group.clone()))
                 .or_default()
                 .push(*dur);
         }
         if !dur_agg.is_empty() {
             let data_points: Vec<_> = dur_agg
                 .iter()
-                .map(|((file, bt), durations)| {
+                .map(|((file, bt, bname, group), durations)| {
                     let count = durations.len() as u64;
                     let sum: f64 = durations.iter().map(|d| *d as f64).sum();
                     let min = durations.iter().copied().min().unwrap_or(0) as f64;
                     let max = durations.iter().copied().max().unwrap_or(0) as f64;
+                    let mut attrs = vec![
+                        kv_str("file", file),
+                        kv_str("block_type", bt),
+                        kv_str("block_name", bname),
+                    ];
+                    if !group.is_empty() {
+                        attrs.push(kv_str("group", group));
+                    }
                     OtlpHistogramDataPoint {
-                        attributes: vec![kv_str("file", file), kv_str("block_type", bt)],
+                        attributes: attrs,
                         start_time_unix_nano: start_ns.clone(),
                         time_unix_nano: now_ns.clone(),
                         count,
@@ -925,21 +947,31 @@ impl TelemetryCollector {
         }
 
         // rp.assertion.total (counter) — aggregate by (file, outcome)
-        let mut assert_agg: HashMap<(String, String), i64> = HashMap::new();
-        for (file, outcome) in &self.assertion_counts {
+        let mut assert_agg: HashMap<(String, String, String, String), i64> = HashMap::new();
+        for (file, outcome, bname, group) in &self.assertion_counts {
             *assert_agg
-                .entry((file.clone(), outcome.clone()))
+                .entry((file.clone(), outcome.clone(), bname.clone(), group.clone()))
                 .or_insert(0) += 1;
         }
         if !assert_agg.is_empty() {
             let data_points: Vec<_> = assert_agg
                 .iter()
-                .map(|((file, outcome), count)| OtlpNumberDataPoint {
-                    attributes: vec![kv_str("file", file), kv_str("outcome", outcome)],
-                    start_time_unix_nano: start_ns.clone(),
-                    time_unix_nano: now_ns.clone(),
-                    as_int: Some(*count),
-                    as_double: None,
+                .map(|((file, outcome, bname, group), count)| {
+                    let mut attrs = vec![
+                        kv_str("file", file),
+                        kv_str("outcome", outcome),
+                        kv_str("block_name", bname),
+                    ];
+                    if !group.is_empty() {
+                        attrs.push(kv_str("group", group));
+                    }
+                    OtlpNumberDataPoint {
+                        attributes: attrs,
+                        start_time_unix_nano: start_ns.clone(),
+                        time_unix_nano: now_ns.clone(),
+                        as_int: Some(*count),
+                        as_double: None,
+                    }
                 })
                 .collect();
             metrics.push(OtlpMetric {
