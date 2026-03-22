@@ -457,19 +457,39 @@ async fn run_suite_inner(
             cfg.service_name = service_name;
             Some(cfg)
         } else if telem_value.starts_with("/subscriptions/") {
-            // ARM resource ID — fetch OTLP endpoints
-            let token = suite
+            // ARM resource ID — fetch OTLP endpoints using ARM token,
+            // then use monitor-scoped token for ingestion
+            let arm_token = suite
                 .telemetry_token
                 .as_ref()
                 .and_then(|tv| {
                     let v = var_store.get(tv).unwrap_or_default();
                     if v.is_empty() { None } else { Some(v) }
                 });
-            match token {
+
+            // Monitor ingestion token — look for it in variable store
+            // Azure auth auto-adds https://monitor.azure.com/.default scope,
+            // and the token gets injected via extra_variables
+            let ingest_token = var_store.get("__monitor_token").unwrap_or_default();
+            let ingest_token = if ingest_token.is_empty() {
+                // Fallback: try the ARM token (works if user has right RBAC)
+                arm_token.clone()
+            } else {
+                Some(ingest_token)
+            };
+
+            match arm_token {
                 Some(t) => {
                     match telemetry::fetch_otlp_endpoints(&telem_value, &t).await {
                         Ok(mut cfg) => {
                             cfg.service_name = service_name;
+                            // Override auth header with monitor-scoped token for ingestion
+                            if let Some(ref mt) = ingest_token {
+                                cfg.auth_header = Some((
+                                    "Authorization".to_string(),
+                                    format!("Bearer {}", mt),
+                                ));
+                            }
                             Some(cfg)
                         }
                         Err(e) => {

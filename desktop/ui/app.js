@@ -1894,6 +1894,7 @@ async function runAllTests() {
   if (telemetryState !== 'off') {
     telemetryStats = [];
     setTelemetryState('sending');
+    rpLog('info', 'OTEL telemetry: export will begin after test execution');
   }
 
   // Azure auth: use cached tokens if authenticated
@@ -1904,6 +1905,12 @@ async function runAllTests() {
     for (const f of loadedFiles) {
       const tokenVars = fetchDevModeToken(f.suite, f.content);
       azureExtraVars.push(...tokenVars);
+    }
+
+    // Inject monitor token for OTLP telemetry ingestion
+    const monitorCached = azureTokenCache.get('https://monitor.azure.com/.default');
+    if (monitorCached && Date.now() < monitorCached.expiresAt - 60000) {
+      azureExtraVars.push(['__monitor_token', monitorCached.token]);
     }
   }
 
@@ -2041,6 +2048,13 @@ async function runAllTests() {
     }
   } finally {
     rpLog('info', 'Run All completed', { passed: totalPassed, failed: totalFailed, skipped: totalSkipped, timeMs: totalTimeMs });
+    // If telemetry was "sending" but no results came back, update state
+    if (telemetryState === 'sending') {
+      if (telemetryStats.length === 0) {
+        setTelemetryState('configured');
+        rpLog('warn', 'OTEL telemetry: no telemetry data was returned from any file. Check that telemetry variables are correctly configured and populated.');
+      }
+    }
     stopBlockProgressListener();
     setRunning(false);
     refreshHistoryIfVisible();
@@ -4616,6 +4630,8 @@ function updateAzureAuthButton() {
 function setAzureAuthState(state) {
   azureAuthState = state;
   updateAzureAuthButton();
+  // Update OTEL state based on Azure auth
+  updateTelemetryAuthState();
 }
 
 async function initAzureAuth() {
@@ -4656,9 +4672,26 @@ function detectAzureAuthNeeded() {
       }
     }
   }
+
+  // Auto-add monitor ingestion scope if any file uses telemetry with a resource ID
+  for (const f of loadedFiles) {
+    if (f.suite.telemetry_var) {
+      // Check if the variable looks like a resource ID (will need monitor token for OTLP)
+      const tVal = f.suite.variables?.find(([k]) => k === f.suite.telemetry_var)?.[1] || '';
+      if (tVal.startsWith('/subscriptions/') || f.suite.telemetry_token) {
+        scopes.add('https://monitor.azure.com/.default');
+        break;
+      }
+    }
+  }
   
   azureAuthScopes = [...scopes]; // Store needed scopes
   
+  // Log if monitor scope was auto-added for telemetry
+  if (azureAuthScopes.includes('https://monitor.azure.com/.default')) {
+    rpLog('info', 'Azure auth: monitor.azure.com scope auto-added for OTEL ingestion');
+  }
+
   if (azureAuthScopes.length === 0) {
     setAzureAuthState('off');
     return;
@@ -5103,23 +5136,42 @@ function emitToLogPopout(entry) {
 
 // ── OTEL Telemetry ──
 
+function updateTelemetryAuthState() {
+  // Only relevant if telemetry is configured but not yet running/completed
+  if (telemetryState === 'off' || telemetryState === 'sending' || 
+      telemetryState === 'active' || telemetryState === 'error') return;
+  
+  // Check if Azure auth has monitor scope token
+  const monitorCached = azureTokenCache.get('https://monitor.azure.com/.default');
+  const hasMonitorToken = monitorCached && Date.now() < monitorCached.expiresAt - 60000;
+  
+  if (hasMonitorToken && (telemetryState === 'configured' || telemetryState === 'ready')) {
+    setTelemetryState('ready');
+    rpLog('info', 'OTEL: Ready to send — monitor.azure.com token acquired');
+  } else if (!hasMonitorToken && telemetryState === 'ready') {
+    setTelemetryState('configured');
+  }
+}
+
 function detectTelemetryConfig() {
   let hasTelemetry = false;
+  let telemetryFiles = [];
   for (const f of loadedFiles) {
     if (f.suite.telemetry_var) {
       hasTelemetry = true;
-      break;
-    }
-    // Fallback: check raw content for directive
-    if (f.content && /^#\s*@telemetry\s+\S/m.test(f.content)) {
+      telemetryFiles.push(f.name);
+    } else if (f.content && /^#\s*@telemetry\s+\S/m.test(f.content)) {
       hasTelemetry = true;
-      break;
+      telemetryFiles.push(f.name);
     }
   }
   const btn = $('#telemetryBtn');
   if (hasTelemetry) {
     btn.classList.add('visible');
-    if (telemetryState === 'off') setTelemetryState('configured');
+    if (telemetryState === 'off') {
+      setTelemetryState('configured');
+      rpLog('info', `OTEL telemetry configured`, { files: telemetryFiles });
+    }
   } else {
     btn.classList.remove('visible');
     setTelemetryState('off');
@@ -5131,7 +5183,7 @@ function setTelemetryState(state) {
   const btn = $('#telemetryBtn');
   const icon = $('#telemetryIcon');
   const label = $('#telemetryLabel');
-  btn.classList.remove('active', 'sending', 'error');
+  btn.classList.remove('active', 'sending', 'error', 'ready');
 
   switch (state) {
     case 'off':
@@ -5142,6 +5194,11 @@ function setTelemetryState(state) {
       btn.classList.add('visible');
       icon.textContent = '📡';
       label.textContent = 'OTEL';
+      break;
+    case 'ready':
+      btn.classList.add('visible', 'ready');
+      icon.textContent = '📡';
+      label.textContent = 'OTEL ✓';
       break;
     case 'sending':
       btn.classList.add('visible', 'sending');
@@ -5159,10 +5216,14 @@ function setTelemetryState(state) {
       label.textContent = 'OTEL ✗';
       break;
   }
+  renderTelemetryTooltip();
 }
 
 function processTelemetryResult(fileName, results) {
-  if (!results.telemetry) return;
+  if (!results.telemetry) {
+    rpLog('debug', `No telemetry data returned for ${fileName} (telemetry not configured or init failed)`);
+    return;
+  }
   const t = results.telemetry;
   const entry = {
     file: fileName,
@@ -5178,68 +5239,111 @@ function processTelemetryResult(fileName, results) {
   const hasErrors = entry.errors.length > 0;
   if (hasErrors) {
     setTelemetryState('error');
-    rpLog('warn', `Telemetry export had errors for ${fileName}`, entry.errors);
+    for (const err of entry.errors) {
+      rpLog('error', `OTEL export error [${fileName}]: ${err}`);
+    }
   } else {
     setTelemetryState('active');
+    rpLog('info', `OTEL export succeeded [${fileName}]: ${entry.traces} traces, ${entry.metrics} metrics, ${entry.logs} logs (${entry.time_ms}ms)`);
   }
-  rpLog('info', `Telemetry exported for ${fileName}`, {
-    traces: entry.traces,
-    metrics: entry.metrics,
-    logs: entry.logs,
-    time_ms: entry.time_ms,
-  });
   renderTelemetryTooltip();
 }
 
 function renderTelemetryTooltip() {
   const tooltip = $('#telemetryTooltip');
   if (!tooltip) return;
-  if (telemetryStats.length === 0) {
-    tooltip.innerHTML = '<h4>📡 OTEL Telemetry</h4><div class="tt-row"><span class="tt-key">No data exported yet</span></div>';
-    return;
-  }
 
-  // Aggregate totals
-  let totalTraces = 0, totalMetrics = 0, totalLogs = 0, totalErrors = 0, totalTime = 0;
-  const allErrors = [];
-  for (const s of telemetryStats) {
-    totalTraces += s.traces;
-    totalMetrics += s.metrics;
-    totalLogs += s.logs;
-    totalErrors += s.errors.length;
-    totalTime += s.time_ms;
-    allErrors.push(...s.errors);
-  }
+  let html = '<h4>📡 OTEL Telemetry</h4>';
 
-  const endpoint = telemetryStats[0]?.endpoint || 'N/A';
-  const maskedEndpoint = endpoint.length > 40
-    ? endpoint.slice(0, 30) + '…' + endpoint.slice(-10)
-    : endpoint;
-
-  let html = `<h4>📡 OTEL Telemetry</h4>`;
-  html += `<div class="tt-row"><span class="tt-key">Endpoint</span><span class="tt-val" title="${escHtml(endpoint)}">${escHtml(maskedEndpoint)}</span></div>`;
-  html += `<div class="tt-row"><span class="tt-key">Traces</span><span class="tt-val success">${totalTraces}</span></div>`;
-  html += `<div class="tt-row"><span class="tt-key">Metrics</span><span class="tt-val success">${totalMetrics}</span></div>`;
-  html += `<div class="tt-row"><span class="tt-key">Logs</span><span class="tt-val success">${totalLogs}</span></div>`;
-  html += `<div class="tt-row"><span class="tt-key">Export time</span><span class="tt-val">${totalTime}ms</span></div>`;
-
-  if (telemetryStats.length > 1) {
-    html += `<div class="tt-section"><div class="tt-section-title">Per File</div>`;
-    for (const s of telemetryStats) {
-      const status = s.errors.length > 0 ? '✗' : '✓';
-      const cls = s.errors.length > 0 ? 'error' : 'success';
-      html += `<div class="tt-row"><span class="tt-key">${escHtml(s.file)}</span><span class="tt-val ${cls}">${status} ${s.traces}T ${s.metrics}M ${s.logs}L</span></div>`;
+  // Show state-specific info
+  if (telemetryState === 'configured') {
+    html += '<div class="tt-row"><span class="tt-key">Status</span><span class="tt-val">Configured — awaiting Azure auth</span></div>';
+    // Show which files have telemetry
+    const telFiles = loadedFiles.filter(f => f.suite.telemetry_var);
+    if (telFiles.length > 0) {
+      html += '<div class="tt-section"><div class="tt-section-title">Configured Files</div>';
+      for (const f of telFiles) {
+        const varName = f.suite.telemetry_var;
+        const varVal = f.suite.variables?.find(([k]) => k === varName)?.[1] || '(empty)';
+        const display = varVal.length > 50 ? varVal.slice(0, 40) + '…' : varVal;
+        html += '<div class="tt-row"><span class="tt-key">' + escHtml(f.name) + '</span><span class="tt-val">' + escHtml(display) + '</span></div>';
+      }
+      html += '</div>';
     }
-    html += `</div>`;
-  }
-
-  if (allErrors.length > 0) {
-    html += `<div class="tt-section"><div class="tt-section-title">Errors (${allErrors.length})</div><div class="tt-error-list">`;
-    for (const e of allErrors.slice(0, 5)) {
-      html += `<div>${escHtml(e)}</div>`;
+    html += '<div class="tt-section"><div class="tt-section-title">Next Step</div><div style="color: var(--text-muted); font-size: 11px;">Click Azure Auth to authenticate — monitor.azure.com scope will be auto-added</div></div>';
+  } else if (telemetryState === 'ready') {
+    html += '<div class="tt-row"><span class="tt-key">Status</span><span class="tt-val success">Ready — authenticated</span></div>';
+    const telFiles = loadedFiles.filter(f => f.suite.telemetry_var);
+    if (telFiles.length > 0) {
+      html += '<div class="tt-section"><div class="tt-section-title">Files</div>';
+      for (const f of telFiles) {
+        html += '<div class="tt-row"><span class="tt-key">' + escHtml(f.name) + '</span><span class="tt-val success">✓ Ready</span></div>';
+      }
+      html += '</div>';
     }
-    if (allErrors.length > 5) html += `<div>… and ${allErrors.length - 5} more</div>`;
-    html += `</div></div>`;
+    html += '<div class="tt-section"><div class="tt-section-title">Next Step</div><div style="color: var(--text-muted); font-size: 11px;">Run tests — telemetry will be exported automatically</div></div>';
+  } else if (telemetryState === 'sending') {
+    html += '<div class="tt-row"><span class="tt-key">Status</span><span class="tt-val" style="color: #00bcd4;">Exporting telemetry…</span></div>';
+    if (telemetryStats.length > 0) {
+      // Show progress so far
+      let totalTraces = 0, totalMetrics = 0, totalLogs = 0;
+      for (const s of telemetryStats) {
+        totalTraces += s.traces;
+        totalMetrics += s.metrics;
+        totalLogs += s.logs;
+      }
+      html += '<div class="tt-row"><span class="tt-key">Traces sent</span><span class="tt-val success">' + totalTraces + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-key">Metrics sent</span><span class="tt-val success">' + totalMetrics + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-key">Logs sent</span><span class="tt-val success">' + totalLogs + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-key">Files completed</span><span class="tt-val">' + telemetryStats.length + '</span></div>';
+    } else {
+      html += '<div class="tt-row"><span class="tt-key">Progress</span><span class="tt-val">Waiting for first file to complete…</span></div>';
+    }
+  } else if (telemetryState === 'active' || telemetryState === 'error') {
+    // Show final stats
+    if (telemetryStats.length === 0) {
+      html += '<div class="tt-row"><span class="tt-key">No data exported</span></div>';
+    } else {
+      let totalTraces = 0, totalMetrics = 0, totalLogs = 0, totalErrors = 0, totalTime = 0;
+      const allErrors = [];
+      for (const s of telemetryStats) {
+        totalTraces += s.traces;
+        totalMetrics += s.metrics;
+        totalLogs += s.logs;
+        totalErrors += s.errors.length;
+        totalTime += s.time_ms;
+        allErrors.push(...s.errors);
+      }
+      const endpoint = telemetryStats[0]?.endpoint || 'N/A';
+      const maskedEndpoint = endpoint.length > 40 ? endpoint.slice(0, 30) + '…' + endpoint.slice(-10) : endpoint;
+
+      html += '<div class="tt-row"><span class="tt-key">Endpoint</span><span class="tt-val" title="' + escHtml(endpoint) + '">' + escHtml(maskedEndpoint) + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-key">Traces</span><span class="tt-val success">' + totalTraces + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-key">Metrics</span><span class="tt-val success">' + totalMetrics + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-key">Logs</span><span class="tt-val success">' + totalLogs + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-key">Export time</span><span class="tt-val">' + totalTime + 'ms</span></div>';
+
+      if (telemetryStats.length > 1) {
+        html += '<div class="tt-section"><div class="tt-section-title">Per File</div>';
+        for (const s of telemetryStats) {
+          const status = s.errors.length > 0 ? '✗' : '✓';
+          const cls = s.errors.length > 0 ? 'error' : 'success';
+          html += '<div class="tt-row"><span class="tt-key">' + escHtml(s.file) + '</span><span class="tt-val ' + cls + '">' + status + ' ' + s.traces + 'T ' + s.metrics + 'M ' + s.logs + 'L</span></div>';
+        }
+        html += '</div>';
+      }
+
+      if (allErrors.length > 0) {
+        html += '<div class="tt-section"><div class="tt-section-title">Errors (' + allErrors.length + ')</div><div class="tt-error-list">';
+        for (const e of allErrors.slice(0, 5)) {
+          html += '<div>' + escHtml(e) + '</div>';
+        }
+        if (allErrors.length > 5) html += '<div>… and ' + (allErrors.length - 5) + ' more</div>';
+        html += '</div></div>';
+      }
+    }
+  } else {
+    html += '<div class="tt-row"><span class="tt-key">Status</span><span class="tt-val">Not configured</span></div>';
   }
 
   tooltip.innerHTML = html;

@@ -600,6 +600,7 @@ impl App {
                 let single_suite = TestSuite {
                     variables: file.suite.variables.clone(),
                     blocks: vec![block.clone()],
+                    ..Default::default()
                 };
                 let total_blocks = file.suite.blocks.len();
                 (single_suite, block.name.clone(), total_blocks)
@@ -630,6 +631,7 @@ impl App {
                     total_time_ms: single_results.total_time_ms,
                     block_results: Vec::new(),
                     final_variables: single_results.final_variables,
+                    telemetry: None,
                 };
                 for _ in 0..total_blocks {
                     full_results.block_results.push(BlockResult {
@@ -668,6 +670,7 @@ impl App {
             let group_suite = TestSuite {
                 variables: file.suite.variables.clone(),
                 blocks,
+                ..Default::default()
             };
             let total_blocks = file.suite.blocks.len();
             (group_suite, total_blocks)
@@ -723,6 +726,7 @@ impl App {
 
                 let full_results = TestRunResults {
                     passed, failed, skipped, total_time_ms, block_results, final_variables,
+                    telemetry: None,
                 };
                 let _ = tx.send(RunnerMessage::SuiteComplete {
                     file_idx: fi, results: full_results,

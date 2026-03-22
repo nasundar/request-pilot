@@ -3210,6 +3210,17 @@ input:focus, select:focus, textarea:focus { outline: none; }
   display: flex;
 }
 /* State: active — green glow */
+/* State: ready — authenticated, ready to send */
+.telemetry-btn.ready {
+  border-color: rgba(76, 175, 80, 0.4);
+  background: rgba(76, 175, 80, 0.06);
+  color: #66bb6a;
+}
+.telemetry-btn.ready:hover {
+  background: rgba(76, 175, 80, 0.14);
+  border-color: #66bb6a;
+}
+
 .telemetry-btn.active {
   border-color: rgba(76, 175, 80, 0.5);
   background: rgba(76, 175, 80, 0.08);
