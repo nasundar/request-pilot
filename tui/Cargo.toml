@@ -1,0 +1,18 @@
+[package]
+name = "request-pilot-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Request Pilot TUI — terminal interface for HTTP testing"
+
+[[bin]]
+name = "request-pilot"
+path = "src/main.rs"
+
+[dependencies]
+request-pilot-core = { path = "../core" }
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+color-eyre = "0.6"

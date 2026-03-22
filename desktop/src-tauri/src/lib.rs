@@ -1,15 +1,21 @@
-mod assertions;
-mod env_file;
-mod history;
-mod http_client;
-mod http_parser;
-mod test_runner;
-mod url_trie;
-mod variables;
+use request_pilot_core::{
+    env_file, history, http_client, http_parser, test_runner, url_trie, variables,
+};
 
 use history::HistoryStore;
-use std::sync::Mutex;
-use tauri::State;
+use std::sync::{Arc, Mutex};
+use tauri::{Emitter, State};
+
+struct TauriProgress(tauri::AppHandle);
+
+impl test_runner::ProgressHandler for TauriProgress {
+    fn on_block_start(&self, progress: &test_runner::BlockProgress) {
+        let _ = self.0.emit("block-progress", progress);
+    }
+    fn on_block_complete(&self, progress: &test_runner::BlockProgress) {
+        let _ = self.0.emit("block-progress", progress);
+    }
+}
 
 #[tauri::command]
 async fn send_request(
@@ -26,7 +32,7 @@ async fn send_request(
     let seq = s.next_seq();
     let entry = history::HistoryEntry {
         seq,
-        id: uuid::Uuid::new_v4().to_string(),
+        id: request_pilot_core::uuid::Uuid::new_v4().to_string(),
         run_id: None,
         source: "manual".to_string(),
         block_name: None,
@@ -39,7 +45,7 @@ async fn send_request(
         response_body: Some(response.body.clone()),
         response_time_ms: response.time_ms,
         response_size_bytes: response.size_bytes,
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: request_pilot_core::chrono::Utc::now().to_rfc3339(),
     };
     s.add(entry);
 
@@ -68,8 +74,9 @@ async fn run_test_suite(
     store: State<'_, Mutex<HistoryStore>>,
     app: tauri::AppHandle,
 ) -> Result<test_runner::TestRunResults, String> {
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let mut results = test_runner::run_suite(&suite, &extra_variables, &app).await;
+    let run_id = request_pilot_core::uuid::Uuid::new_v4().to_string();
+    let progress = Arc::new(TauriProgress(app.clone()));
+    let mut results = test_runner::run_suite(&suite, &extra_variables, Some(progress)).await;
 
     // Add each executed request to history with seq numbers
     let mut s = store.lock().map_err(|e| e.to_string())?;
@@ -79,7 +86,7 @@ async fn run_test_suite(
             block_result.seq = Some(seq);
             let entry = history::HistoryEntry {
                 seq,
-                id: uuid::Uuid::new_v4().to_string(),
+                id: request_pilot_core::uuid::Uuid::new_v4().to_string(),
                 run_id: Some(run_id.clone()),
                 source: "test-run".to_string(),
                 block_name: Some(block_result.name.clone()),
@@ -92,7 +99,7 @@ async fn run_test_suite(
                 response_body: Some(resp.body.clone()),
                 response_time_ms: resp.time_ms,
                 response_size_bytes: resp.size_bytes,
-                timestamp: chrono::Utc::now().to_rfc3339(),
+                timestamp: request_pilot_core::chrono::Utc::now().to_rfc3339(),
             };
             s.add(entry);
         }

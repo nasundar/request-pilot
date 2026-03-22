@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use tauri::{AppHandle, Emitter};
+use std::sync::Arc;
 use tokio::task::JoinSet;
 
 use crate::assertions::{self, AssertionResult};
@@ -22,6 +22,13 @@ pub struct BlockProgress {
     pub extract_total: usize,
     pub http_status: Option<u16>,
     pub error: Option<String>,
+}
+
+/// Trait for receiving real-time block execution progress.
+/// Desktop GUI implements this with Tauri events, TUI with mpsc channels.
+pub trait ProgressHandler: Send + Sync {
+    fn on_block_start(&self, progress: &BlockProgress);
+    fn on_block_complete(&self, progress: &BlockProgress);
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -60,8 +67,7 @@ pub struct ExtractResult {
 
 // ── Helper functions ──
 
-fn emit_progress(
-    app: &Option<AppHandle>,
+fn make_progress(
     name: &str,
     block_type: &str,
     status: &str,
@@ -72,44 +78,60 @@ fn emit_progress(
     extract_total: usize,
     http_status: Option<u16>,
     error: Option<&str>,
-) {
-    if let Some(ref app) = app {
-        let _ = app.emit(
-            "block-progress",
-            &BlockProgress {
-                seq: None,
-                name: name.to_string(),
-                block_type: block_type.to_string(),
-                status: status.to_string(),
-                time_ms,
-                assertion_passed,
-                assertion_total,
-                extract_ok,
-                extract_total,
-                http_status,
-                error: error.map(|e| e.to_string()),
-            },
-        );
+) -> BlockProgress {
+    BlockProgress {
+        seq: None,
+        name: name.to_string(),
+        block_type: block_type.to_string(),
+        status: status.to_string(),
+        time_ms,
+        assertion_passed,
+        assertion_total,
+        extract_ok,
+        extract_total,
+        http_status,
+        error: error.map(|e| e.to_string()),
     }
 }
 
-fn emit_completed(app: &Option<AppHandle>, result: &BlockResult) {
-    let assertion_passed = result.assertion_results.iter().filter(|r| r.passed).count();
-    let extract_ok = result.extract_results.iter().filter(|e| e.success).count();
-    let http_status = result.response.as_ref().map(|r| r.status);
-    emit_progress(
-        app,
-        &result.name,
-        &result.block_type,
-        &result.status,
-        result.time_ms,
-        assertion_passed,
-        result.assertion_results.len(),
-        extract_ok,
-        result.extract_results.len(),
-        http_status,
-        result.error.as_deref(),
-    );
+fn emit_start(handler: &Option<Arc<dyn ProgressHandler>>, name: &str, block_type: &str) {
+    if let Some(ref h) = handler {
+        let progress = make_progress(name, block_type, "running", 0, 0, 0, 0, 0, None, None);
+        h.on_block_start(&progress);
+    }
+}
+
+fn emit_completed(handler: &Option<Arc<dyn ProgressHandler>>, result: &BlockResult) {
+    if let Some(ref h) = handler {
+        let assertion_passed = result.assertion_results.iter().filter(|r| r.passed).count();
+        let extract_ok = result.extract_results.iter().filter(|e| e.success).count();
+        let http_status = result.response.as_ref().map(|r| r.status);
+        let progress = make_progress(
+            &result.name,
+            &result.block_type,
+            &result.status,
+            result.time_ms,
+            assertion_passed,
+            result.assertion_results.len(),
+            extract_ok,
+            result.extract_results.len(),
+            http_status,
+            result.error.as_deref(),
+        );
+        h.on_block_complete(&progress);
+    }
+}
+
+fn emit_skipped(
+    handler: &Option<Arc<dyn ProgressHandler>>,
+    name: &str,
+    block_type: &str,
+    reason: &str,
+) {
+    if let Some(ref h) = handler {
+        let progress = make_progress(name, block_type, "skipped", 0, 0, 0, 0, 0, None, Some(reason));
+        h.on_block_complete(&progress);
+    }
 }
 
 fn make_skipped_result(block: &TestBlock, reason: &str) -> BlockResult {
@@ -217,7 +239,7 @@ async fn execute_block(block: TestBlock, var_store: VariableStore) -> BlockResul
 async fn run_tests_with_groups(
     tests: &[&TestBlock],
     var_store: &mut VariableStore,
-    app_handle: &Option<AppHandle>,
+    handler: &Option<Arc<dyn ProgressHandler>>,
 ) -> Vec<BlockResult> {
     // Assign each block to a group (blocks without @group get unique pseudo-groups)
     let mut group_blocks: HashMap<String, Vec<(usize, TestBlock)>> = HashMap::new();
@@ -274,18 +296,11 @@ async fn run_tests_with_groups(
             for group_name in &remaining {
                 if let Some(blocks) = group_blocks.remove(group_name) {
                     for (idx, block) in blocks {
-                        emit_progress(
-                            app_handle,
+                        emit_skipped(
+                            handler,
                             &block.name,
                             &block.block_type,
-                            "skipped",
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            None,
-                            Some("Skipped due to circular dependency"),
+                            "Skipped due to circular dependency",
                         );
                         all_results.push((
                             idx,
@@ -305,23 +320,11 @@ async fn run_tests_with_groups(
             if let Some(blocks) = group_blocks.remove(group_name) {
                 for (idx, block) in blocks {
                     let vs = var_snapshot.clone();
-                    let ah = app_handle.clone();
+                    let h = handler.clone();
                     join_set.spawn(async move {
-                        emit_progress(
-                            &ah,
-                            &block.name,
-                            &block.block_type,
-                            "running",
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            None,
-                            None,
-                        );
+                        emit_start(&h, &block.name, &block.block_type);
                         let result = execute_block(block, vs).await;
-                        emit_completed(&ah, &result);
+                        emit_completed(&h, &result);
                         (idx, result)
                     });
                 }
@@ -355,23 +358,26 @@ async fn run_tests_with_groups(
 }
 
 /// Execute a full test suite: setup → test/request → teardown.
+///
+/// Pass an `Arc<dyn ProgressHandler>` to receive real-time progress events.
+/// The `Arc` is required because the runner spawns parallel tasks that need
+/// shared ownership of the handler.
 pub async fn run_suite(
     suite: &TestSuite,
     extra_variables: &[(String, String)],
-    app: &AppHandle,
+    progress: Option<Arc<dyn ProgressHandler>>,
 ) -> TestRunResults {
-    run_suite_inner(suite, extra_variables, Some(app)).await
+    run_suite_inner(suite, extra_variables, progress).await
 }
 
-/// Inner implementation — emits block-progress events when app handle is available.
+/// Inner implementation — emits block-progress events when handler is available.
 async fn run_suite_inner(
     suite: &TestSuite,
     extra_variables: &[(String, String)],
-    app: Option<&AppHandle>,
+    handler: Option<Arc<dyn ProgressHandler>>,
 ) -> TestRunResults {
     let mut var_store = VariableStore::from_pairs(&suite.variables);
     var_store.merge(extra_variables);
-    let app_handle = app.cloned();
 
     // Partition blocks by type (preserving file order)
     let mut setups: Vec<&TestBlock> = Vec::new();
@@ -391,19 +397,7 @@ async fn run_suite_inner(
 
     // ── Phase 1: Setup — sequential ──
     for block in &setups {
-        emit_progress(
-            &app_handle,
-            &block.name,
-            &block.block_type,
-            "running",
-            0,
-            0,
-            0,
-            0,
-            0,
-            None,
-            None,
-        );
+        emit_start(&handler, &block.name, &block.block_type);
         let result = execute_block((*block).clone(), var_store.clone()).await;
         // Merge extracts into var_store
         for er in &result.extract_results {
@@ -416,7 +410,7 @@ async fn run_suite_inner(
         if result.status != "passed" {
             setup_failed = true;
         }
-        emit_completed(&app_handle, &result);
+        emit_completed(&handler, &result);
         block_results.push(result);
         if setup_failed {
             break;
@@ -425,23 +419,16 @@ async fn run_suite_inner(
 
     // ── Phase 2: Tests — parallel with dependency graph ──
     if !setup_failed {
-        let test_results = run_tests_with_groups(&tests, &mut var_store, &app_handle).await;
+        let test_results = run_tests_with_groups(&tests, &mut var_store, &handler).await;
         block_results.extend(test_results);
     } else {
         // Skip all tests
         for block in &tests {
-            emit_progress(
-                &app_handle,
+            emit_skipped(
+                &handler,
                 &block.name,
                 &block.block_type,
-                "skipped",
-                0,
-                0,
-                0,
-                0,
-                0,
-                None,
-                Some("Skipped due to setup failure"),
+                "Skipped due to setup failure",
             );
             block_results.push(make_skipped_result(block, "Skipped due to setup failure"));
         }
@@ -449,19 +436,7 @@ async fn run_suite_inner(
 
     // ── Phase 3: Teardown — sequential (always runs) ──
     for block in &teardowns {
-        emit_progress(
-            &app_handle,
-            &block.name,
-            &block.block_type,
-            "running",
-            0,
-            0,
-            0,
-            0,
-            0,
-            None,
-            None,
-        );
+        emit_start(&handler, &block.name, &block.block_type);
         let result = execute_block((*block).clone(), var_store.clone()).await;
         for er in &result.extract_results {
             if er.success {
@@ -470,7 +445,7 @@ async fn run_suite_inner(
                 }
             }
         }
-        emit_completed(&app_handle, &result);
+        emit_completed(&handler, &result);
         block_results.push(result);
     }
 

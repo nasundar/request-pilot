@@ -2759,7 +2759,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
-name = "request-pilot-desktop"
+name = "request-pilot-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -2768,10 +2768,20 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "request-pilot-desktop"
+version = "0.1.0"
+dependencies = [
+ "request-pilot-core",
+ "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tokio",
- "uuid",
 ]
 
 [[package]]

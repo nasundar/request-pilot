@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "core",
+    "tui",
+]
+# Desktop Tauri app has its own build system, not part of workspace
+exclude = [
+    "desktop/src-tauri",
+]
+resolver = "2"

@@ -6,23 +6,29 @@ A developer toolkit for HTTP traffic — a browser extension for header injectio
 
 ```
 request-pilot/
+├── core/              # Shared Rust core library (parser, HTTP client, runner)
+│   └── src/
+│       ├── lib.rs
+│       ├── http_parser.rs, http_client.rs
+│       ├── variables.rs, assertions.rs
+│       ├── test_runner.rs, history.rs
+│       ├── url_trie.rs, env_file.rs
+├── tui/               # Terminal UI (ratatui + crossterm)
+│   └── src/
+│       ├── main.rs, app.rs
+│       ├── events.rs, ui.rs
+├── desktop/           # Desktop GUI app (Tauri v2)
+│   ├── ui/            # HTML/CSS/JS frontend
+│   ├── src-tauri/     # Rust Tauri adapter (imports core)
+│   │   └── src/
+│   │       └── lib.rs
+│   └── README.md
 ├── extension/         # Browser extension (load in Edge/Chrome)
 │   ├── manifest.json
 │   ├── background.js
 │   ├── popup.html, popup.css, popup.js
 │   ├── content-script.js, content-script-main.js
 │   └── icons/
-├── desktop/           # Rust desktop app + E2E test framework (Tauri v2)
-│   ├── ui/            # HTML/CSS/JS frontend
-│   ├── src-tauri/     # Rust backend
-│   │   └── src/
-│   │       ├── main.rs, lib.rs
-│   │       ├── http_parser.rs, http_client.rs
-│   │       ├── variables.rs, assertions.rs
-│   │       ├── test_runner.rs, history.rs
-│   │       ├── url_trie.rs
-│   │       └── env_file.rs
-│   └── README.md
 ├── docs/              # Documentation & samples
 │   ├── http-file-format.md      # .http format reference
 │   └── samples/
@@ -32,6 +38,7 @@ request-pilot/
 ├── tests/             # Jest unit tests for the extension (94 tests)
 │   ├── __tests__/, __mocks__/
 │   ├── jest.config.js, package.json
+├── Cargo.toml         # Workspace root (members: core, tui)
 └── README.md
 ```
 
@@ -148,6 +155,85 @@ npx jest popup.test.js
 | `*://example.com/*` | HTTP and HTTPS requests to `example.com` |
 | `*api*` | Any URL containing `api` |
 
+## Terminal UI (TUI)
+
+A full-featured terminal interface for HTTP testing — same core engine as the desktop app, runs entirely in your terminal.
+
+### Running the TUI
+
+**Prerequisites:** [Rust](https://rustup.rs/) (1.70+)
+
+```bash
+# Build
+cd request-pilot
+cargo build -p request-pilot-tui
+
+# Run with .http files (positional args — no flags needed)
+cargo run -p request-pilot-tui -- api.http
+
+# Multiple files + env
+cargo run -p request-pilot-tui -- api.http tests.http --env .env
+
+# Auto-run tests on startup
+cargo run -p request-pilot-tui -- api.http --run
+
+# Or use the built binary directly
+./target/debug/request-pilot api.http --env .env --run
+```
+
+### TUI Keybindings
+
+| Key | Action |
+|-----|--------|
+| **Navigation** | |
+| `j`/`k` or `↑`/`↓` | Navigate / scroll |
+| `g` / `G` | Jump to top / bottom |
+| `Ctrl+u` / `Ctrl+d` | Half-page up / down |
+| `1`-`9` | Quick jump to file by index |
+| `Tab` | Cycle focus between panels |
+| `Enter` | Select / expand / view detail |
+| `Space` | Toggle expand |
+| **File Operations** | |
+| `o` / `Ctrl+O` | Open .http file (type path) |
+| `n` / `Ctrl+N` | Create new file |
+| `s` / `Ctrl+S` | Save current file |
+| `x` | Close file |
+| `Ctrl+E` | Load .env file |
+| **Execution** | |
+| `r` | Run selected block / group / file |
+| `R` / `F5` | Run all tests |
+| `t` | Toggle block enabled / disabled |
+| **Variables** (`Ctrl+V` to switch tab) | |
+| `a` | Add variable |
+| `e` | Edit variable |
+| `d` | Delete variable |
+| **Response** (when focused) | |
+| `b` / `h` / `a` | Body / Headers / Assertions tab |
+| `y` | Copy response body |
+| **History** (`F3`) | |
+| `/` | Filter history |
+| `Enter` | View entry detail |
+| `C` | Clear history |
+| `E` | Export history to JSON |
+| **General** | |
+| `F1` | Files mode |
+| `F3` | History mode |
+| `?` | Toggle help overlay |
+| `q` | Quit |
+
+### TUI Features
+
+| Feature | Description |
+|---|---|
+| **File Tree** | Hierarchical sidebar — files → groups → blocks with status icons |
+| **Code View** | Syntax-colored display of method, URL, headers, body, assertions, extracts |
+| **Response Viewer** | Body / Headers / Assertions sub-tabs with status badge and timing |
+| **Test Runner** | Async execution with live spinner + progress bar (setup → test → teardown) |
+| **Variables Panel** | Sorted list, extracted vars highlighted in purple with ⇐ prefix |
+| **History Mode** | Stats panel (total/pass rate/avg time), filter bar, scrollable entry list |
+| **Input Prompts** | Inline text input at bottom of screen for file paths, variable names, etc. |
+| **Catppuccin Theme** | Warm Mocha-inspired color palette with proper contrast |
+
 ## Desktop App (Rust + Tauri v2)
 
 A cross-platform HTTP client and **E2E integration test framework** — author requests, run structured test suites from enhanced `.http` files, and inspect responses.
@@ -204,8 +290,13 @@ cargo tauri build
 ### Running Desktop Unit Tests
 
 ```bash
+# Core library tests (163 tests — parser, assertions, variables, runner, history, url_trie, http_client)
+cd request-pilot
+cargo test -p request-pilot-core
+
+# Desktop adapter check
 cd request-pilot/desktop/src-tauri
-cargo test   # 156+ tests across parser, assertions, variables, runner, history, url_trie, http_client
+cargo check
 ```
 
 See the `desktop/` directory for full documentation.
@@ -242,3 +333,18 @@ For developers and AI agents working on the codebase:
 - **[reqwest](https://github.com/seanmonstar/reqwest)** — HTTP client with rustls
 - **[tokio](https://tokio.rs/)** — Async runtime
 - **HTML / CSS / JS** — Frontend UI (dark IDE theme, sidebar, split panels)
+
+### Terminal UI (TUI)
+- **[ratatui](https://ratatui.rs/) 0.29** — Terminal rendering framework
+- **[crossterm](https://github.com/crossterm-rs/crossterm) 0.28** — Cross-platform terminal events
+- **[clap](https://github.com/clap-rs/clap) 4** — CLI argument parsing
+- **[tokio](https://tokio.rs/)** — Async runtime (shared with core)
+- **Catppuccin Mocha** — Color palette
+
+### Shared Core (`request-pilot-core`)
+- **HTTP Parser** — `.http` file format with variables, blocks, directives, assertions, extracts
+- **HTTP Client** — reqwest-based async client with variable interpolation
+- **Test Runner** — Setup → Test → Teardown lifecycle, parallel `@group`/`@depends` scheduling
+- **History** — Request/response storage with filtering, grouping, domain→path trie
+- **Variables** — Static, `.env` file, dynamic extraction, built-ins (`$timestamp`, `$uuid`, `$randomInt`)
+- **Assertions** — Status, JSON path, string matching with 7 operators
