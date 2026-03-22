@@ -144,14 +144,30 @@ The telemetry variable can be:
 | Signal | Structure | Purpose |
 |--------|-----------|---------|
 | **Traces** | Root span → block spans → HTTP request spans; assertions/extracts as span events | Failure investigation |
-| **Metrics** | 5 metrics with low-cardinality dimensions (`file`, `block_type`, `outcome`) — max ~1,100 time series for 50 files | Dashboards & alerts |
+| **Metrics** | 5 metrics (3 counters + 2 exponential histograms), all DELTA temporality | Dashboards & alerts |
 | **Logs** | Suite lifecycle, block completions, assertion failures, HTTP errors (severity-coded) | Debugging & auditing |
 
-**Metrics:** `rp.suite.runs`, `rp.suite.duration`, `rp.block.runs`, `rp.block.duration`, `rp.assertion.total`
+**Metrics reference:**
 
-**Desktop indicator:** The toolbar shows a 📡 OTEL button with states: configured (gray), sending (pulsing cyan), active (green ✓), error (red ✗). Hover for endpoint, per-file stats, and export errors.
+| Metric | Type | Temporality | Dimensions | Description |
+|--------|------|-------------|------------|-------------|
+| `rp.suite.runs` | Sum (monotonic) | DELTA | `file`, `outcome` | Count of suite executions |
+| `rp.suite.duration` | ExponentialHistogram (scale=0) | DELTA | `file` | Suite execution time (ms) |
+| `rp.block.runs` | Sum (monotonic) | DELTA | `file`, `block_type`, `outcome`, `block_name`, `group`* | Count of block executions |
+| `rp.block.duration` | ExponentialHistogram (scale=0) | DELTA | `file`, `block_type`, `block_name`, `group`* | Block execution time (ms) |
+| `rp.assertion.total` | Sum (monotonic) | DELTA | `file`, `outcome`, `block_name`, `group`* | Count of assertion evaluations |
 
-**Zero new dependencies** — OTLP JSON payloads are built with `serde_json` and sent via `reqwest` (both already in the core crate). Telemetry never fails the test run — errors are captured in stats.
+*`group` is omitted when the block has no `@group` directive.
+
+**Temporality & encoding:** All metrics use **DELTA** aggregation temporality — each data point represents the value for that reporting period, not a running total. Histograms use the **base-2 exponential** format (scale=0, bucket boundaries at powers of 2). Wire format is **OTLP protobuf** (`application/x-protobuf`).
+
+**Aggregation levels:** Dimensions enable aggregation at test (`block_name`), group (`group`), and file (`file`) granularity. Outcome values: `passed`, `failed`, `errored`, `skipped`. Block types: `setup`, `test`, `teardown`.
+
+**Grafana dashboard:** Import `docs/grafana/request-pilot-dashboard.json` — includes suite overview stats, trend charts, block outcome/type/assertion pie charts, duration bar gauges, file/group breakdowns, per-test detail table, and top-10 slowest tests. Uses `sum_over_time()` for DELTA-compatible PromQL.
+
+**Desktop indicator:** The toolbar shows a 📡 OTEL button with states: configured (gray), sending (pulsing cyan), active (green ✓), error (red ✗). Hover for endpoint, per-file stats, and export errors. Toggle switch to pause telemetry without removing configuration.
+
+**Zero new dependencies** — OTLP protobuf payloads are hand-encoded and sent via `reqwest` (already in the core crate). Telemetry never fails the test run — errors are captured in stats.
 
 ### Building & Running
 
@@ -282,7 +298,7 @@ The Rust library powering all three frontends — **196 unit tests**, zero warni
 | **`assertions`** | Evaluate `@assert` directives — 7 operators (`==`, `!=`, `>`, `<`, `>=`, `<=`, `contains`), JSON path selectors, status/header/body targets |
 | **`variables`** | Variable store with `{{interpolation}}`, built-ins (`$timestamp`, `$uuid`, `$randomInt`), merge with .env, unresolved detection |
 | **`azure_auth`** | Azure CLI token fetch (`az`/`az.cmd`), device code flow (start + poll), availability detection |
-| **`telemetry`** | OTEL observability — build OTLP/HTTP JSON payloads (traces, metrics, logs) and export to Azure Monitor Application Insights or any OTLP-compatible backend. Zero new dependencies (uses reqwest + serde_json). 5 metrics with low-cardinality dimensions, hierarchical trace spans, structured logs |
+| **`telemetry`** | OTEL observability — build OTLP protobuf payloads (traces, metrics, logs) and export to Azure Monitor Application Insights or any OTLP-compatible backend. Zero new dependencies. 5 metrics (3 DELTA counters, 2 DELTA exponential histograms) with test-level dimensions, hierarchical trace spans, structured logs |
 | **`history`** | In-memory history store (max 1000), filtering by method/status/URL/source/run_id, trie-based URL autocomplete |
 | **`url_trie`** | Segment-aware trie — split URLs by `/`, `.`, `:`, `?`, `&`, `=` for frequency-ranked autocomplete and domain→path grouping |
 | **`env_file`** | Parse/write `.env` files with quotes, comments, and sorted output |
@@ -290,7 +306,7 @@ The Rust library powering all three frontends — **196 unit tests**, zero warni
 ### Running Tests
 
 ```bash
-# Core library tests (196 tests — parser, assertions, variables, runner, history, url_trie, http_client, telemetry)
+# Core library tests (215 tests — parser, assertions, variables, runner, history, url_trie, http_client, telemetry)
 cd request-pilot
 cargo test -p request-pilot-core
 

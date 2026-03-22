@@ -124,6 +124,16 @@ impl ProtobufWriter {
         self.buf.push(1);
     }
 
+    /// Field: sint32 as zigzag-encoded varint (wire type 0).
+    pub fn write_sint32(&mut self, field: u32, val: i32) {
+        let encoded = ((val << 1) ^ (val >> 31)) as u32 as u64;
+        if encoded == 0 {
+            return;
+        }
+        self.write_tag(field, 0);
+        self.write_raw_varint(encoded);
+    }
+
     /// Field: embedded message (wire type 2).
     pub fn write_message(&mut self, field: u32, inner: &ProtobufWriter) {
         if inner.buf.is_empty() {
@@ -327,38 +337,61 @@ fn encode_sum(sum: &OtlpSum) -> ProtobufWriter {
     w
 }
 
-fn encode_histogram_data_point(dp: &OtlpHistogramDataPoint) -> ProtobufWriter {
+fn encode_exp_histogram_buckets(buckets: &OtlpExpHistogramBuckets) -> ProtobufWriter {
     let mut w = ProtobufWriter::new();
+    // sint32 offset = 1
+    w.write_sint32(1, buckets.offset);
+    // repeated uint64 bucket_counts = 2 (packed)
+    if !buckets.bucket_counts.is_empty() {
+        let mut packed = ProtobufWriter::new();
+        for &c in &buckets.bucket_counts {
+            packed.write_raw_varint(c);
+        }
+        w.write_bytes(2, &packed.buf);
+    }
+    w
+}
+
+fn encode_exp_histogram_data_point(dp: &OtlpExponentialHistogramDataPoint) -> ProtobufWriter {
+    let mut w = ProtobufWriter::new();
+    // repeated KeyValue attributes = 1
+    for attr in &dp.attributes {
+        let kv = encode_key_value(attr);
+        w.write_message(1, &kv);
+    }
     // fixed64 start_time_unix_nano = 2
     w.write_fixed64(2, parse_nanos(&dp.start_time_unix_nano));
     // fixed64 time_unix_nano = 3
     w.write_fixed64(3, parse_nanos(&dp.time_unix_nano));
     // uint64 count = 4
     w.write_varint(4, dp.count);
-    // optional double sum = 5 — always present in our types
+    // optional double sum = 5
     w.write_tag(5, 1);
     w.buf.extend_from_slice(&dp.sum.to_le_bytes());
-    // min/max: double min = 12; double max = 13
+    // sint32 scale = 6
+    w.write_sint32(6, dp.scale);
+    // fixed64 zero_count = 7
+    w.write_fixed64(7, dp.zero_count);
+    // Buckets positive = 8
+    let pos = encode_exp_histogram_buckets(&dp.positive);
+    w.write_message(8, &pos);
+    // optional double min = 12
     w.write_tag(12, 1);
     w.buf.extend_from_slice(&dp.min.to_le_bytes());
+    // optional double max = 13
     w.write_tag(13, 1);
     w.buf.extend_from_slice(&dp.max.to_le_bytes());
-    // repeated KeyValue attributes = 9
-    for attr in &dp.attributes {
-        let kv = encode_key_value(attr);
-        w.write_message(9, &kv);
-    }
     w
 }
 
-fn encode_histogram(hist: &OtlpHistogram) -> ProtobufWriter {
+fn encode_exponential_histogram(hist: &OtlpExponentialHistogram) -> ProtobufWriter {
     let mut w = ProtobufWriter::new();
-    // repeated HistogramDataPoint data_points = 1
+    // repeated ExponentialHistogramDataPoint data_points = 1
     for dp in &hist.data_points {
-        let d = encode_histogram_data_point(dp);
+        let d = encode_exp_histogram_data_point(dp);
         w.write_message(1, &d);
     }
-    // int32 aggregation_temporality = 2
+    // AggregationTemporality aggregation_temporality = 2
     w.write_varint(2, hist.aggregation_temporality as u64);
     w
 }
@@ -371,14 +404,14 @@ fn encode_metric(m: &OtlpMetric) -> ProtobufWriter {
     w.write_string(2, &m.description);
     // string unit = 3
     w.write_string(3, &m.unit);
-    // oneof data: Sum sum = 7; Histogram histogram = 9
+    // oneof data: Sum sum = 7; ExponentialHistogram exponential_histogram = 10
     if let Some(ref sum) = m.sum {
         let s = encode_sum(sum);
         w.write_message(7, &s);
     }
-    if let Some(ref hist) = m.histogram {
-        let h = encode_histogram(hist);
-        w.write_message(9, &h);
+    if let Some(ref hist) = m.exponential_histogram {
+        let h = encode_exponential_histogram(hist);
+        w.write_message(10, &h);
     }
     w
 }
@@ -631,7 +664,7 @@ mod tests {
                             aggregation_temporality: 1,
                             is_monotonic: true,
                         }),
-                        histogram: None,
+                        exponential_histogram: None,
                     }],
                 }],
             }],
@@ -723,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_histogram_metric() {
+    fn test_encode_exponential_histogram_metric() {
         let export = OtlpMetricExport {
             resource_metrics: vec![OtlpResourceMetrics {
                 resource: OtlpResource {
@@ -735,19 +768,25 @@ mod tests {
                         version: "1.0".to_string(),
                     },
                     metrics: vec![OtlpMetric {
-                        name: "test.histogram".to_string(),
+                        name: "test.exp_histogram".to_string(),
                         description: "desc".to_string(),
                         unit: "ms".to_string(),
                         sum: None,
-                        histogram: Some(OtlpHistogram {
-                            data_points: vec![OtlpHistogramDataPoint {
+                        exponential_histogram: Some(OtlpExponentialHistogram {
+                            data_points: vec![OtlpExponentialHistogramDataPoint {
                                 attributes: vec![],
                                 start_time_unix_nano: "100".to_string(),
                                 time_unix_nano: "200".to_string(),
-                                count: 10,
-                                sum: 500.0,
-                                min: 10.0,
-                                max: 100.0,
+                                count: 3,
+                                sum: 350.0,
+                                scale: 0,
+                                zero_count: 0,
+                                positive: OtlpExpHistogramBuckets {
+                                    offset: 7,
+                                    bucket_counts: vec![1, 1, 1],
+                                },
+                                min: 100.0,
+                                max: 200.0,
                             }],
                             aggregation_temporality: 1,
                         }),
@@ -757,5 +796,7 @@ mod tests {
         };
         let bytes = encode_metrics(&export);
         assert!(!bytes.is_empty());
+        // Verify it's longer than just the resource/scope wrapper
+        assert!(bytes.len() > 30);
     }
 }

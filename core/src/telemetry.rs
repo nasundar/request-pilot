@@ -331,7 +331,7 @@ pub struct OtlpMetric {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sum: Option<OtlpSum>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub histogram: Option<OtlpHistogram>,
+    pub exponential_histogram: Option<OtlpExponentialHistogram>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -356,21 +356,78 @@ pub struct OtlpNumberDataPoint {
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct OtlpHistogram {
-    pub data_points: Vec<OtlpHistogramDataPoint>,
+pub struct OtlpExponentialHistogram {
+    pub data_points: Vec<OtlpExponentialHistogramDataPoint>,
     pub aggregation_temporality: u8,
 }
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct OtlpHistogramDataPoint {
+pub struct OtlpExponentialHistogramDataPoint {
     pub attributes: Vec<OtlpKeyValue>,
     pub start_time_unix_nano: String,
     pub time_unix_nano: String,
     pub count: u64,
     pub sum: f64,
+    pub scale: i32,
+    pub zero_count: u64,
+    pub positive: OtlpExpHistogramBuckets,
     pub min: f64,
     pub max: f64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OtlpExpHistogramBuckets {
+    pub offset: i32,
+    pub bucket_counts: Vec<u64>,
+}
+
+/// Convert a set of positive f64 values into base-2 exponential histogram buckets.
+/// Uses scale=0 where bucket boundaries are at 2^i: (..., 0.5, 1, 2, 4, 8, ...).
+/// At scale 0, index = ceil(log2(value)); value falls in bucket [2^(i-1), 2^i).
+pub fn build_exp_buckets(values: &[f64]) -> (i32, OtlpExpHistogramBuckets, u64) {
+    let scale: i32 = 0;
+    let mut zero_count: u64 = 0;
+    let mut index_counts: std::collections::BTreeMap<i32, u64> = std::collections::BTreeMap::new();
+
+    for &v in values {
+        if v <= 0.0 {
+            zero_count += 1;
+            continue;
+        }
+        // At scale 0: index = ceil(log2(value))
+        // Bucket i covers (2^(i-1), 2^i]. Index 0 covers (0.5, 1.0], index 1 covers (1.0, 2.0], etc.
+        let idx = v.log2().ceil() as i32;
+        *index_counts.entry(idx).or_insert(0) += 1;
+    }
+
+    if index_counts.is_empty() {
+        return (
+            scale,
+            OtlpExpHistogramBuckets {
+                offset: 0,
+                bucket_counts: vec![],
+            },
+            zero_count,
+        );
+    }
+
+    let min_idx = *index_counts.keys().next().unwrap();
+    let max_idx = *index_counts.keys().next_back().unwrap();
+    let mut bucket_counts = Vec::with_capacity((max_idx - min_idx + 1) as usize);
+    for i in min_idx..=max_idx {
+        bucket_counts.push(*index_counts.get(&i).unwrap_or(&0));
+    }
+
+    (
+        scale,
+        OtlpExpHistogramBuckets {
+            offset: min_idx,
+            bucket_counts,
+        },
+        zero_count,
+    )
 }
 
 // ── Logs ──
@@ -831,26 +888,31 @@ impl TelemetryCollector {
                     aggregation_temporality: 1, // DELTA
                     is_monotonic: true,
                 }),
-                histogram: None,
+                exponential_histogram: None,
             });
         }
 
-        // rp.suite.duration (histogram)
+        // rp.suite.duration (exponential histogram)
         if self.suite_duration_ms > 0 {
+            let val = self.suite_duration_ms as f64;
+            let (scale, positive, zero_count) = build_exp_buckets(&[val]);
             metrics.push(OtlpMetric {
                 name: "rp.suite.duration".to_string(),
                 description: "Test suite execution duration".to_string(),
                 unit: "ms".to_string(),
                 sum: None,
-                histogram: Some(OtlpHistogram {
-                    data_points: vec![OtlpHistogramDataPoint {
+                exponential_histogram: Some(OtlpExponentialHistogram {
+                    data_points: vec![OtlpExponentialHistogramDataPoint {
                         attributes: vec![kv_str("file", &self.file_name)],
                         start_time_unix_nano: start_ns.clone(),
                         time_unix_nano: now_ns.clone(),
                         count: 1,
-                        sum: self.suite_duration_ms as f64,
-                        min: self.suite_duration_ms as f64,
-                        max: self.suite_duration_ms as f64,
+                        sum: val,
+                        scale,
+                        zero_count,
+                        positive,
+                        min: val,
+                        max: val,
                     }],
                     aggregation_temporality: 1,
                 }),
@@ -895,11 +957,11 @@ impl TelemetryCollector {
                     aggregation_temporality: 1,
                     is_monotonic: true,
                 }),
-                histogram: None,
+                exponential_histogram: None,
             });
         }
 
-        // rp.block.duration (histogram) — aggregate by (file, block_type)
+        // rp.block.duration (exponential histogram) — aggregate by (file, block_type)
         let mut dur_agg: HashMap<(String, String, String, String), Vec<u64>> = HashMap::new();
         for (file, bt, dur, bname, group) in &self.block_durations {
             dur_agg
@@ -912,9 +974,11 @@ impl TelemetryCollector {
                 .iter()
                 .map(|((file, bt, bname, group), durations)| {
                     let count = durations.len() as u64;
-                    let sum: f64 = durations.iter().map(|d| *d as f64).sum();
-                    let min = durations.iter().copied().min().unwrap_or(0) as f64;
-                    let max = durations.iter().copied().max().unwrap_or(0) as f64;
+                    let vals: Vec<f64> = durations.iter().map(|d| *d as f64).collect();
+                    let sum: f64 = vals.iter().sum();
+                    let min = vals.iter().cloned().fold(f64::INFINITY, f64::min);
+                    let max = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let (scale, positive, zero_count) = build_exp_buckets(&vals);
                     let mut attrs = vec![
                         kv_str("file", file),
                         kv_str("block_type", bt),
@@ -923,12 +987,15 @@ impl TelemetryCollector {
                     if !group.is_empty() {
                         attrs.push(kv_str("group", group));
                     }
-                    OtlpHistogramDataPoint {
+                    OtlpExponentialHistogramDataPoint {
                         attributes: attrs,
                         start_time_unix_nano: start_ns.clone(),
                         time_unix_nano: now_ns.clone(),
                         count,
                         sum,
+                        scale,
+                        zero_count,
+                        positive,
                         min,
                         max,
                     }
@@ -939,7 +1006,7 @@ impl TelemetryCollector {
                 description: "Block execution duration".to_string(),
                 unit: "ms".to_string(),
                 sum: None,
-                histogram: Some(OtlpHistogram {
+                exponential_histogram: Some(OtlpExponentialHistogram {
                     data_points,
                     aggregation_temporality: 1,
                 }),
@@ -983,7 +1050,7 @@ impl TelemetryCollector {
                     aggregation_temporality: 1,
                     is_monotonic: true,
                 }),
-                histogram: None,
+                exponential_histogram: None,
             });
         }
 
@@ -1554,5 +1621,73 @@ mod tests {
     #[test]
     fn test_parse_nonsense_string_returns_none() {
         assert!(parse_connection_string("random-garbage").is_none());
+    }
+
+    #[test]
+    fn test_build_exp_buckets() {
+        // Scale 0: bucket boundaries at 2^i
+        // Values: 100ms, 200ms, 500ms, 1000ms
+        // log2(100) ≈ 6.64 → ceil = 7, log2(200) ≈ 7.64 → ceil = 8
+        // log2(500) ≈ 8.97 → ceil = 9, log2(1000) ≈ 9.97 → ceil = 10
+        let (scale, positive, zero_count) = build_exp_buckets(&[100.0, 200.0, 500.0, 1000.0]);
+        assert_eq!(scale, 0);
+        assert_eq!(zero_count, 0);
+        assert_eq!(positive.offset, 7);  // min index
+        assert_eq!(positive.bucket_counts, vec![1, 1, 1, 1]); // one in each bucket 7..=10
+    }
+
+    #[test]
+    fn test_build_exp_buckets_with_zeros() {
+        let (scale, positive, zero_count) = build_exp_buckets(&[0.0, 50.0, 0.0]);
+        assert_eq!(scale, 0);
+        assert_eq!(zero_count, 2);
+        assert_eq!(positive.bucket_counts.iter().sum::<u64>(), 1);
+    }
+
+    #[test]
+    fn test_build_exp_buckets_empty() {
+        let (scale, positive, zero_count) = build_exp_buckets(&[]);
+        assert_eq!(scale, 0);
+        assert_eq!(zero_count, 0);
+        assert!(positive.bucket_counts.is_empty());
+    }
+
+    #[test]
+    fn test_build_exp_buckets_same_value() {
+        // All same value → single bucket
+        let (_, positive, _) = build_exp_buckets(&[256.0, 256.0, 256.0]);
+        assert_eq!(positive.bucket_counts.len(), 1);
+        assert_eq!(positive.bucket_counts[0], 3);
+    }
+
+    #[test]
+    fn test_exp_histogram_in_metrics() {
+        let config = TelemetryConfig {
+            traces_endpoint: "https://test/v1/traces".to_string(),
+            metrics_endpoint: "https://test/v1/metrics".to_string(),
+            logs_endpoint: "https://test/v1/logs".to_string(),
+            auth_header: None,
+            service_name: "test".to_string(),
+        };
+        let mut c = TelemetryCollector::new(config, "test.http");
+        c.suite_start(1);
+        c.block_complete(
+            "my-test", "test", Some("grp"), "passed", 150,
+            Some("GET"), Some("https://example.com"), Some(200), Some(150),
+            &[], &[], None,
+        );
+        c.suite_complete(1, 0, 0, 150);
+        let m = c.build_metrics();
+        let metrics = &m.resource_metrics[0].scope_metrics[0].metrics;
+        // Find the duration metric
+        let dur = metrics.iter().find(|m| m.name == "rp.block.duration").unwrap();
+        assert!(dur.exponential_histogram.is_some());
+        let hist = dur.exponential_histogram.as_ref().unwrap();
+        assert_eq!(hist.aggregation_temporality, 1); // DELTA
+        assert_eq!(hist.data_points.len(), 1);
+        let dp = &hist.data_points[0];
+        assert_eq!(dp.count, 1);
+        assert_eq!(dp.sum, 150.0);
+        assert_eq!(dp.scale, 0);
     }
 }

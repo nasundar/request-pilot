@@ -20,7 +20,7 @@
     { "type": "panel", "id": "bargauge", "name": "Bar gauge" }
   ],
   "annotations": { "list": [] },
-  "description": "Request Pilot E2E test observability — suite runs, block executions, durations, and assertion results.",
+  "description": "Request Pilot E2E test observability — suite runs, block executions, durations, and assertion results. All metrics use DELTA temporality with OTLP protobuf encoding.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -31,19 +31,19 @@
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
       "id": 100,
-      "title": "📊 Suite Overview",
+      "title": "\ud83d\udcca Suite Overview",
       "type": "row"
     },
     {
       "id": 1,
       "title": "Total Suite Runs",
-      "description": "Total number of test suite executions across all files",
+      "description": "Total number of test suite executions across all files (DELTA sum)",
       "type": "stat",
       "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum(increase({__name__=\"rp.suite.runs\"}[$__range]))",
+          "expr": "sum(sum_over_time({__name__=\"rp.suite.runs\"}[$__range]))",
           "legendFormat": "Total Runs",
           "refId": "A"
         }
@@ -71,13 +71,13 @@
     {
       "id": 2,
       "title": "Suite Pass Rate",
-      "description": "Percentage of suite runs that passed",
+      "description": "Percentage of suite runs that passed (DELTA counters)",
       "type": "stat",
       "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum(increase({__name__=\"rp.suite.runs\", outcome=\"passed\"}[$__range])) / sum(increase({__name__=\"rp.suite.runs\"}[$__range])) * 100",
+          "expr": "sum(sum_over_time({__name__=\"rp.suite.runs\", outcome=\"passed\"}[$__range])) / sum(sum_over_time({__name__=\"rp.suite.runs\"}[$__range])) * 100",
           "legendFormat": "Pass Rate",
           "refId": "A"
         }
@@ -114,7 +114,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum(increase({__name__=\"rp.suite.runs\", outcome=\"passed\"}[$__range])) or vector(0)",
+          "expr": "sum(sum_over_time({__name__=\"rp.suite.runs\", outcome=\"passed\"}[$__range])) or vector(0)",
           "legendFormat": "Passed",
           "refId": "A"
         }
@@ -141,7 +141,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum(increase({__name__=\"rp.suite.runs\", outcome=\"fail\"}[$__range])) or vector(0)",
+          "expr": "sum(sum_over_time({__name__=\"rp.suite.runs\", outcome=\"fail\"}[$__range])) or vector(0)",
           "legendFormat": "Failed",
           "refId": "A"
         }
@@ -163,13 +163,13 @@
     {
       "id": 5,
       "title": "Avg Suite Duration",
-      "description": "Average suite execution time across all files",
+      "description": "Average suite execution time (DELTA histogram: sum/count)",
       "type": "stat",
       "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum(increase({__name__=\"rp.suite.duration_sum\"}[$__range])) / sum(increase({__name__=\"rp.suite.duration_count\"}[$__range]))",
+          "expr": "sum(sum_over_time({__name__=\"rp.suite.duration_sum\"}[$__range])) / sum(sum_over_time({__name__=\"rp.suite.duration_count\"}[$__range]))",
           "legendFormat": "Avg Duration",
           "refId": "A"
         }
@@ -198,13 +198,13 @@
     {
       "id": 6,
       "title": "Total Assertions",
-      "description": "Total assertions evaluated",
+      "description": "Total assertions evaluated (DELTA sum)",
       "type": "stat",
       "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum(increase({__name__=\"rp.assertion.total\"}[$__range])) or vector(0)",
+          "expr": "sum(sum_over_time({__name__=\"rp.assertion.total\"}[$__range])) or vector(0)",
           "legendFormat": "Assertions",
           "refId": "A"
         }
@@ -227,19 +227,19 @@
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
       "id": 101,
-      "title": "📈 Trends Over Time",
+      "title": "\ud83d\udcc8 Trends Over Time",
       "type": "row"
     },
     {
       "id": 10,
       "title": "Suite Runs Over Time",
-      "description": "Suite executions by outcome over time",
+      "description": "Suite executions by outcome over time (DELTA — each sample is the count for that interval)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (outcome) (increase({__name__=\"rp.suite.runs\", file=~\"$file\"}[$__rate_interval]))",
+          "expr": "sum by (outcome) (sum_over_time({__name__=\"rp.suite.runs\", file=~\"$file\"}[$__interval]))",
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }
@@ -273,13 +273,13 @@
     {
       "id": 11,
       "title": "Suite Duration Over Time",
-      "description": "Average suite duration per file over time",
+      "description": "Average suite duration per file over time (DELTA histogram: sum/count per interval)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (file) (increase({__name__=\"rp.suite.duration_sum\", file=~\"$file\"}[$__rate_interval])) / sum by (file) (increase({__name__=\"rp.suite.duration_count\", file=~\"$file\"}[$__rate_interval]))",
+          "expr": "sum by (file) (sum_over_time({__name__=\"rp.suite.duration_sum\", file=~\"$file\"}[$__interval])) / sum by (file) (sum_over_time({__name__=\"rp.suite.duration_count\", file=~\"$file\"}[$__interval]))",
           "legendFormat": "{{file}}",
           "refId": "A"
         }
@@ -304,7 +304,7 @@
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
       "id": 102,
-      "title": "🧪 Block Execution Details",
+      "title": "\ud83e\uddea Block Execution Details",
       "type": "row"
     },
     {
@@ -316,7 +316,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (outcome) (increase({__name__=\"rp.block.runs\", file=~\"$file\", block_type=~\"$block_type\"}[$__range]))",
+          "expr": "sum by (outcome) (sum_over_time({__name__=\"rp.block.runs\", file=~\"$file\", block_type=~\"$block_type\"}[$__range]))",
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }
@@ -346,7 +346,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (block_type) (increase({__name__=\"rp.block.runs\", file=~\"$file\"}[$__range]))",
+          "expr": "sum by (block_type) (sum_over_time({__name__=\"rp.block.runs\", file=~\"$file\"}[$__range]))",
           "legendFormat": "{{block_type}}",
           "refId": "A"
         }
@@ -375,7 +375,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (outcome) (increase({__name__=\"rp.assertion.total\", file=~\"$file\"}[$__range]))",
+          "expr": "sum by (outcome) (sum_over_time({__name__=\"rp.assertion.total\", file=~\"$file\"}[$__range]))",
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }
@@ -397,13 +397,13 @@
     {
       "id": 23,
       "title": "Block Runs Over Time by Outcome",
-      "description": "Block execution outcomes over time",
+      "description": "Block execution outcomes over time (DELTA — direct sum per interval)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (outcome) (increase({__name__=\"rp.block.runs\", file=~\"$file\", block_type=~\"$block_type\"}[$__rate_interval]))",
+          "expr": "sum by (outcome) (sum_over_time({__name__=\"rp.block.runs\", file=~\"$file\", block_type=~\"$block_type\"}[$__interval]))",
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }
@@ -432,13 +432,13 @@
     {
       "id": 24,
       "title": "Assertion Results Over Time",
-      "description": "Assertion pass/fail over time",
+      "description": "Assertion pass/fail over time (DELTA — direct sum per interval)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (outcome) (increase({__name__=\"rp.assertion.total\", file=~\"$file\"}[$__rate_interval]))",
+          "expr": "sum by (outcome) (sum_over_time({__name__=\"rp.assertion.total\", file=~\"$file\"}[$__interval]))",
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }
@@ -466,19 +466,19 @@
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
       "id": 103,
-      "title": "⏱️ Block Duration Analysis",
+      "title": "\u23f1\ufe0f Block Duration Analysis",
       "type": "row"
     },
     {
       "id": 30,
       "title": "Avg Block Duration by Test",
-      "description": "Average execution time per block (test-level granularity)",
+      "description": "Average execution time per block — DELTA histogram sum/count",
       "type": "bargauge",
       "gridPos": { "h": 10, "w": 12, "x": 0, "y": 32 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sort_desc(\n  sum by (block_name, file) (\n    increase({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=~\"$block_type\"}[$__range])\n  )\n  /\n  sum by (block_name, file) (\n    increase({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=~\"$block_type\"}[$__range])\n  )\n)",
+          "expr": "sort_desc(\n  sum by (block_name, file) (\n    sum_over_time({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=~\"$block_type\"}[$__range])\n  )\n  /\n  sum by (block_name, file) (\n    sum_over_time({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=~\"$block_type\"}[$__range])\n  )\n)",
           "legendFormat": "{{block_name}} ({{file}})",
           "refId": "A"
         }
@@ -510,13 +510,13 @@
     {
       "id": 31,
       "title": "Block Duration Over Time",
-      "description": "Average block duration per test over time",
+      "description": "Average block duration per test over time (DELTA histogram)",
       "type": "timeseries",
       "gridPos": { "h": 10, "w": 12, "x": 12, "y": 32 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (block_name) (\n  increase({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=~\"$block_type\"}[$__rate_interval])\n)\n/\nsum by (block_name) (\n  increase({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=~\"$block_type\"}[$__rate_interval])\n)",
+          "expr": "sum by (block_name) (\n  sum_over_time({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=~\"$block_type\"}[$__interval])\n)\n/\nsum by (block_name) (\n  sum_over_time({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=~\"$block_type\"}[$__interval])\n)",
           "legendFormat": "{{block_name}}",
           "refId": "A"
         }
@@ -541,7 +541,7 @@
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 },
       "id": 104,
-      "title": "📋 File & Group Breakdown",
+      "title": "\ud83d\udccb File & Group Breakdown",
       "type": "row"
     },
     {
@@ -553,13 +553,13 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (file) (increase({__name__=\"rp.block.runs\", outcome=\"passed\", file=~\"$file\", block_type=\"test\"}[$__range]))",
-          "legendFormat": "Passed — {{file}}",
+          "expr": "sum by (file) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"passed\", file=~\"$file\", block_type=\"test\"}[$__range]))",
+          "legendFormat": "Passed \u2014 {{file}}",
           "refId": "A"
         },
         {
-          "expr": "sum by (file) (increase({__name__=\"rp.block.runs\", outcome=\"failed\", file=~\"$file\", block_type=\"test\"}[$__range]))",
-          "legendFormat": "Failed — {{file}}",
+          "expr": "sum by (file) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"failed\", file=~\"$file\", block_type=\"test\"}[$__range]))",
+          "legendFormat": "Failed \u2014 {{file}}",
           "refId": "B"
         }
       ],
@@ -592,13 +592,13 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (group) (increase({__name__=\"rp.block.runs\", outcome=\"passed\", group=~\".+\", file=~\"$file\", block_type=\"test\"}[$__range]))",
-          "legendFormat": "Passed — {{group}}",
+          "expr": "sum by (group) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"passed\", group=~\".+\", file=~\"$file\", block_type=\"test\"}[$__range]))",
+          "legendFormat": "Passed \u2014 {{group}}",
           "refId": "A"
         },
         {
-          "expr": "sum by (group) (increase({__name__=\"rp.block.runs\", outcome=\"failed\", group=~\".+\", file=~\"$file\", block_type=\"test\"}[$__range]))",
-          "legendFormat": "Failed — {{group}}",
+          "expr": "sum by (group) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"failed\", group=~\".+\", file=~\"$file\", block_type=\"test\"}[$__range]))",
+          "legendFormat": "Failed \u2014 {{group}}",
           "refId": "B"
         }
       ],
@@ -626,7 +626,7 @@
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 },
       "id": 105,
-      "title": "🔍 Individual Test Details",
+      "title": "\ud83d\udd0d Individual Test Details",
       "type": "row"
     },
     {
@@ -638,35 +638,35 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (block_name, file, block_type, group) (increase({__name__=\"rp.block.runs\", outcome=\"passed\", file=~\"$file\", block_type=~\"$block_type\"}[$__range]))",
+          "expr": "sum by (block_name, file, block_type, group) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"passed\", file=~\"$file\", block_type=~\"$block_type\"}[$__range]))",
           "legendFormat": "",
           "refId": "Passed",
           "format": "table",
           "instant": true
         },
         {
-          "expr": "sum by (block_name, file, block_type, group) (increase({__name__=\"rp.block.runs\", outcome=\"failed\", file=~\"$file\", block_type=~\"$block_type\"}[$__range]))",
+          "expr": "sum by (block_name, file, block_type, group) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"failed\", file=~\"$file\", block_type=~\"$block_type\"}[$__range]))",
           "legendFormat": "",
           "refId": "Failed",
           "format": "table",
           "instant": true
         },
         {
-          "expr": "sum by (block_name, file, block_type, group) (increase({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=~\"$block_type\"}[$__range])) / sum by (block_name, file, block_type, group) (increase({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=~\"$block_type\"}[$__range]))",
+          "expr": "sum by (block_name, file, block_type, group) (sum_over_time({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=~\"$block_type\"}[$__range])) / sum by (block_name, file, block_type, group) (sum_over_time({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=~\"$block_type\"}[$__range]))",
           "legendFormat": "",
           "refId": "AvgDuration",
           "format": "table",
           "instant": true
         },
         {
-          "expr": "sum by (block_name, file) (increase({__name__=\"rp.assertion.total\", outcome=\"passed\", file=~\"$file\"}[$__range]))",
+          "expr": "sum by (block_name, file) (sum_over_time({__name__=\"rp.assertion.total\", outcome=\"passed\", file=~\"$file\"}[$__range]))",
           "legendFormat": "",
           "refId": "AssertPassed",
           "format": "table",
           "instant": true
         },
         {
-          "expr": "sum by (block_name, file) (increase({__name__=\"rp.assertion.total\", outcome=\"failed\", file=~\"$file\"}[$__range]))",
+          "expr": "sum by (block_name, file) (sum_over_time({__name__=\"rp.assertion.total\", outcome=\"failed\", file=~\"$file\"}[$__range]))",
           "legendFormat": "",
           "refId": "AssertFailed",
           "format": "table",
@@ -690,8 +690,8 @@
               "Value #Passed": "Passed",
               "Value #Failed": "Failed",
               "Value #AvgDuration": "Avg Duration (ms)",
-              "Value #AssertPassed": "Assertions ✓",
-              "Value #AssertFailed": "Assertions ✗"
+              "Value #AssertPassed": "Assertions \u2713",
+              "Value #AssertFailed": "Assertions \u2717"
             },
             "indexByName": {
               "File": 0,
@@ -701,8 +701,8 @@
               "Passed": 4,
               "Failed": 5,
               "Avg Duration (ms)": 6,
-              "Assertions ✓": 7,
-              "Assertions ✗": 8
+              "Assertions \u2713": 7,
+              "Assertions \u2717": 8
             }
           }
         }
@@ -722,7 +722,7 @@
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "Assertions ✗" },
+            "matcher": { "id": "byName", "options": "Assertions \u2717" },
             "properties": [
               { "id": "custom.cellOptions", "value": { "type": "color-text" } },
               { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } }
@@ -740,7 +740,7 @@
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 62 },
       "id": 106,
-      "title": "🏎️ Slowest Tests",
+      "title": "\ud83c\udfc1 Slowest Tests",
       "type": "row"
     },
     {
@@ -752,7 +752,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "topk(10,\n  sum by (block_name, file) (\n    increase({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=\"test\"}[$__range])\n  )\n  /\n  sum by (block_name, file) (\n    increase({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=\"test\"}[$__range])\n  )\n)",
+          "expr": "topk(10,\n  sum by (block_name, file) (\n    sum_over_time({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=\"test\"}[$__range])\n  )\n  /\n  sum by (block_name, file) (\n    sum_over_time({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=\"test\"}[$__range])\n  )\n)",
           "legendFormat": "{{block_name}} ({{file}})",
           "refId": "A"
         }
@@ -784,7 +784,7 @@
   ],
   "refresh": "",
   "schemaVersion": 39,
-  "tags": ["request-pilot", "e2e", "testing", "otlp"],
+  "tags": ["request-pilot", "e2e", "testing", "otlp", "delta-temporality"],
   "templating": {
     "list": [
       {
@@ -829,7 +829,7 @@
     "time_options": ["5m", "15m", "1h", "6h", "12h", "24h", "2d", "7d", "30d"]
   },
   "timezone": "browser",
-  "title": "Request Pilot — E2E Test Observability",
+  "title": "Request Pilot \u2014 E2E Test Observability",
   "uid": "request-pilot-e2e",
   "version": 1
 }
