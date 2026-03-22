@@ -5310,6 +5310,7 @@ function renderTelemetryTooltip() {
       html += '</div>';
     }
     html += '<div class="tt-section"><div class="tt-section-title">Next Step</div><div style="color: var(--text-muted); font-size: 11px;">Run tests — telemetry will be exported automatically</div></div>';
+    html += '<div class="tt-section"><div class="tt-section-title">⚠ RBAC Required</div><div style="color: var(--text-muted); font-size: 11px;">Your identity needs <b>Monitoring Metrics Publisher</b> role on the Data Collection Rule (DCR) referenced by the App Insights resource to ingest telemetry.</div></div>';
   } else if (telemetryState === 'sending') {
     html += '<div class="tt-row"><span class="tt-key">Status</span><span class="tt-val" style="color: #00bcd4;">Exporting telemetry…</span></div>';
     if (telemetryStats.length > 0) {
@@ -5368,6 +5369,10 @@ function renderTelemetryTooltip() {
         }
         if (allErrors.length > 5) html += '<div>… and ' + (allErrors.length - 5) + ' more</div>';
         html += '</div></div>';
+        const has403 = allErrors.some(e => /403|Forbidden|Unauthorized/i.test(e));
+        if (has403) {
+          html += '<div class="tt-section"><div class="tt-section-title">💡 Fix</div><div style="color: var(--text-muted); font-size: 11px;">Assign <b>Monitoring Metrics Publisher</b> role to your identity on the Data Collection Rule (DCR) associated with the App Insights resource.</div></div>';
+        }
       }
     }
   } else {

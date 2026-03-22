@@ -137,6 +137,8 @@ The telemetry variable can be:
 - **Connection string (alternative):** `InstrumentationKey=xxx;IngestionEndpoint=https://eastus-1.in.applicationinsights.azure.com` — uses the legacy `x-ms-ikey` auth path
 - **Plain OTLP:** `https://my-otel-collector:4318`
 
+> **⚠ RBAC Prerequisite (Resource ID mode):** Your identity must have the **Monitoring Metrics Publisher** role on the Data Collection Rule (DCR) associated with the App Insights resource. This grants `Microsoft.Insights/Metrics/Write` and `Microsoft.Insights/Telemetry/Write` dataActions required by the OTLP ingestion endpoints. Without this, telemetry export will fail with 403. The DCR is at `properties.DataCollectionRuleResourceId` in the ARM response.
+
 **Signals exported per run:**
 
 | Signal | Structure | Purpose |

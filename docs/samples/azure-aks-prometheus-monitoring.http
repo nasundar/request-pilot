@@ -11,6 +11,8 @@
 #   - AKS cluster with Azure Monitor (Managed Prometheus) enabled
 #   - Azure AD app registration with Monitoring Reader + AKS Reader
 #   - (Optional) appinsights_resource_id in .env for telemetry
+#   - For OTEL telemetry: Monitoring Metrics Publisher role on the
+#     Data Collection Rule (DCR) associated with the App Insights resource
 # ============================================================
 
 # @telemetry appinsights_resource_id

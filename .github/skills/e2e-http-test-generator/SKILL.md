@@ -567,6 +567,7 @@ Authorization: Bearer {{access_token}}
 - `# @telemetry <var>` must appear before the `@variables` block (file-level directive)
 - The variable can hold an App Insights ARM resource ID (`/subscriptions/.../microsoft.insights/components/...`) or a connection string (`InstrumentationKey=...;IngestionEndpoint=...`) or a plain OTLP endpoint URL
 - When using a resource ID, add `# @telemetry_token <var>` pointing to a variable with a Bearer token that has ARM read access — the system calls `https://management.azure.com{resource_id}?api-version=2025-01-23-preview` to fetch dedicated OTLP endpoints
+- **RBAC requirement:** The authenticated identity (user or service principal) must have the **Monitoring Metrics Publisher** role assigned on the Data Collection Rule (DCR) associated with the App Insights resource (found at `properties.DataCollectionRuleResourceId` in the ARM response). This role grants `Microsoft.Insights/Metrics/Write` and `Microsoft.Insights/Telemetry/Write` dataActions needed for OTLP ingestion. Without it, telemetry export will fail with 403 Forbidden.
 - Connection string mode is still supported for backward compatibility — if the value starts with `InstrumentationKey=`, the system uses the legacy `x-ms-ikey` auth path
 - Keep resource IDs and connection strings in `.env` files or extract tokens via setup blocks
 - `# @telemetry_service` is optional — defaults to the filename
