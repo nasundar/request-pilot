@@ -3275,6 +3275,8 @@ input:focus, select:focus, textarea:focus { outline: none; }
   z-index: 1000;
   font-size: 12px;
   color: var(--text-primary);
+  overflow: hidden;
+  word-break: break-word;
 }
 .telemetry-btn:hover .telemetry-tooltip,
 .telemetry-tooltip.pinned {
@@ -3304,6 +3306,10 @@ input:focus, select:focus, textarea:focus { outline: none; }
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-primary);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .telemetry-tooltip .tt-val.success { color: #4caf50; }
 .telemetry-tooltip .tt-val.error { color: #f44336; }

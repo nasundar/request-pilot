@@ -1912,6 +1912,17 @@ async function runAllTests() {
     if (monitorCached && Date.now() < monitorCached.expiresAt - 60000) {
       azureExtraVars.push(['__monitor_token', monitorCached.token]);
     }
+
+    // Inject ARM token into telemetry_token variable for files with resource ID telemetry
+    const armCached = azureTokenCache.get('https://management.azure.com/.default');
+    if (armCached && Date.now() < armCached.expiresAt - 60000) {
+      for (const f of loadedFiles) {
+        const tokenVar = f.suite.telemetry_token;
+        if (tokenVar) {
+          azureExtraVars.push([tokenVar, armCached.token]);
+        }
+      }
+    }
   }
 
   // Reset results
@@ -2054,6 +2065,10 @@ async function runAllTests() {
         setTelemetryState('configured');
         rpLog('warn', 'OTEL telemetry: no telemetry data was returned from any file. Check that telemetry variables are correctly configured and populated.');
       }
+    }
+    // Re-check if monitor token is still valid → show ready instead of configured
+    if (telemetryState === 'configured') {
+      updateTelemetryAuthState();
     }
     stopBlockProgressListener();
     setRunning(false);
@@ -5259,7 +5274,9 @@ function renderTelemetryTooltip() {
 
   // Show state-specific info
   if (telemetryState === 'configured') {
-    html += '<div class="tt-row"><span class="tt-key">Status</span><span class="tt-val">Configured — awaiting Azure auth</span></div>';
+    const hasAzureAuth = azureAuthState === 'authenticated';
+    const statusText = hasAzureAuth ? 'Configured — awaiting monitor.azure.com token' : 'Configured — awaiting Azure auth';
+    html += '<div class="tt-row"><span class="tt-key">Status</span><span class="tt-val">' + statusText + '</span></div>';
     // Show which files have telemetry
     const telFiles = loadedFiles.filter(f => f.suite.telemetry_var);
     if (telFiles.length > 0) {
@@ -5268,11 +5285,14 @@ function renderTelemetryTooltip() {
         const varName = f.suite.telemetry_var;
         const varVal = f.suite.variables?.find(([k]) => k === varName)?.[1] || '(empty)';
         const display = varVal.length > 50 ? varVal.slice(0, 40) + '…' : varVal;
-        html += '<div class="tt-row"><span class="tt-key">' + escHtml(f.name) + '</span><span class="tt-val">' + escHtml(display) + '</span></div>';
+        html += '<div class="tt-row"><span class="tt-key">' + escHtml(f.name) + '</span><span class="tt-val" title="' + escHtml(varVal) + '">' + escHtml(display) + '</span></div>';
       }
       html += '</div>';
     }
-    html += '<div class="tt-section"><div class="tt-section-title">Next Step</div><div style="color: var(--text-muted); font-size: 11px;">Click Azure Auth to authenticate — monitor.azure.com scope will be auto-added</div></div>';
+    const nextStep = hasAzureAuth
+      ? 'Re-authenticate to include monitor.azure.com scope'
+      : 'Click Azure Auth — monitor.azure.com scope will be auto-added';
+    html += '<div class="tt-section"><div class="tt-section-title">Next Step</div><div style="color: var(--text-muted); font-size: 11px;">' + nextStep + '</div></div>';
   } else if (telemetryState === 'ready') {
     html += '<div class="tt-row"><span class="tt-key">Status</span><span class="tt-val success">Ready — authenticated</span></div>';
     const telFiles = loadedFiles.filter(f => f.suite.telemetry_var);
