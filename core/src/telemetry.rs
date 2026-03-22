@@ -990,6 +990,20 @@ impl TelemetryCollector {
             ..Default::default()
         };
 
+        // Log auth info for debugging
+        if let Some((ref hdr, ref val)) = self.config.auth_header {
+            let token_info = if hdr == "Authorization" && val.starts_with("Bearer ") {
+                let jwt = &val[7..];
+                decode_jwt_audience(jwt)
+                    .unwrap_or_else(|| format!("Bearer token ({}...)", &jwt[..20.min(jwt.len())]))
+            } else {
+                format!("{}: {}...", hdr, &val[..20.min(val.len())])
+            };
+            eprintln!("[telemetry] Auth: {}", token_info);
+        } else {
+            eprintln!("[telemetry] No auth header configured");
+        }
+
         let client = match reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
@@ -1056,10 +1070,73 @@ impl TelemetryCollector {
         let status = resp.status().as_u16();
         if status >= 400 {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("HTTP {} from {}: {}", status, url, body));
+            let mut msg = format!("HTTP {} from {}: {}", status, url, body);
+            if status == 403 {
+                if let Some((_, ref val)) = self.config.auth_header {
+                    if val.starts_with("Bearer ") {
+                        let aud = decode_jwt_audience(&val[7..])
+                            .unwrap_or_else(|| "unknown".to_string());
+                        msg.push_str(&format!(" [token audience: {}]", aud));
+                    }
+                }
+            }
+            return Err(msg);
         }
         Ok(())
     }
+}
+
+/// Decode JWT payload (no verification) to extract the `aud` claim for debugging.
+fn decode_jwt_audience(jwt: &str) -> Option<String> {
+    let parts: Vec<&str> = jwt.splitn(3, '.').collect();
+    if parts.len() < 2 { return None; }
+    // base64url decode the payload
+    let payload = parts[1];
+    let padded = match payload.len() % 4 {
+        2 => format!("{}==", payload),
+        3 => format!("{}=", payload),
+        _ => payload.to_string(),
+    };
+    let b64 = padded.replace('-', "+").replace('_', "/");
+    let decoded = base64_decode(&b64)?;
+    let json_str = String::from_utf8(decoded).ok()?;
+    // Simple JSON parse for "aud" field
+    let val: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+    val.get("aud").and_then(|a| {
+        if let Some(s) = a.as_str() { Some(s.to_string()) }
+        else if let Some(arr) = a.as_array() {
+            Some(arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+        } else { None }
+    })
+}
+
+/// Minimal base64 decoder (standard alphabet, no dependencies).
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            b'=' => Some(0),
+            _ => None,
+        }
+    }
+    let bytes = input.as_bytes();
+    if bytes.len() % 4 != 0 { return None; }
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        let a = val(chunk[0])?;
+        let b = val(chunk[1])?;
+        let c = val(chunk[2])?;
+        let d = val(chunk[3])?;
+        let n = (a as u32) << 18 | (b as u32) << 12 | (c as u32) << 6 | d as u32;
+        out.push((n >> 16) as u8);
+        if chunk[2] != b'=' { out.push((n >> 8) as u8); }
+        if chunk[3] != b'=' { out.push(n as u8); }
+    }
+    Some(out)
 }
 
 // ── Hex encoding (no dependency needed) ──

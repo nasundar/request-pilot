@@ -5389,4 +5389,20 @@ function escHtml(s) {
 // --- Initialize ---
 renderEnvVars();
 initAzureAuth();
+
+// Telemetry tooltip: stay open when hovering from button into tooltip
+{
+  const btn = $('#telemetryBtn');
+  const tooltip = $('#telemetryTooltip');
+  let hideTimer = null;
+  const show = () => { clearTimeout(hideTimer); btn.classList.add('tooltip-visible'); };
+  const scheduleHide = () => { hideTimer = setTimeout(() => btn.classList.remove('tooltip-visible'), 150); };
+  if (btn && tooltip) {
+    btn.addEventListener('mouseenter', show);
+    btn.addEventListener('mouseleave', scheduleHide);
+    tooltip.addEventListener('mouseenter', show);
+    tooltip.addEventListener('mouseleave', scheduleHide);
+  }
+}
+
 rpLog('info', 'Request Pilot initialized');
