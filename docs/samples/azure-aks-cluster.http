@@ -22,9 +22,10 @@ resource_group = your-resource-group
 cluster_name = your-aks-cluster
 aks_api = 2024-01-01
 mgmt_api = https://management.azure.com
-
 ### @setup Fetch Azure AD Token
-# @description Authenticates using client credentials flow
+# @mode app
+# @dev_auth https://management.azure.com/.default
+# @description Authenticates using client credentials flow (skipped in dev mode)
 POST https://login.microsoftonline.com/{{tenant_id}}/oauth2/v2.0/token
 Content-Type: application/x-www-form-urlencoded
 

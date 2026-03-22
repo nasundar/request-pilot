@@ -366,8 +366,9 @@ pub async fn run_suite(
     suite: &TestSuite,
     extra_variables: &[(String, String)],
     progress: Option<Arc<dyn ProgressHandler>>,
+    run_mode: Option<&str>,
 ) -> TestRunResults {
-    run_suite_inner(suite, extra_variables, progress).await
+    run_suite_inner(suite, extra_variables, progress, run_mode).await
 }
 
 /// Inner implementation — emits block-progress events when handler is available.
@@ -375,6 +376,7 @@ async fn run_suite_inner(
     suite: &TestSuite,
     extra_variables: &[(String, String)],
     handler: Option<Arc<dyn ProgressHandler>>,
+    run_mode: Option<&str>,
 ) -> TestRunResults {
     let mut var_store = VariableStore::from_pairs(&suite.variables);
     var_store.merge(extra_variables);
@@ -390,6 +392,18 @@ async fn run_suite_inner(
             _ => tests.push(block),
         }
     }
+
+    // Filter blocks by run mode
+    let mode_filter = |block: &&TestBlock| -> bool {
+        match (&block.mode, &run_mode) {
+            (None, _) => true,
+            (Some(m), None) => m != "dev",
+            (Some(m), Some(rm)) => m.as_str() == *rm,
+        }
+    };
+    let setups: Vec<&TestBlock> = setups.into_iter().filter(mode_filter).collect();
+    let tests: Vec<&TestBlock> = tests.into_iter().filter(mode_filter).collect();
+    let teardowns: Vec<&TestBlock> = teardowns.into_iter().filter(mode_filter).collect();
 
     let mut block_results: Vec<BlockResult> = Vec::new();
     let mut setup_failed = false;
@@ -477,14 +491,24 @@ async fn run_suite_inner(
 pub async fn resolve_variables_only(
     suite: &TestSuite,
     extra_variables: &[(String, String)],
+    run_mode: Option<&str>,
 ) -> Result<HashMap<String, String>, String> {
     let mut var_store = VariableStore::from_pairs(&suite.variables);
     var_store.merge(extra_variables);
+
+    let mode_filter = |b: &&TestBlock| -> bool {
+        match (&b.mode, &run_mode) {
+            (None, _) => true,
+            (Some(m), None) => m != "dev",
+            (Some(m), Some(rm)) => m.as_str() == *rm,
+        }
+    };
 
     let mut setup_blocks: Vec<&TestBlock> = suite
         .blocks
         .iter()
         .filter(|b| b.block_type == "setup")
+        .filter(mode_filter)
         .collect();
     setup_blocks.sort_by_key(|b| suite.blocks.iter().position(|sb| std::ptr::eq(sb, *b)));
 
@@ -532,18 +556,18 @@ pub async fn resolve_variables_only(
     Ok(var_store.to_map())
 }
 
-fn block_type_order(block_type: &str) -> u8 {
-    match block_type {
-        "setup" => 0,
-        "test" | "request" => 1,
-        "teardown" => 2,
-        _ => 1,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn block_type_order(block_type: &str) -> u8 {
+        match block_type {
+            "setup" => 0,
+            "test" | "request" => 1,
+            "teardown" => 2,
+            _ => 1,
+        }
+    }
 
     #[test]
     fn block_type_order_setup() {
@@ -639,6 +663,8 @@ mod tests {
             name: name.to_string(),
             description: String::new(),
             disabled: false,
+            mode: None,
+            dev_auth: None,
             group: group.map(|s| s.to_string()),
             depends,
             request: ParsedRequest {
@@ -662,7 +688,7 @@ mod tests {
             ],
             blocks: Vec::new(),
         };
-        let result = resolve_variables_only(&suite, &[]).await.unwrap();
+        let result = resolve_variables_only(&suite, &[], None).await.unwrap();
         assert_eq!(result.get("host").unwrap(), "example.com");
         assert_eq!(result.get("token").unwrap(), "abc123");
     }
@@ -674,7 +700,7 @@ mod tests {
             blocks: Vec::new(),
         };
         let extras = vec![("env".to_string(), "staging".to_string())];
-        let result = resolve_variables_only(&suite, &extras).await.unwrap();
+        let result = resolve_variables_only(&suite, &extras, None).await.unwrap();
         assert_eq!(result.get("host").unwrap(), "example.com");
         assert_eq!(result.get("env").unwrap(), "staging");
     }
@@ -691,7 +717,7 @@ mod tests {
                 make_block("teardown", "my_teardown", Vec::new(), vec![], None),
             ],
         };
-        let result = resolve_variables_only(&suite, &[]).await.unwrap();
+        let result = resolve_variables_only(&suite, &[], None).await.unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result.get("base").unwrap(), "val");
         // No error keys from test/teardown blocks
@@ -715,7 +741,7 @@ mod tests {
                 None,
             )],
         };
-        let result = resolve_variables_only(&suite, &[]).await.unwrap();
+        let result = resolve_variables_only(&suite, &[], None).await.unwrap();
         assert_eq!(result.get("static_var").unwrap(), "hello");
         // Setup block should have been attempted; connection refusal ⇒ error key
         assert!(
@@ -735,7 +761,7 @@ mod tests {
                 make_block("test", "C", vec![], vec![], Some("group2")),
             ],
         };
-        let results = run_suite_inner(&suite, &[], None).await;
+        let results = run_suite_inner(&suite, &[], None, None).await;
         assert_eq!(results.block_results.len(), 3);
         for r in &results.block_results {
             assert_ne!(r.status, "skipped");
@@ -758,7 +784,7 @@ mod tests {
                 ),
             ],
         };
-        let results = run_suite_inner(&suite, &[], None).await;
+        let results = run_suite_inner(&suite, &[], None, None).await;
         assert_eq!(results.block_results.len(), 2);
         for r in &results.block_results {
             assert_ne!(r.status, "skipped");
@@ -776,7 +802,7 @@ mod tests {
                 make_block("test", "Solo3", vec![], vec![], None),
             ],
         };
-        let results = run_suite_inner(&suite, &[], None).await;
+        let results = run_suite_inner(&suite, &[], None, None).await;
         assert_eq!(results.block_results.len(), 3);
     }
 
@@ -791,7 +817,7 @@ mod tests {
                 make_block("teardown", "Cleanup", vec![], vec![], None),
             ],
         };
-        let results = run_suite_inner(&suite, &[], None).await;
+        let results = run_suite_inner(&suite, &[], None, None).await;
         // Setup fails (unreachable addr) → tests skipped, but teardown always runs
         assert_eq!(results.block_results.len(), 4);
     }
@@ -818,7 +844,7 @@ mod tests {
                 ),
             ],
         };
-        let results = run_suite_inner(&suite, &[], None).await;
+        let results = run_suite_inner(&suite, &[], None, None).await;
         assert_eq!(results.block_results.len(), 2);
         for r in &results.block_results {
             assert_eq!(r.status, "skipped");
@@ -835,7 +861,7 @@ mod tests {
                 make_block("teardown", "Cleanup", vec![], vec![], None),
             ],
         };
-        let results = run_suite_inner(&suite, &[], None).await;
+        let results = run_suite_inner(&suite, &[], None, None).await;
         assert_eq!(results.block_results.len(), 3);
         // Setup errors (connection refused)
         assert_eq!(results.block_results[0].status, "error");
@@ -855,7 +881,7 @@ mod tests {
                 make_block("test", "Third", vec![], vec![], Some("g3")),
             ],
         };
-        let results = run_suite_inner(&suite, &[], None).await;
+        let results = run_suite_inner(&suite, &[], None, None).await;
         assert_eq!(results.block_results[0].name, "First");
         assert_eq!(results.block_results[1].name, "Second");
         assert_eq!(results.block_results[2].name, "Third");

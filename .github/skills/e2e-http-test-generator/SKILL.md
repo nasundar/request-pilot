@@ -77,6 +77,8 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 # @assert $.items.length > 0          — array length checks
 # @assert $.name contains partial     — substring match
 # @extract var_name = $.json.path     — save response value for later blocks
+# @mode app|dev                    — restrict to app mode or dev mode (mutually exclusive auth)
+# @dev_auth <scope>               — Azure scope for user auth (used with @mode app)
 ```
 
 **Assertion operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `contains`
@@ -378,6 +380,47 @@ Every `.http` file MUST start with a structured comment block that lists all tes
 - Include `Metrics:` with total test count and key assertion summary
 - Keep descriptions concise — one line per test
 
+### Pattern 8: Dev Mode — Azure CLI User Auth
+
+When testing APIs that require Azure AD tokens, `.http` files typically have `@setup` blocks that fetch tokens via OAuth2 client credentials (requiring `client_id` and `client_secret`). In **dev mode**, developers can skip those blocks and use their own Azure CLI login (`az account get-access-token`) instead.
+
+Use `# @mode app` on client-credentials setup blocks and `# @mode dev` on dev-mode-only blocks. They are mutually exclusive — only one runs depending on the active mode. Add `# @dev_auth <scope>` to specify the Azure scope for user auth on each `@mode app` token-fetch block.
+
+#### Example: Dual-Mode Auth Setup
+
+```http
+### @setup Authenticate
+# @mode app
+# @dev_auth https://management.azure.com/.default
+# @description Fetches token using client credentials (skipped in dev mode, replaced with user token)
+POST {{auth_url}}/oauth2/v2.0/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope={{auth_scope}}
+
+# @extract access_token = $.access_token
+# @assert status == 200
+
+### @test List Users
+# @description Works in both modes — uses access_token from either setup
+GET https://graph.microsoft.com/v1.0/users?$top=5
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.value.length > 0
+```
+
+**How it works:**
+- **App mode** (default): The `# @mode app` setup block runs, fetching a token via client credentials. Tests use the extracted `access_token`.
+- **Dev mode** (toggle ON): The `# @mode app` block is skipped. The desktop app reads `# @dev_auth` from the block, authenticates the user for that scope via device code flow, and injects the token into the block's `@extract` variable. Tests run with the user's own token.
+
+**Rules:**
+- `# @mode app` blocks only run when dev mode is OFF
+- `# @mode dev` blocks only run when dev mode is ON
+- Blocks without `# @mode` always run (backward compatible)
+- `# @dev_auth <scope>` on a `@mode app` block tells the app which Azure scope to request when authenticating the user
+- The injected token uses the same variable name (`access_token`) so downstream tests work unchanged
+
 ## Common Pitfalls
 
 ### Comments leaking into request body
@@ -443,6 +486,8 @@ access_token =
 - **Assertions must be comprehensive** — check status codes, key response fields, data types, relationships
 - **Teardown must clean up everything** created during setup/test
 - **Use `{{$uuid}}` in resource names** to avoid collisions between test runs
+- **Use `# @mode app` on client-credentials auth blocks** — marks them as app-mode-only so dev mode can skip them and use Azure CLI user auth instead. Add `# @dev_auth <scope>` to specify the Azure scope for user auth.
+- **Use `# @dev_auth <scope>` on `@mode app` token-fetch blocks** — specifies the Azure scope for user auth. When the user authenticates via device code flow, the app fetches a user token with this scope and injects it into the block's `@extract` variable.
 - **Comments explain non-obvious logic** — especially complex assertions or why a specific test exists
 - **Always start with a Test Plan header comment** — a structured comment block listing all test scenarios, grouped by type and group name, with prerequisites and assertion summary (see Pattern 7)
 - **Section decoration comments MUST be placed AFTER `###`, not before**— the parser splits the file at `###` boundaries, so any comments between blocks that appear before the next `###` become part of the previous block's request body. Put section headers, group labels, and decorative separators immediately after a `###` line:

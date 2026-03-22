@@ -9,6 +9,7 @@
 #   Setup:
 #     1. Fetch OpenID Configuration — extract Azure AD v2.0 metadata
 #     2. Fetch NuGet Service Index — extract search/registration endpoints
+#     3. Fetch Graph Token (app mode) — client credentials for Graph API
 #
 #   Tests:
 #     azure-identity (parallel)
@@ -22,15 +23,18 @@
 #       - Fetch Azure Status Page — verify Azure status is reachable
 #       - Fetch Graph API Metadata — validate Graph $metadata endpoint
 #       - Fetch GitHub Microsoft Org — query GitHub API for Microsoft org
+#     graph-authenticated (parallel)
+#       - Get Graph Organization — fetch org info with auth token
 #     error-handling (parallel)
 #       - Non-Existent NuGet Package — validate empty search results
 #       - Invalid OpenID Tenant — validate error for bogus tenant
 #
 # Prerequisites:
 #   - Internet access (all APIs are public, no credentials needed)
+#   - For authenticated tests: Azure AD credentials OR toggle Dev Mode
 #
 # Metrics:
-#   - Total: 10 tests, 2 setup, 0 teardown
+#   - Total: 11 tests, 3 setup, 0 teardown
 #   - Key assertions: status codes, JSON field values, array lengths,
 #     extracted URL chaining, response structure validation
 # ============================================================
@@ -49,6 +53,7 @@ azure_status_url = https://azure.status.microsoft.com
 github_api = https://api.github.com
 
 # --- Extracted at runtime (populated by @setup blocks) ---
+access_token =
 jwks_uri =
 issuer =
 token_endpoint =
@@ -78,6 +83,20 @@ GET {{nuget_base}}/v3/index.json
 # @assert status == 200
 # @assert $.version != null
 # @assert $.resources.length > 0
+
+### @setup Fetch Graph Token
+# @mode app
+# @dev_auth https://graph.microsoft.com/.default
+# @description Fetches an access token for Microsoft Graph using client credentials (skipped in dev mode)
+POST {{azure_ad_base}}/{{tenant}}/oauth2/v2.0/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope={{auth_scope}}
+
+# @extract access_token = $.access_token
+# @assert status == 200
+# @assert $.access_token != null
+# @assert $.token_type == Bearer
 
 ###
 # --------------------------------------------------
@@ -168,6 +187,23 @@ Accept: application/vnd.github.v3+json
 # @assert status == 200
 # @assert $.login == microsoft
 # @assert $.type == Organization
+
+###
+# --------------------------------------------------
+# Group: graph-authenticated
+# Authenticated Microsoft Graph API tests
+# (Uses token from setup — in dev mode, your own credentials)
+# --------------------------------------------------
+
+### @test Get Graph Organization
+# @description Fetches organization info from Microsoft Graph using auth token
+# @group graph-authenticated
+GET {{graph_base}}/v1.0/organization
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.value.length > 0
+# @assert $.value[0].displayName != null
 
 ###
 # --------------------------------------------------

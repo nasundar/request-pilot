@@ -53,8 +53,10 @@ step = 60
 # ============================================================
 
 ### @setup Authenticate against ARM
+# @mode app
+# @dev_auth https://management.azure.com/.default
 # @name Fetch ARM Access Token
-# @description Obtains OAuth2 token for Azure Resource Manager to retrieve AMW properties
+# @description Obtains OAuth2 token for Azure Resource Manager to retrieve AMW properties (skipped in dev mode)
 POST https://login.microsoftonline.com/{{tenant_id}}/oauth2/v2.0/token
 Content-Type: application/x-www-form-urlencoded
 
@@ -77,8 +79,10 @@ Authorization: Bearer {{arm_token}}
 # @assert $.properties.provisioningState == Succeeded
 
 ### @setup Authenticate against Prometheus
+# @mode app
+# @dev_auth https://prometheus.monitor.azure.com/.default
 # @name Fetch Prometheus Access Token
-# @description Obtains OAuth2 token scoped to Prometheus query endpoint for all subsequent tests
+# @description Obtains OAuth2 token scoped to Prometheus query endpoint for all subsequent tests (skipped in dev mode)
 POST https://login.microsoftonline.com/{{tenant_id}}/oauth2/v2.0/token
 Content-Type: application/x-www-form-urlencoded
 

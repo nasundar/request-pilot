@@ -587,7 +587,7 @@ impl App {
 
         tokio::spawn(async move {
             let results = request_pilot_core::test_runner::run_suite(
-                &suite, &extra_vars, Some(handler),
+                &suite, &extra_vars, Some(handler), None,
             ).await;
             let _ = tx.send(RunnerMessage::SuiteComplete { file_idx: fi, results });
         });
@@ -620,7 +620,7 @@ impl App {
 
             tokio::spawn(async move {
                 let single_results = request_pilot_core::test_runner::run_suite(
-                    &single_suite, &extra_vars, Some(handler),
+                    &single_suite, &extra_vars, Some(handler), None,
                 ).await;
 
                 let mut full_results = TestRunResults {
@@ -689,7 +689,7 @@ impl App {
 
             tokio::spawn(async move {
                 let group_results = request_pilot_core::test_runner::run_suite(
-                    &group_suite, &extra_vars, Some(handler),
+                    &group_suite, &extra_vars, Some(handler), None,
                 ).await;
 
                 let passed = group_results.passed;

@@ -12,18 +12,26 @@
     <div class="toolbar-left">
       <span class="app-logo">✈</span>
       <span class="app-title">Request Pilot</span>
-      <span class="zoom-indicator" id="zoomIndicator" title="Zoom level (Ctrl+Scroll, Ctrl+0 to reset)">100%</span>
-      <button class="btn-icon-sm help-btn" id="helpBtn" title="Getting Started Tour">❓</button>
     </div>
     <div class="toolbar-center">
       <div class="mode-toggle" id="modeToggle">
         <button class="mode-btn active" data-mode="builder" title="Form-based editor">🔧 Builder</button>
         <button class="mode-btn" data-mode="code" title="Raw .http editor">📝 Code</button>
         <button class="mode-btn" data-mode="history" title="Request history &amp; stats">📊 History</button>
+        <button class="mode-btn" data-mode="logs" title="Application logs">📋 Logs</button>
       </div>
       <button class="btn btn-primary btn-sm" id="runAllBtn" title="Run all tests (Ctrl+Shift+Enter)">
         <span class="btn-label">▶ Run All</span>
       </button>
+    </div>
+    <div class="toolbar-right">
+      <button class="azure-auth-btn" id="azureAuthBtn" title="Azure Authentication">
+        <span class="azure-auth-icon" id="azureAuthIcon">🔒</span>
+        <span class="azure-auth-label" id="azureAuthLabel">Azure</span>
+        <span class="azure-auth-status" id="azureAuthStatus"></span>
+      </button>
+      <span class="zoom-indicator" id="zoomIndicator" title="Zoom level (Ctrl+Scroll, Ctrl+0 to reset)">100%</span>
+      <button class="btn-icon-sm help-btn" id="helpBtn" title="Getting Started Tour">❓</button>
     </div>
   </header>
 
@@ -99,6 +107,7 @@
           <div class="code-editor-wrapper">
             <pre class="code-editor-highlight" id="codeEditorHighlight"><code id="codeEditorHighlightCode"></code></pre>
             <textarea id="codeEditor" class="code-editor" spellcheck="false" placeholder="### @variables&#10;@baseUrl = https://api.example.com&#10;&#10;### @test My First Test&#10;GET {{baseUrl}}/api/health&#10;&#10;# @assert response.status == 200"></textarea>
+            <div id="codeJumpBack" class="code-jump-back hidden" title="Jump to selected block">↑ Selected block</div>
           </div>
         </div>
       </div>
@@ -111,6 +120,7 @@
             <span class="history-count-badge" id="historyCountBadge">0</span>
           </div>
           <div class="history-actions">
+            <button class="popout-btn" onclick="popOutPanel('historyPanel', 'History')" title="Pop out to window">⧉</button>
             <span class="history-selected-count hidden" id="historySelectedCount"></span>
             <button class="btn btn-primary btn-xs hidden" id="historyCompareBtn" title="Compare selected requests">⚖ Compare</button>
             <button class="btn btn-ghost btn-xs" id="historyExpandAllBtn" title="Expand all groups">⊞ Expand All</button>
@@ -168,6 +178,22 @@
         </div>
       </div>
 
+      <!-- Logs Panel (hidden by default) -->
+      <div id="logsPanel" class="history-panel hidden">
+        <div class="log-header">
+          <div class="log-filter-buttons">
+            <button class="log-filter-btn active" data-log-level="all">All</button>
+            <button class="log-filter-btn" data-log-level="info">Info</button>
+            <button class="log-filter-btn" data-log-level="warn">Warn</button>
+            <button class="log-filter-btn" data-log-level="error">Error</button>
+            <button class="log-filter-btn" data-log-level="debug">Debug</button>
+          </div>
+          <button class="btn btn-ghost btn-xs" id="logsClearBtn" title="Clear logs">🗑 Clear</button>
+          <button class="popout-btn" onclick="popOutPanel('logsPanel', 'Logs')" title="Pop out to window">⧉</button>
+        </div>
+        <div id="logList" class="log-list"></div>
+      </div>
+
       <!-- Split panels: request + response -->
       <div class="split-panels">
         <!-- Request Panel -->
@@ -210,6 +236,7 @@
         <section class="panel response-panel" id="responsePanel">
           <div class="panel-header">
             <span class="panel-title">RESPONSE</span>
+            <button class="popout-btn" onclick="popOutPanel('responsePanel', 'Response')" title="Pop out to window">⧉</button>
             <div id="responseMeta" class="response-meta hidden">
               <span id="responseStatusBadge" class="status-badge"></span>
               <span class="meta-separator">·</span>
@@ -342,6 +369,31 @@
           <button class="btn btn-ghost btn-xs" id="tourPrevBtn">← Back</button>
           <button class="btn btn-primary btn-xs" id="tourNextBtn">Next →</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Device Code Auth Modal -->
+  <div class="device-code-overlay hidden" id="deviceCodeOverlay">
+    <div class="device-code-modal">
+      <div class="device-code-header">
+        <span class="device-code-icon">🔑</span>
+        <h3>Sign in to Azure</h3>
+      </div>
+      <div class="device-code-body">
+        <p class="device-code-instruction">To authenticate, visit:</p>
+        <a class="device-code-url" id="deviceCodeUrl" href="#" target="_blank"></a>
+        <p class="device-code-instruction">and enter this code:</p>
+        <div class="device-code-code-container">
+          <span class="device-code-code" id="deviceCodeValue"></span>
+          <button class="device-code-copy" id="deviceCodeCopy" title="Copy code">📋</button>
+        </div>
+        <div class="device-code-status" id="deviceCodeStatus">
+          <span class="device-code-spinner">⠋</span> Waiting for authentication...
+        </div>
+      </div>
+      <div class="device-code-footer">
+        <button class="btn btn-sm" id="deviceCodeCancel">Cancel</button>
       </div>
     </div>
   </div>

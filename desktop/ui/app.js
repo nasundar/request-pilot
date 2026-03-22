@@ -4,7 +4,7 @@
    ============================================================ */
 
 const { invoke } = window.__TAURI__.core;
-const { listen } = window.__TAURI__.event;
+const { listen, emit } = window.__TAURI__.event;
 
 // --- DOM helpers ---
 const $ = (sel) => document.querySelector(sel);
@@ -19,7 +19,7 @@ let envFilePath = null;      // path to loaded .env file
 let disabledBlocks = {};     // {"fileIdx-blockIdx": true} — disabled steps
 let isRunning = false;
 let lastResponse = null;
-let currentMode = 'builder';    // 'builder' | 'code'
+let currentMode = 'builder';    // 'builder' | 'code' | 'history' | 'logs'
 let codeEditorContent = '';     // last saved content in code editor
 let codeEditorModified = false;
 let historyCache = [];
@@ -30,6 +30,29 @@ let historySelectedIds = new Set();  // Selected for comparison
 let viewedResults = new Map();       // "fileIdx-blockIdx" → { status, hash }
 let viewedHistoryEntries = new Map(); // seq → { status, hash }
 let runHistory = new Map(); // Map<fileName, [{timestamp, passed, failed, skipped, totalTime, blockResults: [{name, status, timeMs}]}]>
+
+// --- Logging ---
+const rpLogs = [];
+const MAX_LOGS = 2000;
+let logFilterLevel = 'all';
+
+function rpLog(level, message, data) {
+  const entry = {
+    ts: new Date().toISOString(),
+    level, // 'info' | 'warn' | 'error' | 'debug'
+    message,
+    data: data !== undefined ? data : null
+  };
+  rpLogs.push(entry);
+  if (rpLogs.length > MAX_LOGS) rpLogs.splice(0, rpLogs.length - MAX_LOGS);
+  if (typeof renderLogEntry === 'function') renderLogEntry(entry);
+  if (typeof emitToLogPopout === 'function') emitToLogPopout(entry);
+}
+
+// --- Azure Auth ---
+// States: 'off' | 'needs-auth' | 'authenticated' | 'expired'
+let azureAuthState = 'off';
+let azCliAvailable = false;
 
 // --- Zoom ---
 let zoomLevel = parseInt(localStorage.getItem('rp-zoom') || '100', 10);
@@ -164,6 +187,10 @@ const historyGroupBySelect= $('#historyGroupBySelect');
 const historyDetailOverlay= $('#historyDetailOverlay');
 const historyDetailBody   = $('#historyDetailBody');
 const historyDetailTitle  = $('#historyDetailTitle');
+
+// Logs panel refs
+const logsPanel  = $('#logsPanel');
+const logList    = $('#logList');
 
 // --- Sidebar section toggle ---
 $$('.sidebar-section-header').forEach(header => {
@@ -486,9 +513,11 @@ async function sendRequest() {
     lastResponse = resp;
     displayResponse(resp);
     showToast(`${resp.status} ${resp.status_text}`, resp.status < 400 ? 'success' : 'error');
+    rpLog('info', 'Response: ' + resp.status, { url, timeMs: resp.time_ms });
   } catch (err) {
     displayError(err);
     showToast(String(err), 'error');
+    rpLog('error', 'Command failed: send_request', String(err));
   } finally {
     sendBtn.disabled = false;
     sendBtn.classList.remove('loading');
@@ -500,6 +529,214 @@ sendBtn.addEventListener('click', sendRequest);
 urlInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey) sendRequest();
 });
+
+// --- Content-Type Detection ---
+function detectContentType(body, headers) {
+  const ct = (headers || []).find(([k]) => k.toLowerCase() === 'content-type');
+  const contentType = ct ? ct[1].toLowerCase() : '';
+
+  if (contentType.includes('json') || contentType.includes('javascript')) return 'json';
+  if (contentType.includes('xml') || contentType.includes('soap')) return 'xml';
+  if (contentType.includes('html')) return 'html';
+  if (contentType.includes('protobuf') || contentType.includes('grpc')) return 'protobuf';
+  if (contentType.includes('yaml') || contentType.includes('yml')) return 'yaml';
+  if (contentType.includes('csv')) return 'csv';
+  if (contentType.includes('plain')) return 'text';
+
+  const trimmed = (body || '').trim();
+  if (!trimmed) return 'empty';
+
+  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+      (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+    try { JSON.parse(trimmed); return 'json'; } catch {}
+  }
+
+  if (trimmed.startsWith('<?xml') || (trimmed.startsWith('<') && trimmed.includes('</'))) return 'xml';
+  if (trimmed.toLowerCase().startsWith('<!doctype') || trimmed.toLowerCase().startsWith('<html')) return 'html';
+  if (/^[a-zA-Z_][\w]*:\s/m.test(trimmed) && !trimmed.includes('{')) return 'yaml';
+
+  return 'text';
+}
+
+// --- XML Pretty-Printer ---
+function prettyPrintXml(xml) {
+  let formatted = '';
+  let indent = 0;
+  const parts = xml.replace(/>\s*</g, '><').split(/(<[^>]+>)/);
+  for (const part of parts) {
+    if (!part.trim()) continue;
+    if (part.match(/^<\/\w/)) {
+      indent = Math.max(indent - 1, 0);
+      formatted += '  '.repeat(indent) + part + '\n';
+    } else if (part.match(/^<\w[^>]*[^/]>$/)) {
+      formatted += '  '.repeat(indent) + part + '\n';
+      indent++;
+    } else if (part.match(/^<\w[^>]*\/>$/)) {
+      formatted += '  '.repeat(indent) + part + '\n';
+    } else if (part.startsWith('<')) {
+      formatted += '  '.repeat(indent) + part + '\n';
+    } else {
+      formatted += '  '.repeat(indent) + part + '\n';
+    }
+  }
+  return formatted.trimEnd();
+}
+
+// --- XML/HTML Syntax Highlighter ---
+function renderXmlHighlighted(xmlString) {
+  const pre = document.createElement('pre');
+  pre.className = 'syntax-plain';
+  const formatted = prettyPrintXml(xmlString);
+  const escaped = escapeHtml(formatted);
+  const highlighted = escaped
+    .replace(/&lt;!--[\s\S]*?--&gt;/g, m => `<span class="syntax-comment">${m}</span>`)
+    .replace(/&lt;!\[CDATA\[[\s\S]*?\]\]&gt;/g, m => `<span class="syntax-cdata">${m}</span>`)
+    .replace(/&lt;(!DOCTYPE[^&]*?)&gt;/gi, (m, inner) => `<span class="syntax-doctype">&lt;${inner}&gt;</span>`)
+    .replace(/&lt;(\/?)([\w:-]+)((?:\s+[\s\S]*?)?)\s*(\/?)\s*&gt;/g, (m, slash, tag, attrs, selfClose) => {
+      let result = `&lt;${slash}<span class="syntax-tag">${tag}</span>`;
+      if (attrs) {
+        result += attrs.replace(/([\w:-]+)=(&quot;(?:[^&]*?)&quot;)/g,
+          (am, attr, val) => `<span class="syntax-attr">${attr}</span>=<span class="syntax-attr-value">${val}</span>`);
+      }
+      result += `${selfClose}&gt;`;
+      return result;
+    });
+  pre.innerHTML = highlighted;
+  return pre;
+}
+
+// --- YAML Syntax Highlighter ---
+function renderYamlHighlighted(yamlString) {
+  const pre = document.createElement('pre');
+  pre.className = 'syntax-plain';
+  const lines = yamlString.split('\n');
+  const highlighted = lines.map(line => {
+    const escaped = escapeHtml(line);
+    if (/^\s*#/.test(line)) return `<span class="yaml-comment">${escaped}</span>`;
+    const keyMatch = escaped.match(/^(\s*)(- )?([\w][\w.-]*)(:\s?)(.*)/);
+    if (keyMatch) {
+      const [, indent, listMarker, key, colon, val] = keyMatch;
+      let formattedVal = escapeHtml('');
+      const rawVal = val.trim();
+      if (!rawVal) formattedVal = val;
+      else if (rawVal === 'true' || rawVal === 'false') formattedVal = `<span class="yaml-boolean">${val}</span>`;
+      else if (rawVal === 'null' || rawVal === '~') formattedVal = `<span class="yaml-null">${val}</span>`;
+      else if (/^-?\d+(\.\d+)?$/.test(rawVal)) formattedVal = `<span class="yaml-number">${val}</span>`;
+      else if (/^\s*#/.test(rawVal)) formattedVal = `<span class="yaml-comment">${val}</span>`;
+      else formattedVal = `<span class="yaml-string">${val}</span>`;
+      return `${indent}${listMarker ? `<span class="yaml-list-marker">${listMarker}</span>` : ''}<span class="yaml-key">${key}</span>${colon}${formattedVal}`;
+    }
+    if (/^\s*-\s/.test(line)) {
+      return escaped.replace(/^(\s*)(- )(.*)/, (m, indent, marker, val) => {
+        const rawVal = val.trim();
+        let fv;
+        if (rawVal === 'true' || rawVal === 'false') fv = `<span class="yaml-boolean">${val}</span>`;
+        else if (/^-?\d+(\.\d+)?$/.test(rawVal)) fv = `<span class="yaml-number">${val}</span>`;
+        else fv = `<span class="yaml-string">${val}</span>`;
+        return `${indent}<span class="yaml-list-marker">${marker}</span>${fv}`;
+      });
+    }
+    return escaped;
+  }).join('\n');
+  pre.innerHTML = highlighted;
+  return pre;
+}
+
+// --- CSV Table Renderer ---
+function renderCsvTable(csvString) {
+  const lines = csvString.trim().split('\n').map(l => l.trim()).filter(Boolean);
+  if (lines.length === 0) {
+    const pre = document.createElement('pre');
+    pre.className = 'syntax-plain';
+    pre.textContent = csvString;
+    return pre;
+  }
+  const parseCsvLine = (line) => {
+    const cells = [];
+    let current = '', inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (inQuotes) {
+        if (ch === '"' && line[i + 1] === '"') { current += '"'; i++; }
+        else if (ch === '"') inQuotes = false;
+        else current += ch;
+      } else {
+        if (ch === '"') inQuotes = true;
+        else if (ch === ',') { cells.push(current); current = ''; }
+        else current += ch;
+      }
+    }
+    cells.push(current);
+    return cells;
+  };
+  const headers = parseCsvLine(lines[0]);
+  const table = document.createElement('table');
+  table.className = 'csv-table';
+  const thead = document.createElement('thead');
+  thead.innerHTML = '<tr>' + headers.map(h => `<th>${escapeHtml(h)}</th>`).join('') + '</tr>';
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  for (let i = 1; i < lines.length; i++) {
+    const cells = parseCsvLine(lines[i]);
+    const tr = document.createElement('tr');
+    tr.innerHTML = cells.map(c => `<td>${escapeHtml(c)}</td>`).join('');
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  return table;
+}
+
+// --- Render response body by content type into a container ---
+function renderResponseBodyInto(container, body, headers) {
+  const contentType = detectContentType(body, headers);
+  container.innerHTML = '';
+  container.dataset.rawBody = body || '';
+  container.dataset.contentType = contentType;
+
+  const badge = document.createElement('span');
+  badge.className = 'response-type-badge';
+  badge.textContent = contentType.toUpperCase();
+  container.appendChild(badge);
+
+  switch (contentType) {
+    case 'json':
+      try {
+        const parsed = JSON.parse(body);
+        container.appendChild(renderJsonTree(parsed));
+        container.dataset.rawJson = JSON.stringify(parsed, null, 2);
+      } catch {
+        container.dataset.rawJson = body;
+        const pre = document.createElement('pre');
+        pre.className = 'syntax-plain';
+        pre.textContent = body;
+        container.appendChild(pre);
+      }
+      break;
+    case 'xml':
+    case 'html':
+      container.appendChild(renderXmlHighlighted(body));
+      break;
+    case 'yaml':
+      container.appendChild(renderYamlHighlighted(body));
+      break;
+    case 'csv':
+      container.appendChild(renderCsvTable(body));
+      break;
+    case 'protobuf': {
+      const pre = document.createElement('pre');
+      pre.className = 'syntax-plain';
+      pre.innerHTML = `<span class="syntax-comment">// Binary protobuf response</span>\n${escapeHtml(body || '')}`;
+      container.appendChild(pre);
+      break;
+    }
+    default: {
+      const pre = document.createElement('pre');
+      pre.className = 'syntax-plain';
+      pre.textContent = body || '';
+      container.appendChild(pre);
+    }
+  }
+}
 
 // --- Display Response ---
 function displayResponse(resp) {
@@ -519,19 +756,7 @@ function displayResponse(resp) {
   responseTime.textContent = `${resp.time_ms} ms`;
   responseSize.textContent = formatBytes(resp.size_bytes);
 
-  // Render as interactive JSON tree or plain text
-  responseBody.innerHTML = '';
-  try {
-    const parsed = JSON.parse(resp.body);
-    responseBody.appendChild(renderJsonTree(parsed));
-    responseBody.dataset.rawJson = JSON.stringify(parsed, null, 2);
-  } catch {
-    responseBody.dataset.rawJson = resp.body;
-    const pre = document.createElement('pre');
-    pre.className = 'json-plain';
-    pre.textContent = resp.body;
-    responseBody.appendChild(pre);
-  }
+  renderResponseBodyInto(responseBody, resp.body, resp.headers);
 
   responseHeadersBody.innerHTML = '';
   resp.headers.forEach(([k, v]) => {
@@ -664,7 +889,7 @@ $('#collapseAllBtn').addEventListener('click', () => {
 
 copyBtn.addEventListener('click', async () => {
   try {
-    await navigator.clipboard.writeText(responseBody.dataset.rawJson || responseBody.textContent);
+    await navigator.clipboard.writeText(responseBody.dataset.rawJson || responseBody.dataset.rawBody || responseBody.textContent);
     showToast('Copied to clipboard', 'success');
   } catch {
     showToast('Failed to copy', 'error');
@@ -711,6 +936,7 @@ async function loadFile(file) {
 
     loadedFiles.push(fileEntry);
     const fileIdx = loadedFiles.length - 1;
+    detectAzureAuthNeeded();
 
     // Populate envVars from .http file variable values (non-placeholders)
     if (suite.variables) {
@@ -741,8 +967,10 @@ async function loadFile(file) {
     }
 
     showToast(`Loaded ${file.name} (${suite.blocks.length} blocks)`, 'success');
+    rpLog('info', 'File loaded: ' + file.name, { blocks: suite.blocks.length });
   } catch (err) {
     showToast(`Parse error: ${err}`, 'error');
+    rpLog('error', 'File load failed', err.message || String(err));
   }
 }
 
@@ -1377,9 +1605,18 @@ function createBlockItem(file, fileIdx, block, blockIdx) {
     item.classList.add('active');
   }
 
+  // Mode badge and dimming
+  if (block.mode) {
+    item.dataset.blockMode = block.mode;
+    const isAzureAuth = azureAuthState === 'authenticated' || azureAuthState === 'expired';
+    if (isAzureAuth && block.mode === 'app') item.classList.add('mode-dimmed');
+    if (!isAzureAuth && block.mode === 'dev') item.classList.add('mode-dimmed');
+  }
+
   const status = getBlockStatus(fileIdx, blockIdx);
   const statusClass = status ? `status-${status}` : '';
 
+  const modeBadgeHtml = block.mode ? `<span class="mode-badge mode-${block.mode}">${block.mode.toUpperCase()}</span>` : '';
   const descHtml = block.description ? `<span class="block-desc" title="${escapeAttr(block.description)}">${escapeHtml(block.description)}</span>` : '';
   const depsHtml = block.depends && block.depends.length > 0 ? `<span class="block-depends" title="Depends: ${escapeAttr(block.depends.join(', '))}">⤷ ${escapeHtml(block.depends.join(', '))}</span>` : '';
   item.innerHTML = `
@@ -1388,6 +1625,7 @@ function createBlockItem(file, fileIdx, block, blockIdx) {
     <span class="block-icon">${getBlockIcon(block.block_type)}</span>
     <span class="block-name-group">
       <span class="block-name" title="${escapeAttr(block.name)}">${escapeHtml(block.name || block.block_type)}</span>
+      ${modeBadgeHtml}
       ${descHtml}
       ${depsHtml}
     </span>
@@ -1469,6 +1707,7 @@ function closeFile(fileIdx) {
 
   renderFileTree();
   renderEnvVars();
+  detectAzureAuthNeeded();
 }
 
 // --- Block Selection ---
@@ -1635,6 +1874,7 @@ async function runAllTests() {
   }
   allUnresolved = [...new Set(allUnresolved)];
   if (allUnresolved.length > 0) {
+    rpLog('warn', 'Unresolved variables found', allUnresolved);
     promptForVariables(allUnresolved);
     return;
   }
@@ -1642,6 +1882,18 @@ async function runAllTests() {
   abortRunController = new AbortController();
   const signal = abortRunController.signal;
   setRunning(true);
+  rpLog('info', 'Run All started', { fileCount: loadedFiles.length, azureAuth: azureAuthState });
+
+  // Azure auth: use cached tokens if authenticated
+  let azureExtraVars = [];
+  const isAzureActive = azureAuthState === 'authenticated';
+  const runMode = isAzureActive ? 'dev' : null;
+  if (isAzureActive) {
+    for (const f of loadedFiles) {
+      const tokenVars = fetchDevModeToken(f.suite, f.content);
+      azureExtraVars.push(...tokenVars);
+    }
+  }
 
   // Reset results
   loadedFiles.forEach(f => f.results = null);
@@ -1691,7 +1943,8 @@ async function runAllTests() {
       try {
         const results = await invoke('run_test_suite', {
           suite,
-          extraVariables: collectVariablesArray()
+          extraVariables: [...collectVariablesArray(), ...azureExtraVars],
+          runMode,
         });
 
         // Remap results to align with original block indices
@@ -1714,6 +1967,7 @@ async function runAllTests() {
         });
       } catch (err) {
         showToast(`Error running ${file.name}: ${err}`, 'error');
+        rpLog('error', 'Command failed: run_test_suite', { file: file.name, error: String(err) });
         const errorResults = file.suite.blocks.map((b, blockIdx) => {
           if (disabledBlocks[`${fi}-${blockIdx}`]) return null;
           return {
@@ -1773,6 +2027,7 @@ async function runAllTests() {
       }
     }
   } finally {
+    rpLog('info', 'Run All completed', { passed: totalPassed, failed: totalFailed, skipped: totalSkipped, timeMs: totalTimeMs });
     stopBlockProgressListener();
     setRunning(false);
     refreshHistoryIfVisible();
@@ -1791,13 +2046,20 @@ async function runSingleBlock(fileIdx, blockIdx) {
   selectBlock(fileIdx, blockIdx);
   sendBtn.disabled = true;
   sendBtn.classList.add('loading');
+  rpLog('info', `Single block run started: ${block.name || block.block_type}`, { file: file.name, blockIdx });
 
   try {
     // Run through the test suite engine so assertions, extracts, and variables work
     const singleSuite = { variables: file.suite.variables, blocks: [block] };
+    let extraVars = collectVariablesArray();
+    if (azureAuthState === 'authenticated') {
+      const tokenVars = fetchDevModeToken(file.suite, file.content);
+      if (tokenVars.length > 0) extraVars = [...extraVars, ...tokenVars];
+    }
     const results = await invoke('run_test_suite', {
       suite: singleSuite,
-      extraVariables: collectVariablesArray()
+      extraVariables: extraVars,
+      runMode: azureAuthState === 'authenticated' ? 'dev' : null,
     });
 
     // Store result at the correct original block index
@@ -1834,9 +2096,11 @@ async function runSingleBlock(fileIdx, blockIdx) {
 
     const status = br?.status || 'error';
     showToast(`${block.name}: ${status}`, status === 'passed' ? 'success' : 'error');
+    rpLog('info', `Single block run completed: ${block.name || block.block_type}`, { status, timeMs: br?.time_ms });
   } catch (err) {
     displayError(err);
     showToast(String(err), 'error');
+    rpLog('error', 'Command failed: run_test_suite (single block)', String(err));
   } finally {
     sendBtn.disabled = false;
     sendBtn.classList.remove('loading');
@@ -2180,6 +2444,24 @@ function renderEnvVars() {
       renderEnvVars();
     });
 
+    // Variable hover tooltip
+    row.addEventListener('mouseenter', () => {
+      const varValue = v.value || '';
+      if (!varValue) return;
+      clearTimeout(showTooltipTimer);
+      clearTimeout(hideTooltipTimer);
+      showTooltipTimer = setTimeout(() => {
+        blockTooltip.innerHTML = buildVarTooltipHtml(name, varValue);
+        blockTooltip.classList.remove('hidden');
+        blockTooltip.style.display = 'block';
+        positionBlockTooltip(row);
+      }, 300);
+    });
+
+    row.addEventListener('mouseleave', () => {
+      hideBlockTooltip();
+    });
+
     envList.appendChild(row);
   });
 
@@ -2229,8 +2511,10 @@ envFileInput.addEventListener('change', async (e) => {
     envFilePath = file.name;
     renderEnvVars();
     showToast(`Loaded ${Object.keys(envVars).length} variables from ${file.name}`, 'success');
+    rpLog('info', 'Env file loaded: ' + file.name, { varCount: Object.keys(envVars).length });
   } catch (err) {
     showToast(`Failed to load .env: ${err}`, 'error');
+    rpLog('error', 'Env file load failed', String(err));
   }
   envFileInput.value = '';
 });
@@ -2359,7 +2643,12 @@ async function runGroup(fileIdx, groupName) {
   await startBlockProgressListener();
 
   try {
-    const results = await invoke('run_test_suite', { suite, extraVariables: collectVariablesArray() });
+    let extraVars = collectVariablesArray();
+    if (azureAuthState === 'authenticated') {
+      const tokenVars = fetchDevModeToken(file.suite, file.content);
+      if (tokenVars.length > 0) extraVars = [...extraVars, ...tokenVars];
+    }
+    const results = await invoke('run_test_suite', { suite, extraVariables: extraVars, runMode: azureAuthState === 'authenticated' ? 'dev' : null });
 
     // Merge results into existing file results
     if (!file.results) {
@@ -2391,6 +2680,7 @@ async function runGroup(fileIdx, groupName) {
     showTestResults(results.passed, results.failed, results.skipped, results.total_time_ms, blockResultsForDisplay);
   } catch (err) {
     showToast(`Group run failed: ${err}`, 'error');
+    rpLog('error', 'Command failed: run_test_suite (group)', String(err));
   } finally {
     stopBlockProgressListener();
     setRunning(false);
@@ -2444,9 +2734,15 @@ async function runSingleFile(fileIdx) {
   await startBlockProgressListener();
 
   try {
+    let extraVars = collectVariablesArray();
+    if (azureAuthState === 'authenticated') {
+      const tokenVars = fetchDevModeToken(file.suite, file.content);
+      if (tokenVars.length > 0) extraVars = [...extraVars, ...tokenVars];
+    }
     const results = await invoke('run_test_suite', {
       suite,
-      extraVariables: collectVariablesArray()
+      extraVariables: extraVars,
+      runMode: azureAuthState === 'authenticated' ? 'dev' : null,
     });
 
     // Remap results to align with original block indices
@@ -2477,6 +2773,7 @@ async function runSingleFile(fileIdx) {
     }
   } catch (err) {
     showToast(`Error running ${file.name}: ${err}`, 'error');
+    rpLog('error', 'Command failed: run_test_suite (file)', { file: file.name, error: String(err) });
   } finally {
     stopBlockProgressListener();
     setRunning(false);
@@ -2537,6 +2834,224 @@ function escapeAttr(str) {
   return String(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// --- Variable Tooltip: JWT & Token Detection ---
+
+function isJwt(value) {
+  if (!value || typeof value !== 'string') return false;
+  const parts = value.split('.');
+  if (parts.length !== 3) return false;
+  try {
+    atob(parts[0].replace(/-/g, '+').replace(/_/g, '/'));
+    atob(parts[1].replace(/-/g, '+').replace(/_/g, '/'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function decodeJwt(token) {
+  const parts = token.split('.');
+  const decode = (s) => {
+    try {
+      const padded = s.replace(/-/g, '+').replace(/_/g, '/');
+      return JSON.parse(atob(padded));
+    } catch {
+      return null;
+    }
+  };
+  const header = decode(parts[0]);
+  const payload = decode(parts[1]);
+
+  let tokenType = 'JWT';
+  if (header) {
+    if (header.typ === 'at+jwt' || (payload && payload.aud)) tokenType = 'Access Token';
+    if (header.typ === 'JWT' && payload && payload.refresh_token) tokenType = 'Refresh Token';
+    if (payload && payload.nonce) tokenType = 'ID Token';
+  }
+
+  let expiryInfo = null;
+  if (payload && payload.exp) {
+    const expDate = new Date(payload.exp * 1000);
+    const now = new Date();
+    const isExpired = expDate < now;
+    const timeLeft = isExpired ? 'EXPIRED' : formatTimeUntil(expDate);
+    expiryInfo = { expDate, isExpired, timeLeft };
+  }
+
+  return { header, payload, tokenType, expiryInfo, signature: parts[2] };
+}
+
+function formatTimeUntil(date) {
+  const diff = date - new Date();
+  const mins = Math.floor(diff / 60000);
+  const hours = Math.floor(mins / 60);
+  if (hours > 0) return `${hours}h ${mins % 60}m`;
+  return `${mins}m`;
+}
+
+function detectValueType(name, value) {
+  if (!value) return { type: 'empty' };
+
+  if (isJwt(value)) {
+    return { type: 'jwt', decoded: decodeJwt(value) };
+  }
+
+  if (value.startsWith('Bearer ')) {
+    const inner = value.substring(7);
+    if (isJwt(inner)) {
+      return { type: 'jwt', decoded: decodeJwt(inner) };
+    }
+    return { type: 'bearer', value: inner };
+  }
+
+  if (value.length > 40 && /^[A-Za-z0-9+/=]+$/.test(value)) {
+    try {
+      const decoded = atob(value);
+      if (decoded.length > 0 && /^[\x20-\x7E\s]+$/.test(decoded)) {
+        return { type: 'base64', decoded };
+      }
+    } catch {}
+  }
+
+  if (value.startsWith('http://') || value.startsWith('https://')) {
+    return { type: 'url' };
+  }
+
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+    return { type: 'uuid' };
+  }
+
+  if (/^\d{10,13}$/.test(value)) {
+    const ts = parseInt(value);
+    const date = new Date(ts > 9999999999 ? ts : ts * 1000);
+    if (!isNaN(date.getTime())) {
+      return { type: 'timestamp', date };
+    }
+  }
+
+  return { type: 'text' };
+}
+
+function syntaxHighlightJson(jsonStr) {
+  return escapeHtml(jsonStr)
+    .replace(/"([^"]+)"(?=\s*:)/g, '<span class="json-key">"$1"</span>')
+    .replace(/:\s*"([^"]*)"(?=[,\n\r\}])/g, ': <span class="json-string">"$1"</span>')
+    .replace(/:\s*(\d+\.?\d*)(?=[,\n\r\}])/g, ': <span class="json-number">$1</span>')
+    .replace(/:\s*(true|false)(?=[,\n\r\}])/g, ': <span class="json-boolean">$1</span>')
+    .replace(/:\s*(null)(?=[,\n\r\}])/g, ': <span class="json-null">$1</span>');
+}
+
+function buildVarTooltipHtml(name, value) {
+  const detected = detectValueType(name, value);
+  let html = '';
+
+  html += `<div class="btt-header">
+    <span class="btt-type-icon">\uD83D\uDD10</span>
+    <span class="btt-type-label">Variable</span>
+    <span class="btt-name">${escapeHtml(name)}</span>
+  </div>`;
+
+  const displayValue = value.length > 80 ? value.substring(0, 80) + '\u2026' : value;
+  html += `<div class="btt-section">
+    <div class="btt-section-title">Value</div>
+    <pre class="btt-body var-tooltip-value">${escapeHtml(displayValue)}</pre>
+  </div>`;
+
+  switch (detected.type) {
+    case 'jwt': {
+      const { header, payload, tokenType, expiryInfo } = detected.decoded;
+
+      html += `<div class="btt-section">
+        <div class="btt-section-title">
+          Token Info
+          <span class="var-token-badge">${escapeHtml(tokenType)}</span>
+          ${expiryInfo ? `<span class="var-token-expiry ${expiryInfo.isExpired ? 'expired' : 'valid'}">${expiryInfo.isExpired ? '\u26A0 EXPIRED' : '\u2713 ' + expiryInfo.timeLeft}</span>` : ''}
+        </div>
+      </div>`;
+
+      if (header) {
+        html += `<div class="btt-section">
+          <div class="btt-section-title">Header <span class="btt-count">${Object.keys(header).length}</span></div>
+          <pre class="var-tooltip-json">${syntaxHighlightJson(JSON.stringify(header, null, 2))}</pre>
+        </div>`;
+      }
+
+      if (payload) {
+        html += `<div class="btt-section">
+          <div class="btt-section-title">Claims <span class="btt-count">${Object.keys(payload).length}</span></div>
+          <pre class="var-tooltip-json">${syntaxHighlightJson(JSON.stringify(payload, null, 2))}</pre>
+        </div>`;
+
+        const summary = [];
+        if (payload.iss) summary.push(`<div class="var-claim"><span class="var-claim-key">Issuer:</span> ${escapeHtml(payload.iss)}</div>`);
+        if (payload.sub) summary.push(`<div class="var-claim"><span class="var-claim-key">Subject:</span> ${escapeHtml(payload.sub)}</div>`);
+        if (payload.aud) summary.push(`<div class="var-claim"><span class="var-claim-key">Audience:</span> ${escapeHtml(typeof payload.aud === 'string' ? payload.aud : JSON.stringify(payload.aud))}</div>`);
+        if (payload.name) summary.push(`<div class="var-claim"><span class="var-claim-key">Name:</span> ${escapeHtml(payload.name)}</div>`);
+        if (payload.preferred_username || payload.email) summary.push(`<div class="var-claim"><span class="var-claim-key">User:</span> ${escapeHtml(payload.preferred_username || payload.email)}</div>`);
+        if (payload.scp || payload.scope) summary.push(`<div class="var-claim"><span class="var-claim-key">Scope:</span> ${escapeHtml(payload.scp || payload.scope)}</div>`);
+        if (payload.roles) summary.push(`<div class="var-claim"><span class="var-claim-key">Roles:</span> ${escapeHtml(payload.roles.join(', '))}</div>`);
+
+        if (summary.length > 0) {
+          html += `<div class="btt-section">
+            <div class="btt-section-title">Key Claims</div>
+            ${summary.join('')}
+          </div>`;
+        }
+      }
+
+      html += `<div class="btt-section">
+        <div class="btt-section-title">Signature</div>
+        <span class="var-tooltip-sig">${escapeHtml(detected.decoded.signature.substring(0, 32))}\u2026</span>
+      </div>`;
+      break;
+    }
+
+    case 'bearer':
+      html += `<div class="btt-section">
+        <div class="btt-section-title">Type</div>
+        <span class="var-token-badge">Bearer Token (Opaque)</span>
+        <pre class="btt-body">${escapeHtml(detected.value.substring(0, 100))}${detected.value.length > 100 ? '\u2026' : ''}</pre>
+      </div>`;
+      break;
+
+    case 'base64':
+      html += `<div class="btt-section">
+        <div class="btt-section-title">Decoded (Base64)</div>
+        <pre class="btt-body">${escapeHtml(detected.decoded.substring(0, 500))}</pre>
+      </div>`;
+      break;
+
+    case 'url':
+      try {
+        const url = new URL(value);
+        html += `<div class="btt-section">
+          <div class="btt-section-title">URL Parts</div>
+          <div class="var-claim"><span class="var-claim-key">Host:</span> ${escapeHtml(url.hostname)}</div>
+          <div class="var-claim"><span class="var-claim-key">Path:</span> ${escapeHtml(url.pathname)}</div>
+          ${url.search ? `<div class="var-claim"><span class="var-claim-key">Query:</span> ${escapeHtml(url.search)}</div>` : ''}
+        </div>`;
+      } catch {}
+      break;
+
+    case 'uuid':
+      html += `<div class="btt-section">
+        <div class="btt-section-title">Type</div>
+        <span class="var-token-badge">UUID</span>
+      </div>`;
+      break;
+
+    case 'timestamp':
+      html += `<div class="btt-section">
+        <div class="btt-section-title">Timestamp</div>
+        <div class="var-claim"><span class="var-claim-key">Date:</span> ${detected.date.toISOString()}</div>
+        <div class="var-claim"><span class="var-claim-key">Local:</span> ${detected.date.toLocaleString()}</div>
+      </div>`;
+      break;
+  }
+
+  return html;
+}
+
 function formatBytes(bytes) {
   if (bytes === 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -2591,6 +3106,7 @@ async function switchMode(mode) {
   splitPanels.classList.add('hidden');
   codeEditorPanel.classList.add('hidden');
   historyPanel.classList.add('hidden');
+  logsPanel.classList.add('hidden');
 
   // Show the appropriate panels
   if (mode === 'builder') {
@@ -2601,6 +3117,9 @@ async function switchMode(mode) {
   } else if (mode === 'history') {
     historyPanel.classList.remove('hidden');
     loadHistory();
+  } else if (mode === 'logs') {
+    logsPanel.classList.remove('hidden');
+    renderAllLogs();
   }
 }
 
@@ -2622,6 +3141,7 @@ async function syncBuilderToCode() {
       codeEditorFilename.textContent = file.name;
     } catch (err) {
       showToast(`Failed to generate: ${err}`, 'error');
+      rpLog('error', 'Command failed: generate_http', String(err));
     }
   } else {
     codeEditor.value = '';
@@ -2631,6 +3151,8 @@ async function syncBuilderToCode() {
   codeEditorModified = false;
   codeEditor.classList.remove('modified');
   updateHighlight();
+  // Scroll to and highlight the active block
+  scrollCodeEditorToActiveBlock();
 }
 
 // Apply # @disabled markers to raw file content based on disabledBlocks state
@@ -2723,9 +3245,11 @@ async function syncCodeToBuilder() {
     codeEditorContent = content;
     codeEditorModified = false;
     codeEditor.classList.remove('modified');
+    detectAzureAuthNeeded();
     return true;
   } catch (err) {
     showToast(`Parse error: ${err}`, 'error');
+    rpLog('error', 'Command failed: parse_test_file (code editor)', String(err));
     return false;
   }
 }
@@ -2876,6 +3400,7 @@ function updateLineNumbers(text) {
 function updateHighlight() {
   const text = codeEditor.value;
   codeEditorHighlightCode.innerHTML = highlightHttpCode(text) + '\n';
+  applyBlockHighlight();
   updateLineNumbers(text);
   syncEditorScroll();
 }
@@ -2884,7 +3409,142 @@ function syncEditorScroll() {
   codeEditorHighlight.scrollTop = codeEditor.scrollTop;
   codeEditorHighlight.scrollLeft = codeEditor.scrollLeft;
   codeLineNumbers.scrollTop = codeEditor.scrollTop;
+  updateJumpBackIndicator();
 }
+
+// --- Active block scroll & highlight in code editor ---
+let activeBlockLineStart = -1;
+let activeBlockLineEnd = -1;
+
+function getBlockLineRanges(text) {
+  const lines = text.split('\n');
+  const ranges = [];
+  let blockIdx = -1;
+  let blockStart = -1;
+  let inVariables = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith('@variables')) {
+      inVariables = true;
+      continue;
+    }
+    if (trimmed.startsWith('###')) {
+      if (inVariables) inVariables = false;
+      if (blockIdx >= 0) {
+        ranges[blockIdx] = { start: blockStart, end: i - 1 };
+      }
+      blockIdx++;
+      blockStart = i;
+    }
+  }
+  if (blockIdx >= 0) {
+    ranges[blockIdx] = { start: blockStart, end: lines.length - 1 };
+  }
+  return ranges;
+}
+
+function scrollCodeEditorToActiveBlock() {
+  if (activeBlockIndex < 0) {
+    activeBlockLineStart = -1;
+    activeBlockLineEnd = -1;
+    clearBlockHighlight();
+    hideJumpBack();
+    return;
+  }
+
+  const text = codeEditor.value;
+  const ranges = getBlockLineRanges(text);
+  const range = ranges[activeBlockIndex];
+  if (!range) {
+    activeBlockLineStart = -1;
+    activeBlockLineEnd = -1;
+    clearBlockHighlight();
+    hideJumpBack();
+    return;
+  }
+
+  activeBlockLineStart = range.start;
+  activeBlockLineEnd = range.end;
+
+  // Compute scroll position: line-height = 13px * 1.7 = 22.1px, padding = 16px
+  const lineHeight = 13 * 1.7;
+  const padding = 16;
+  const targetScroll = (range.start * lineHeight) + padding - 40; // 40px breathing room above
+  codeEditor.scrollTop = Math.max(0, targetScroll);
+  syncEditorScroll();
+
+  applyBlockHighlight();
+}
+
+function applyBlockHighlight() {
+  if (activeBlockLineStart < 0) return;
+  const codeEl = codeEditorHighlightCode;
+  const lines = codeEl.innerHTML.split('\n');
+  for (let i = activeBlockLineStart; i <= activeBlockLineEnd && i < lines.length; i++) {
+    // Wrap the line in a highlight span if it's the separator line
+    if (i === activeBlockLineStart) {
+      lines[i] = `<span class="hl-active-block-start">${lines[i]}</span>`;
+    }
+  }
+  codeEl.innerHTML = lines.join('\n');
+}
+
+function clearBlockHighlight() {
+  const codeEl = codeEditorHighlightCode;
+  codeEl.innerHTML = codeEl.innerHTML.replace(/<span class="hl-active-block-start">([\s\S]*?)<\/span>/g, '$1');
+}
+
+function updateJumpBackIndicator() {
+  const indicator = document.getElementById('codeJumpBack');
+  if (!indicator || activeBlockLineStart < 0 || currentMode !== 'code') {
+    if (indicator) indicator.classList.add('hidden');
+    return;
+  }
+
+  const lineHeight = 13 * 1.7;
+  const padding = 16;
+  const blockTopPx = (activeBlockLineStart * lineHeight) + padding;
+  const blockBottomPx = (activeBlockLineEnd * lineHeight) + padding + lineHeight;
+  const viewTop = codeEditor.scrollTop;
+  const viewBottom = viewTop + codeEditor.clientHeight;
+
+  // If block separator line is out of view, show indicator
+  if (blockTopPx < viewTop || blockTopPx > viewBottom) {
+    const blockName = getActiveBlockName();
+    const direction = blockTopPx < viewTop ? '↑' : '↓';
+    indicator.innerHTML = `${direction} <span class="jump-back-name">${escapeHtml(blockName)}</span>`;
+    indicator.classList.remove('hidden');
+  } else {
+    indicator.classList.add('hidden');
+  }
+}
+
+function getActiveBlockName() {
+  if (activeFileIndex < 0 || activeBlockIndex < 0) return 'Selected block';
+  const file = loadedFiles[activeFileIndex];
+  if (!file) return 'Selected block';
+  const block = file.suite.blocks[activeBlockIndex];
+  if (!block) return 'Selected block';
+  return block.name || `${(block.block_type || 'request')} #${activeBlockIndex + 1}`;
+}
+
+function hideJumpBack() {
+  const indicator = document.getElementById('codeJumpBack');
+  if (indicator) indicator.classList.add('hidden');
+}
+
+// Jump back click handler (set up once)
+document.addEventListener('click', (e) => {
+  const jumpBack = e.target.closest('#codeJumpBack');
+  if (jumpBack && activeBlockLineStart >= 0) {
+    const lineHeight = 13 * 1.7;
+    const padding = 16;
+    const targetScroll = (activeBlockLineStart * lineHeight) + padding - 40;
+    codeEditor.scrollTop = Math.max(0, targetScroll);
+    syncEditorScroll();
+  }
+});
 
 // --- Code Editor Events ---
 codeEditor.addEventListener('input', () => {
@@ -2948,6 +3608,7 @@ GET {{baseUrl}}/health
     codeEditorModified = false;
     codeEditor.classList.remove('modified');
     updateHighlight();
+    detectAzureAuthNeeded();
 
     codeEditor.focus();
 
@@ -2992,11 +3653,13 @@ async function loadHistory() {
     renderHistoryStats(historyCache);
     renderHistoryLog(historyCache);
     historyCountBadge.textContent = historyCache.length;
+    rpLog('debug', 'History loaded', { count: historyCache.length });
   } catch (err) {
     historyCache = [];
     renderHistoryStats([]);
     renderHistoryLog([]);
     historyCountBadge.textContent = '0';
+    rpLog('error', 'Command failed: get_history', String(err));
   }
 }
 
@@ -3438,8 +4101,6 @@ function showHistoryDetail(entry) {
   ).join('');
   let reqBody = entry.request_body || '(no body)';
   try { if (entry.request_body) reqBody = JSON.stringify(JSON.parse(entry.request_body), null, 2); } catch {}
-  let respBody = entry.response_body || '(no body)';
-  try { if (entry.response_body) respBody = JSON.stringify(JSON.parse(entry.response_body), null, 2); } catch {}
   historyDetailBody.innerHTML = `
     <div class="hist-detail-url">
       <span class="hist-entry-method method-${entry.method}">${entry.method}</span>
@@ -3466,8 +4127,14 @@ function showHistoryDetail(entry) {
     </div>
     <div class="hist-detail-section">
       <div class="hist-detail-section-title">Response Body</div>
-      <pre class="hist-detail-body-pre">${escapeHtml(respBody)}</pre>
+      <div class="hist-detail-resp-body"></div>
     </div>`;
+  const histRespBodyContainer = historyDetailBody.querySelector('.hist-detail-resp-body');
+  if (entry.response_body) {
+    renderResponseBodyInto(histRespBodyContainer, entry.response_body, entry.response_headers || []);
+  } else {
+    histRespBodyContainer.innerHTML = '<pre class="hist-detail-body-pre">(no body)</pre>';
+  }
 }
 
 function closeHistoryDetail() {
@@ -3813,8 +4480,10 @@ $('#historyClearBtn').addEventListener('click', async () => {
     renderHistoryLog([]);
     historyCountBadge.textContent = '0';
     showToast('History cleared', 'success');
+    rpLog('info', 'History cleared');
   } catch (err) {
     showToast(`Failed to clear history: ${err}`, 'error');
+    rpLog('error', 'Command failed: clear_history', String(err));
   }
 });
 
@@ -3879,5 +4548,547 @@ window.addEventListener('wheel', (e) => {
 
 applyZoom();
 
+// --- Azure Auth ---
+const azureAuthBtn = $('#azureAuthBtn');
+const azureAuthIcon = $('#azureAuthIcon');
+const azureAuthLabel = $('#azureAuthLabel');
+const azureAuthStatus = $('#azureAuthStatus');
+
+function updateAzureAuthButton() {
+  if (!azureAuthBtn) return;
+  
+  // Remove all state classes
+  azureAuthBtn.classList.remove('visible', 'needs-auth', 'authenticated', 'expired');
+  
+  if (azureAuthState === 'off') {
+    return;
+  }
+  
+  azureAuthBtn.classList.add('visible');
+  
+  if (azureAuthState === 'needs-auth') {
+    azureAuthBtn.classList.add('needs-auth');
+    azureAuthIcon.textContent = '⚠';
+    azureAuthLabel.textContent = 'Azure: Sign In';
+    azureAuthStatus.textContent = '';
+    azureAuthBtn.title = 'Click to authenticate with Azure (device code flow)';
+  } else if (azureAuthState === 'authenticated') {
+    azureAuthBtn.classList.add('authenticated');
+    azureAuthIcon.textContent = '✓';
+    azureAuthLabel.textContent = 'Azure';
+    const expiresIn = Math.min(...azureAuthScopes.map(s => {
+      const c = azureTokenCache.get(s);
+      return c ? Math.round((c.expiresAt - Date.now()) / 60000) : 0;
+    }));
+    azureAuthStatus.textContent = `${azureAuthScopes.length} scope${azureAuthScopes.length > 1 ? 's' : ''} · ${Math.max(0, expiresIn)}m`;
+    // Build detailed tooltip with each scope
+    const scopeLines = azureAuthScopes.map(s => {
+      const c = azureTokenCache.get(s);
+      const mins = c ? Math.max(0, Math.round((c.expiresAt - Date.now()) / 60000)) : 0;
+      const short = s.replace('https://', '').replace('/.default', '');
+      return `  ✓ ${short} (${mins}m)`;
+    }).join('\n');
+    azureAuthBtn.title = `Authenticated — ${azureAuthScopes.length} scope(s)\n${scopeLines}\n\nClick to re-authenticate.`;
+  } else if (azureAuthState === 'expired') {
+    azureAuthBtn.classList.add('expired');
+    azureAuthIcon.textContent = '⟳';
+    azureAuthLabel.textContent = 'Azure: Expired';
+    azureAuthStatus.textContent = '';
+    azureAuthBtn.title = 'Token expired — click to re-authenticate';
+  }
+  
+  updateBlockModeDimming();
+}
+
+function setAzureAuthState(state) {
+  azureAuthState = state;
+  updateAzureAuthButton();
+}
+
+async function initAzureAuth() {
+  // Check Azure CLI availability
+  try {
+    azCliAvailable = await invoke('check_azure_cli');
+    rpLog('info', `Azure CLI available: ${azCliAvailable}`);
+  } catch (e) {
+    azCliAvailable = false;
+    rpLog('warn', `Azure CLI check failed: ${e}`);
+  }
+  
+  // Check if any loaded file has dev_auth scopes
+  detectAzureAuthNeeded();
+  
+  // Button click handler — opens auth dialog
+  if (azureAuthBtn) {
+    azureAuthBtn.addEventListener('click', handleAzureAuthClick);
+  }
+  
+  // Periodically check token expiry
+  setInterval(checkTokenExpiry, 30000);
+}
+
+function detectAzureAuthNeeded() {
+  // Scan all loaded files for blocks with dev_auth scopes
+  const scopes = new Set();
+  for (const f of loadedFiles) {
+    for (const block of f.suite.blocks) {
+      if (block.dev_auth) scopes.add(block.dev_auth);
+    }
+    // Fallback: parse raw content for # @dev_auth directives (works before binary rebuild)
+    if (f.content) {
+      const matches = f.content.matchAll(/^#\s*@dev_auth\s+(.+)$/gm);
+      for (const m of matches) {
+        const scope = m[1].trim();
+        if (scope) scopes.add(scope);
+      }
+    }
+  }
+  
+  azureAuthScopes = [...scopes]; // Store needed scopes
+  
+  if (azureAuthScopes.length === 0) {
+    setAzureAuthState('off');
+    return;
+  }
+  
+  // Check if we have valid tokens for ALL scopes
+  const allCached = azureAuthScopes.every(scope => {
+    const cached = azureTokenCache.get(scope);
+    return cached && Date.now() < cached.expiresAt - 60000;
+  });
+  
+  if (allCached) {
+    setAzureAuthState('authenticated');
+  } else if (azureTokenCache.size > 0) {
+    // Some tokens exist but not all / some expired
+    const anyValid = azureAuthScopes.some(scope => {
+      const cached = azureTokenCache.get(scope);
+      return cached && Date.now() < cached.expiresAt - 60000;
+    });
+    setAzureAuthState(anyValid ? 'expired' : 'needs-auth');
+  } else {
+    setAzureAuthState('needs-auth');
+  }
+}
+
+function checkTokenExpiry() {
+  if (azureAuthState !== 'authenticated') return;
+  
+  const anyExpired = azureAuthScopes.some(scope => {
+    const cached = azureTokenCache.get(scope);
+    return !cached || Date.now() >= cached.expiresAt - 60000;
+  });
+  
+  if (anyExpired) {
+    setAzureAuthState('expired');
+    rpLog('warn', 'Azure token(s) expired');
+    showToast('Azure token expired — click Azure button to re-authenticate', 'warn');
+  } else {
+    updateAzureAuthButton();
+  }
+}
+
+async function handleAzureAuthClick() {
+  if (azureAuthState === 'off') return;
+  if (azureAuthBtn.classList.contains('loading')) return; // Prevent double-click
+  
+  if (azureAuthState === 'authenticated') {
+    if (!confirm('You are already authenticated. Re-authenticate?')) return;
+  }
+  
+  // Show loading state
+  azureAuthBtn.classList.add('loading');
+  const prevIcon = azureAuthIcon.textContent;
+  const prevLabel = azureAuthLabel.textContent;
+  azureAuthIcon.textContent = '⏳';
+  azureAuthLabel.textContent = 'Azure: Authenticating…';
+  azureAuthBtn.disabled = true;
+  
+  // Resolve tenant and client from env vars → file variables (skip placeholders)
+  let tenantId = 'organizations';
+  let fileClientId = null;
+  
+  const resolveVar = (name) => {
+    if (envVars[name] && !envVars[name].startsWith('your-')) return envVars[name];
+    for (const f of loadedFiles) {
+      const v = f.suite.variables.find(([k]) => k === name);
+      if (v?.[1] && !v[1].startsWith('your-')) return v[1];
+    }
+    return null;
+  };
+  
+  tenantId = resolveVar('tenant_id') || 'organizations';
+  fileClientId = resolveVar('client_id');
+  
+  // Authenticate for each needed scope
+  try {
+    for (const scope of azureAuthScopes) {
+      const cached = azureTokenCache.get(scope);
+      if (cached && Date.now() < cached.expiresAt - 60000) continue;
+      
+      const resource = scope.replace(/\/.default$/, '');
+      let token = null;
+      
+      azureAuthLabel.textContent = `Fetching: ${resource.split('/')[2] || resource}…`;
+      
+      // Strategy 1: az CLI (fastest — uses existing az login session)
+      if (azCliAvailable) {
+        try {
+          rpLog('info', `[Strategy 1] az CLI token for: ${resource}`);
+          const result = await invoke('fetch_azure_token', { resource });
+          token = result.access_token;
+          rpLog('info', `✓ az CLI token succeeded for: ${scope}`);
+        } catch (e) {
+          rpLog('warn', `✗ az CLI token failed for ${scope}: ${e}`);
+        }
+      } else {
+        rpLog('info', '[Strategy 1] Skipped — az CLI not available');
+      }
+      
+      // Strategy 2: Device code flow with file's client_id (enterprise-safe)
+      if (!token && fileClientId) {
+        try {
+          rpLog('info', `Azure device code auth with app client_id for: ${scope}`);
+          const fullScope = scope.endsWith('/.default') ? scope : scope + '/.default';
+          token = await authenticateWithDeviceCode(tenantId, fileClientId, fullScope);
+          rpLog('info', `Azure auth succeeded (device code, app client) for: ${scope}`);
+        } catch (e) {
+          rpLog('warn', `Device code with app client_id failed for ${scope}: ${e.message || e}`);
+        }
+      }
+      
+      // Strategy 3: Device code flow with Azure CLI public client (works for non-enterprise tenants)
+      if (!token) {
+        try {
+          rpLog('info', `Azure device code auth with public client for: ${scope}`);
+          const fullScope = scope.endsWith('/.default') ? scope : scope + '/.default';
+          token = await authenticateWithDeviceCode(tenantId, '04b07795-a816-b338-ac5e-747c5dca11b3', fullScope);
+          rpLog('info', `Azure auth succeeded (device code, public client) for: ${scope}`);
+        } catch (e) {
+          rpLog('error', `All auth strategies failed for ${scope}: ${e.message || e}`);
+          showToast(`Azure auth failed for ${scope}. Run "az login" first, or ensure your app registration allows public client flows.`, 'error');
+          detectAzureAuthNeeded();
+          return;
+        }
+      }
+      
+      azureTokenCache.set(scope, { token, expiresAt: Date.now() + 3600000 });
+    }
+    
+    setAzureAuthState('authenticated');
+    showToast(`Azure: Authenticated for ${azureAuthScopes.length} scope(s)`, 'success');
+  } finally {
+    azureAuthBtn.classList.remove('loading');
+    azureAuthBtn.disabled = false;
+    updateAzureAuthButton();
+  }
+}
+
+function updateBlockModeDimming() {
+  const isAzureAuth = azureAuthState === 'authenticated' || azureAuthState === 'expired';
+  document.querySelectorAll('.block-item[data-block-mode]').forEach(item => {
+    const mode = item.dataset.blockMode;
+    if (isAzureAuth) {
+      item.classList.toggle('mode-dimmed', mode === 'app');
+    } else {
+      item.classList.toggle('mode-dimmed', mode === 'dev');
+    }
+  });
+}
+
+// Multi-scope Azure token cache (scope → { token, expiresAt })
+const azureTokenCache = new Map();
+let azureAuthScopes = []; // scopes needed by loaded files
+
+function fetchDevModeToken(suite, fileContent) {
+  if (azureAuthState !== 'authenticated') return [];
+  
+  // Collect all tokens for blocks with dev_auth
+  const tokens = [];
+  for (const block of (suite?.blocks || [])) {
+    if (block.dev_auth) {
+      const cached = azureTokenCache.get(block.dev_auth);
+      if (cached && Date.now() < cached.expiresAt - 60000) {
+        for (const ext of (block.extracts || [])) {
+          tokens.push([ext.variable_name, cached.token]);
+        }
+      }
+    }
+  }
+  
+  // Fallback: parse raw content to match @dev_auth scopes with @extract variables
+  if (tokens.length === 0 && fileContent) {
+    const blocks = fileContent.split(/^###/m);
+    for (const rawBlock of blocks) {
+      const devAuthMatch = rawBlock.match(/^#\s*@dev_auth\s+(.+)$/m);
+      if (!devAuthMatch) continue;
+      const scope = devAuthMatch[1].trim();
+      const cached = azureTokenCache.get(scope);
+      if (!cached || Date.now() >= cached.expiresAt - 60000) continue;
+      const extractMatches = rawBlock.matchAll(/^#\s*@extract\s+(\w+)\s*=\s*.+$/gm);
+      for (const em of extractMatches) {
+        tokens.push([em[1], cached.token]);
+      }
+    }
+  }
+  
+  return tokens;
+}
+
+async function authenticateWithDeviceCode(tenantId, clientId, scope) {
+  rpLog('info', 'Device code flow initiated', { tenantId, clientId, scope });
+  // Step 1: Request device code
+  const deviceCode = await invoke('start_device_code', {
+    tenantId, clientId, scope
+  });
+
+  // Step 2: Show modal
+  const overlay = $('#deviceCodeOverlay');
+  const urlEl = $('#deviceCodeUrl');
+  const codeEl = $('#deviceCodeValue');
+  const statusEl = $('#deviceCodeStatus');
+  const cancelBtn = $('#deviceCodeCancel');
+  const copyBtn = $('#deviceCodeCopy');
+
+  urlEl.href = deviceCode.verification_uri;
+  urlEl.textContent = deviceCode.verification_uri;
+  codeEl.textContent = deviceCode.user_code;
+  statusEl.innerHTML = '<span class="device-code-spinner">⠋</span> Waiting for authentication...';
+  statusEl.className = 'device-code-status';
+  overlay.classList.remove('hidden');
+
+  // Auto-open browser
+  window.open(deviceCode.verification_uri, '_blank');
+
+  // Copy button
+  const copyHandler = () => {
+    navigator.clipboard.writeText(deviceCode.user_code);
+    copyBtn.textContent = '✓';
+    setTimeout(() => copyBtn.textContent = '📋', 2000);
+  };
+  copyBtn.addEventListener('click', copyHandler);
+
+  // Step 3: Poll for token
+  let cancelled = false;
+  const cancelHandler = () => { cancelled = true; };
+  cancelBtn.addEventListener('click', cancelHandler);
+
+  const interval = (deviceCode.interval || 5) * 1000;
+  const maxAttempts = Math.ceil(deviceCode.expires_in / (deviceCode.interval || 5));
+
+  try {
+    for (let i = 0; i < maxAttempts && !cancelled; i++) {
+      await new Promise(r => setTimeout(r, interval));
+      if (cancelled) break;
+
+      try {
+        const token = await invoke('poll_device_code', {
+          tenantId, clientId, deviceCode: deviceCode.device_code
+        });
+        // Success!
+        statusEl.innerHTML = '✓ Authenticated successfully!';
+        statusEl.className = 'device-code-status success';
+        await new Promise(r => setTimeout(r, 1000));
+        overlay.classList.add('hidden');
+        showToast('Dev mode: Authenticated via browser', 'success');
+        return token.access_token;
+      } catch (e) {
+        if (e === 'authorization_pending') continue;
+        if (e === 'slow_down') {
+          await new Promise(r => setTimeout(r, 5000));
+          continue;
+        }
+        throw new Error(e);
+      }
+    }
+
+    if (cancelled) {
+      throw new Error('Authentication cancelled by user');
+    }
+    throw new Error('Device code expired — please try again');
+  } finally {
+    overlay.classList.add('hidden');
+    cancelBtn.removeEventListener('click', cancelHandler);
+    copyBtn.removeEventListener('click', copyHandler);
+  }
+}
+
+// --- Log Viewer ---
+let logAutoScroll = true;
+
+function formatLogTime(isoStr) {
+  const d = new Date(isoStr);
+  return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+}
+
+function createLogEntryEl(entry) {
+  if (logFilterLevel !== 'all' && entry.level !== logFilterLevel) return null;
+  const div = document.createElement('div');
+  div.className = `log-entry log-${entry.level}`;
+  div.innerHTML = `<span class="log-ts">${formatLogTime(entry.ts)}</span> <span class="log-level">${entry.level}</span> <span class="log-msg">${escapeHtml(entry.message)}</span>`;
+  if (entry.data !== null) {
+    const dataDiv = document.createElement('div');
+    dataDiv.className = 'log-data';
+    dataDiv.textContent = typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2);
+    dataDiv.style.display = 'none';
+    div.style.cursor = 'pointer';
+    div.addEventListener('click', () => {
+      dataDiv.style.display = dataDiv.style.display === 'none' ? 'block' : 'none';
+    });
+    const wrapper = document.createDocumentFragment();
+    wrapper.appendChild(div);
+    wrapper.appendChild(dataDiv);
+    return wrapper;
+  }
+  return div;
+}
+
+function renderAllLogs() {
+  if (!logList) return;
+  logList.innerHTML = '';
+  rpLogs.forEach(entry => {
+    const el = createLogEntryEl(entry);
+    if (el) logList.appendChild(el);
+  });
+  if (logAutoScroll) logList.scrollTop = logList.scrollHeight;
+}
+
+function renderLogEntry(entry) {
+  if (currentMode !== 'logs' || !logList) return;
+  const el = createLogEntryEl(entry);
+  if (el) {
+    logList.appendChild(el);
+    if (logAutoScroll) logList.scrollTop = logList.scrollHeight;
+  }
+}
+
+// Auto-scroll detection
+if (logList) {
+  logList.addEventListener('scroll', () => {
+    const threshold = 50;
+    logAutoScroll = (logList.scrollHeight - logList.scrollTop - logList.clientHeight) < threshold;
+  });
+}
+
+// Log filter buttons
+document.querySelectorAll('.log-filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.log-filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    logFilterLevel = btn.dataset.logLevel;
+    renderAllLogs();
+  });
+});
+
+// Log clear button
+const logsClearBtn = $('#logsClearBtn');
+if (logsClearBtn) {
+  logsClearBtn.addEventListener('click', () => {
+    rpLogs.length = 0;
+    if (logList) logList.innerHTML = '';
+  });
+}
+
+// --- Pop-Out Windows (Tauri native) ---
+const popoutWindows = new Map(); // panelId → { placeholder }
+
+async function popOutPanel(panelId, title) {
+  if (popoutWindows.has(panelId)) {
+    // Already popped out — just focus it
+    try {
+      const { WebviewWindow } = window.__TAURI__.webviewWindow;
+      const existing = await WebviewWindow.getByLabel(`popout-${panelId}`);
+      if (existing) await existing.setFocus();
+    } catch {}
+    return;
+  }
+
+  const sourceEl = document.getElementById(panelId);
+  if (!sourceEl) return;
+
+  // Snapshot the HTML content before hiding
+  const htmlSnapshot = sourceEl.innerHTML;
+
+  // Create a placeholder in the main window
+  const placeholder = document.createElement('div');
+  placeholder.className = 'popout-placeholder';
+  placeholder.innerHTML = `<span class="popout-notice">📌 ${title} — popped out to separate window</span><button class="btn btn-sm" onclick="popInPanel('${panelId}')">Pop Back In</button>`;
+  sourceEl.parentNode.insertBefore(placeholder, sourceEl);
+  sourceEl.style.display = 'none';
+
+  // Store state
+  popoutWindows.set(panelId, { placeholder, sourceEl });
+
+  try {
+    const { WebviewWindow } = window.__TAURI__.webviewWindow;
+    const webview = new WebviewWindow(`popout-${panelId}`, {
+      url: `popout.html?panel=${panelId}`,
+      title: `${title} — Request Pilot`,
+      width: 800,
+      height: 600,
+      resizable: true,
+      decorations: true,
+      center: true,
+    });
+
+    // When the popout is ready, send content
+    const unlistenReady = await listen('popout-ready', async (event) => {
+      if (event.payload.panelId === panelId) {
+        await emit('popout-content', { panelId, html: htmlSnapshot });
+        unlistenReady();
+      }
+    });
+
+    // When popout window is closed
+    const unlistenClose = await listen('popout-closed', (event) => {
+      if (event.payload.panelId === panelId) {
+        restorePanel(panelId);
+        unlistenClose();
+      }
+    });
+
+    // Also detect via Tauri window destroy event
+    webview.once('tauri://destroyed', () => {
+      restorePanel(panelId);
+    });
+
+    rpLog('info', `Panel popped out: ${title}`);
+  } catch (e) {
+    // If Tauri window creation fails, restore
+    placeholder.remove();
+    sourceEl.style.display = '';
+    popoutWindows.delete(panelId);
+    rpLog('error', `Pop-out failed: ${e.message || e}`);
+    showToast(`Pop-out failed: ${e.message || e}`, 'error');
+  }
+}
+
+function restorePanel(panelId) {
+  const state = popoutWindows.get(panelId);
+  if (!state) return;
+  state.sourceEl.style.display = '';
+  if (state.placeholder.parentNode) state.placeholder.remove();
+  popoutWindows.delete(panelId);
+  rpLog('info', `Panel popped back in: ${panelId}`);
+}
+
+async function popInPanel(panelId) {
+  try {
+    const { WebviewWindow } = window.__TAURI__.webviewWindow;
+    const win = await WebviewWindow.getByLabel(`popout-${panelId}`);
+    if (win) await win.close();
+  } catch {}
+  restorePanel(panelId);
+}
+
+// Send live log entries to popout window if open
+function emitToLogPopout(entry) {
+  if (popoutWindows.has('logsPanel')) {
+    emit('popout-log-entry', entry).catch(() => {});
+  }
+}
+
 // --- Initialize ---
 renderEnvVars();
+initAzureAuth();
+rpLog('info', 'Request Pilot initialized');

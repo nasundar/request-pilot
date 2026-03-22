@@ -21,6 +21,8 @@ pub struct TestBlock {
     pub name: String,
     pub description: String,
     pub disabled: bool,
+    pub mode: Option<String>,
+    pub dev_auth: Option<String>,
     pub group: Option<String>,
     pub depends: Vec<String>,
     pub request: ParsedRequest,
@@ -119,6 +121,8 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
     let mut block_name = String::new();
     let mut description = String::new();
     let mut disabled = false;
+    let mut mode: Option<String> = None;
+    let mut dev_auth: Option<String> = None;
     let mut group: Option<String> = None;
     let mut depends = Vec::new();
     let mut assertions = Vec::new();
@@ -158,6 +162,20 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
         }
         if trimmed == "# @disabled" {
             disabled = true;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("# @mode ") {
+            let m = rest.trim().to_lowercase();
+            if m == "app" || m == "dev" {
+                mode = Some(m);
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("# @dev_auth ") {
+            let scope = rest.trim().to_string();
+            if !scope.is_empty() {
+                dev_auth = Some(scope);
+            }
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("# @group ") {
@@ -207,6 +225,8 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
         name: block_name,
         description,
         disabled,
+        mode,
+        dev_auth,
         group,
         depends,
         request,
@@ -285,6 +305,16 @@ pub fn generate_http_content(suite: &TestSuite) -> String {
         // Disabled directive
         if block.disabled {
             output.push_str("# @disabled\n");
+        }
+
+        // Mode directive
+        if let Some(ref m) = block.mode {
+            output.push_str(&format!("# @mode {}\n", m));
+        }
+
+        // Dev auth scope directive
+        if let Some(ref scope) = block.dev_auth {
+            output.push_str(&format!("# @dev_auth {}\n", scope));
         }
 
         // Group directive
@@ -706,6 +736,8 @@ POST https://example.com/login";
                 name: String::new(),
                 description: String::new(),
                 disabled: false,
+                mode: None,
+                dev_auth: None,
                 group: None,
                 depends: Vec::new(),
                 request: ParsedRequest {
@@ -735,6 +767,8 @@ POST https://example.com/login";
                 name: "Create User".into(),
                 description: String::new(),
                 disabled: false,
+                mode: None,
+                dev_auth: None,
                 group: None,
                 depends: Vec::new(),
                 request: ParsedRequest {
@@ -765,6 +799,8 @@ POST https://example.com/login";
                 name: "Check Users".into(),
                 description: String::new(),
                 disabled: false,
+                mode: None,
+                dev_auth: None,
                 group: None,
                 depends: Vec::new(),
                 request: ParsedRequest {
@@ -813,6 +849,8 @@ POST https://example.com/login";
                     name: "Login".into(),
                     description: String::new(),
                     disabled: false,
+                    mode: None,
+                dev_auth: None,
                     group: None,
                     depends: Vec::new(),
                     request: ParsedRequest {
@@ -837,6 +875,8 @@ POST https://example.com/login";
                     name: "List Users".into(),
                     description: String::new(),
                     disabled: false,
+                    mode: None,
+                dev_auth: None,
                     group: None,
                     depends: Vec::new(),
                     request: ParsedRequest {
@@ -865,6 +905,8 @@ POST https://example.com/login";
                     name: "Cleanup".into(),
                     description: String::new(),
                     disabled: false,
+                    mode: None,
+                dev_auth: None,
                     group: None,
                     depends: Vec::new(),
                     request: ParsedRequest {
@@ -903,6 +945,8 @@ POST https://example.com/login";
                     name: "Login".into(),
                     description: String::new(),
                     disabled: false,
+                    mode: None,
+                dev_auth: None,
                     group: None,
                     depends: Vec::new(),
                     request: ParsedRequest {
@@ -927,6 +971,8 @@ POST https://example.com/login";
                     name: "List Users".into(),
                     description: String::new(),
                     disabled: false,
+                    mode: None,
+                dev_auth: None,
                     group: None,
                     depends: Vec::new(),
                     request: ParsedRequest {
@@ -948,6 +994,8 @@ POST https://example.com/login";
                     name: "Cleanup".into(),
                     description: String::new(),
                     disabled: false,
+                    mode: None,
+                dev_auth: None,
                     group: None,
                     depends: Vec::new(),
                     request: ParsedRequest {
@@ -1052,6 +1100,8 @@ POST https://example.com/login";
                 name: "My Test".to_string(),
                 description: "Tests something".to_string(),
                 disabled: true,
+                mode: None,
+                dev_auth: None,
                 group: None,
                 depends: Vec::new(),
                 request: ParsedRequest {
@@ -1119,6 +1169,8 @@ grant_type=client_credentials
                 name: "Get Users".to_string(),
                 description: String::new(),
                 disabled: false,
+                mode: None,
+                dev_auth: None,
                 group: None,
                 depends: Vec::new(),
                 request: ParsedRequest {
@@ -1161,6 +1213,8 @@ grant_type=client_credentials
                 name: "Verify Update".to_string(),
                 description: String::new(),
                 disabled: false,
+                mode: None,
+                dev_auth: None,
                 group: None,
                 depends: vec!["Update User".to_string()],
                 request: ParsedRequest {
@@ -1212,6 +1266,8 @@ grant_type=client_credentials
                 name: "Validate Order".to_string(),
                 description: String::new(),
                 disabled: false,
+                mode: None,
+                dev_auth: None,
                 group: Some("validation".to_string()),
                 depends: vec!["setup-data".to_string()],
                 request: ParsedRequest {
@@ -1422,5 +1478,91 @@ Authorization: Bearer {{token}}
         );
         // The test block should have no body
         assert!(suite.blocks[1].request.body.is_none());
+    }
+
+    #[test]
+    fn test_parse_mode_directive_app() {
+        let content = "### @setup Fetch Token\n# @mode app\nPOST https://login.example.com/token\n";
+        let suite = parse_test_suite(content);
+        assert_eq!(suite.blocks[0].mode, Some("app".to_string()));
+    }
+
+    #[test]
+    fn test_parse_mode_directive_dev() {
+        let content = "### @setup Dev Auth\n# @mode dev\nGET https://example.com/me\n";
+        let suite = parse_test_suite(content);
+        assert_eq!(suite.blocks[0].mode, Some("dev".to_string()));
+    }
+
+    #[test]
+    fn test_parse_no_mode_is_none() {
+        let content = "### @test Normal\nGET https://example.com\n";
+        let suite = parse_test_suite(content);
+        assert_eq!(suite.blocks[0].mode, None);
+    }
+
+    #[test]
+    fn test_generate_mode_directive() {
+        let suite = TestSuite {
+            variables: vec![],
+            blocks: vec![TestBlock {
+                block_type: "setup".to_string(),
+                name: "Fetch Token".to_string(),
+                description: String::new(),
+                disabled: false,
+                mode: Some("app".to_string()),
+                dev_auth: None,
+                group: None,
+                depends: Vec::new(),
+                request: ParsedRequest {
+                    name: None,
+                    method: "POST".to_string(),
+                    url: "https://login.example.com/token".to_string(),
+                    headers: vec![],
+                    body: None,
+                },
+                assertions: vec![],
+                extracts: vec![],
+            }],
+        };
+        let content = generate_http_content(&suite);
+        assert!(content.contains("# @mode app"));
+    }
+
+    #[test]
+    fn test_roundtrip_mode_directive() {
+        let original = "### @setup Fetch Token\n# @mode app\nPOST https://login.example.com/token\n";
+        let suite = parse_test_suite(original);
+        assert_eq!(suite.blocks[0].mode, Some("app".to_string()));
+        let regenerated = generate_http_content(&suite);
+        assert!(regenerated.contains("# @mode app"));
+        let reparsed = parse_test_suite(&regenerated);
+        assert_eq!(reparsed.blocks[0].mode, Some("app".to_string()));
+    }
+
+    #[test]
+    fn test_parse_dev_auth_directive() {
+        let content = "### @setup Fetch ARM Token\n# @mode app\n# @dev_auth https://management.azure.com/.default\nPOST https://login.example.com/token\n";
+        let suite = parse_test_suite(content);
+        assert_eq!(suite.blocks[0].mode, Some("app".to_string()));
+        assert_eq!(suite.blocks[0].dev_auth, Some("https://management.azure.com/.default".to_string()));
+    }
+
+    #[test]
+    fn test_roundtrip_dev_auth_directive() {
+        let content = "### @setup Fetch Token\n# @mode app\n# @dev_auth https://prometheus.monitor.azure.com/.default\nPOST https://login.example.com/token\n# @extract access_token = $.access_token\n";
+        let suite = parse_test_suite(content);
+        assert_eq!(suite.blocks[0].dev_auth, Some("https://prometheus.monitor.azure.com/.default".to_string()));
+        let regenerated = generate_http_content(&suite);
+        assert!(regenerated.contains("# @dev_auth https://prometheus.monitor.azure.com/.default"));
+        let reparsed = parse_test_suite(&regenerated);
+        assert_eq!(reparsed.blocks[0].dev_auth, Some("https://prometheus.monitor.azure.com/.default".to_string()));
+    }
+
+    #[test]
+    fn test_no_dev_auth_is_none() {
+        let content = "### @setup Verify Cluster\nGET https://management.azure.com/subscriptions/123\n";
+        let suite = parse_test_suite(content);
+        assert_eq!(suite.blocks[0].dev_auth, None);
     }
 }

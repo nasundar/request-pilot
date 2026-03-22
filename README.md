@@ -1,267 +1,123 @@
-# RequestPilot 🛫
+# Request Pilot ✈
 
-A developer toolkit for HTTP traffic — a browser extension for header injection, request blocking, and traffic analysis, plus a standalone Rust desktop HTTP client.
+A developer toolkit for HTTP traffic — a **Tauri v2 desktop app** for authoring and running E2E integration test suites from `.http` files, a **browser extension** for header injection, request blocking, and traffic analysis, a **terminal UI** for headless testing, and a **shared Rust core** that powers them all.
 
-## Repository Structure
+## Architecture
 
 ```
 request-pilot/
-├── core/              # Shared Rust core library (parser, HTTP client, runner)
+├── core/              # Shared Rust core library (171 tests)
 │   └── src/
-│       ├── lib.rs
-│       ├── http_parser.rs, http_client.rs
-│       ├── variables.rs, assertions.rs
-│       ├── test_runner.rs, history.rs
-│       ├── url_trie.rs, env_file.rs
+│       ├── http_parser.rs     # .http file parser & generator
+│       ├── http_client.rs     # reqwest-based HTTP client
+│       ├── test_runner.rs     # Suite executor with parallel scheduling
+│       ├── assertions.rs      # Response assertion engine
+│       ├── variables.rs       # Variable interpolation & built-ins
+│       ├── azure_auth.rs      # Azure CLI + device code auth
+│       ├── history.rs         # Request history store & filters
+│       ├── url_trie.rs        # Segment-aware URL autocomplete trie
+│       └── env_file.rs        # .env file reader/writer
+├── desktop/           # Desktop GUI app (Tauri v2)
+│   ├── ui/            # HTML/CSS/JS frontend (vanilla, no framework)
+│   │   ├── app.js             # ~5000 lines — full app logic
+│   │   ├── index.html         # Main window layout
+│   │   ├── popout.html        # Pop-out window template
+│   │   └── styles.css         # Dark IDE theme
+│   └── src-tauri/     # Rust backend (imports core)
+│       └── src/lib.rs         # 20 Tauri IPC commands
+├── extension/         # Browser extension (Edge/Chrome, Manifest V3)
+│   ├── manifest.json
+│   ├── background.js          # Rules engine, DNR, webRequest
+│   ├── popup.html/css/js      # Extension popup UI
+│   └── content-script*.js     # Response body interception
 ├── tui/               # Terminal UI (ratatui + crossterm)
 │   └── src/
-│       ├── main.rs, app.rs
-│       ├── events.rs, ui.rs
-├── desktop/           # Desktop GUI app (Tauri v2)
-│   ├── ui/            # HTML/CSS/JS frontend
-│   ├── src-tauri/     # Rust Tauri adapter (imports core)
-│   │   └── src/
-│   │       └── lib.rs
-│   └── README.md
-├── extension/         # Browser extension (load in Edge/Chrome)
-│   ├── manifest.json
-│   ├── background.js
-│   ├── popup.html, popup.css, popup.js
-│   ├── content-script.js, content-script-main.js
-│   └── icons/
-├── docs/              # Documentation & samples
-│   ├── http-file-format.md      # .http format reference
-│   └── samples/
-│       ├── azure-managed-prometheus.http      # Prometheus queries & rules
-│       ├── azure-aks-cluster.http             # AKS cluster operations
-│       └── azure-aks-prometheus-monitoring.http # AKS + Prometheus E2E
-├── tests/             # Jest unit tests for the extension (94 tests)
-│   ├── __tests__/, __mocks__/
-│   ├── jest.config.js, package.json
+│       ├── main.rs, app.rs    # App state & event loop
+│       ├── events.rs          # Keyboard/terminal events
+│       └── ui.rs              # TUI rendering
+├── docs/              # Documentation & sample .http files
+├── tests/             # Jest unit tests for browser extension (94 tests)
+├── .github/skills/    # AI skill for generating .http test files
 ├── Cargo.toml         # Workspace root (members: core, tui)
 └── README.md
 ```
 
-## Features
+---
 
-### Rules Engine
-| Feature | Description |
-|---|---|
-| **Header Injection** | Add or overwrite request headers on matching URLs |
-| **Request Blocking** | Block requests to specific endpoints entirely |
-| **URL Redirect** | Redirect matching requests to a different URL |
-| **Method Filtering** | Restrict rules to specific HTTP methods (GET, POST, etc.) |
-| **Import / Export** | Share rule configurations as JSON files |
-| **Duplicate Rules** | One-click duplicate with edit-before-save workflow |
-| **Toggle Rules** | Enable or disable individual rules without deleting |
+## Desktop App (Tauri v2)
 
-### Network Monitoring (Filtered Log)
-| Feature | Description |
-|---|---|
-| **Rule-Filtered Log** | Only shows requests matching your configured rules |
-| **Rule Multi-Select** | Choose which rules filter the log view |
-| **Method & Status Filters** | Filter by HTTP method and status code (2xx/3xx/4xx/5xx) |
-| **Show Headers** | Multi-select picker to display request/response header values inline |
-| **Group By** | Group entries by URL or any request/response header |
-| **Similarity Scoring** | Select a request to see match % on others based on headers + payload |
-| **Match Key Picker** | Choose which headers and payload keys drive the similarity score |
-| **Min Match Filter** | Filter to only show entries above a similarity threshold |
-| **Pause / Resume** | Pause network capture without losing existing data |
-| **Request Comparison** | Select 2 requests → side-by-side diff of headers, body (JSON key-by-key) |
-| **Request Detail View** | Click 👁 to inspect any request's full headers + body |
-| **Viewed Tracking** | View buttons show ✓ Viewed state so you know what you've inspected |
-| **Response Body Capture** | Captured via content scripts + re-fetch fallback with original headers/cookies |
-| **Log Export / Import** | Export as JSON, import JSON or HAR files |
+A cross-platform HTTP client and **E2E integration test framework** — author requests, run structured test suites from enhanced `.http` files, and inspect responses. Built with Rust + Tauri v2 (HTML/CSS/JS frontend, Rust backend).
 
-### Statistics Tab
-| Feature | Description |
-|---|---|
-| **Summary Cards** | Total requests, success, client errors, server errors, rule coverage |
-| **Response Time Percentiles** | Visual bars for Avg, P50, P90, P95, P99, Max |
-| **HTTP Methods Breakdown** | Chip display of request counts per method |
-| **Domain & Path Tree** | Collapsible accordion grouped by domain → path → individual requests |
-| **Rule Impact Badges** | Shows which rule types match each path |
-| **One-Click Add Rule** | Create rules directly from domain/path entries |
-| **Expand All / Collapse All** | Toggle for the full tree |
-
-### UI
-- **Dark & Light themes** with persistent toggle
-- **Pop-out to tab** for full-screen resizable view
-- **Responsive layout** — filters wrap, standalone mode uses full viewport
-
-## Installation
-
-1. Open Edge and navigate to `edge://extensions/` (or `chrome://extensions/` for Chrome)
-2. Enable **Developer mode**
-3. Click **Load unpacked**
-4. Select the **`request-pilot/extension`** folder (NOT the root `request-pilot` folder)
-5. The RequestPilot icon appears in your toolbar
-
-> **Important:** You must select the `extension` subfolder, not the root directory. The root contains the `tests` folder which will cause Edge to reject the extension.
-
-## Running Tests
-
-The test suite uses [Jest](https://jestjs.io/) with Chrome API mocks. Tests are located in `request-pilot/tests/`.
-
-```bash
-# Navigate to the tests directory
-cd request-pilot/tests
-
-# Install dependencies (first time only)
-npm install
-
-# Run all tests
-npm test
-
-# Run tests in watch mode (re-runs on file changes)
-npx jest --watch
-
-# Run a specific test file
-npx jest background.test.js
-npx jest popup.test.js
-```
-
-**Current coverage: 94 tests across 2 test suites:**
-- `background.test.js` — Rule CRUD, DNR rule building, import/export, logging, pause/resume, response body capture, webRequest listeners
-- `popup.test.js` — HTML/attribute escaping, time formatting, URL pattern matching, similarity scoring, HAR conversion, percentile calculation, status classification
-
-## Usage
-
-### Quick Start
-1. Click the **RequestPilot** icon → **Add Rule**
-2. Choose rule type (Modify Headers / Block / Redirect)
-3. Enter a URL pattern (e.g. `https://api.example.com/*`)
-4. Add headers or redirect URL, optionally filter by HTTP method
-5. Save → rule is immediately active
-
-### Comparing Requests
-1. Switch to the **Filtered Log** tab
-2. Enable a rule, make requests, disable it, make the same requests again
-3. Select 1 request → similarity scores appear on all others
-4. Use **Min Match** filter to find the best matches quickly
-5. Select a 2nd request → click **Compare** for side-by-side diff
-6. Request tab shows headers + body diff, Response tab shows status + headers + body diff
-
-### Analyzing HAR Files
-1. In the Filtered Log tab, click **↑ Import** and select a `.har` file
-2. Switch to the **Stats** tab for full traffic breakdown
-3. Expand domains → paths → individual requests
-4. Click **+ Add Rule** on any path to create rules from the HAR data
-
-### URL Pattern Syntax
-| Pattern | Matches |
-|---|---|
-| `https://api.example.com/*` | Any URL starting with `https://api.example.com/` |
-| `*://example.com/*` | HTTP and HTTPS requests to `example.com` |
-| `*api*` | Any URL containing `api` |
-
-## Terminal UI (TUI)
-
-A full-featured terminal interface for HTTP testing — same core engine as the desktop app, runs entirely in your terminal.
-
-### Running the TUI
-
-**Prerequisites:** [Rust](https://rustup.rs/) (1.70+)
-
-```bash
-# Build
-cd request-pilot
-cargo build -p request-pilot-tui
-
-# Run with .http files (positional args — no flags needed)
-cargo run -p request-pilot-tui -- api.http
-
-# Multiple files + env
-cargo run -p request-pilot-tui -- api.http tests.http --env .env
-
-# Auto-run tests on startup
-cargo run -p request-pilot-tui -- api.http --run
-
-# Or use the built binary directly
-./target/debug/request-pilot api.http --env .env --run
-```
-
-### TUI Keybindings
-
-| Key | Action |
-|-----|--------|
-| **Navigation** | |
-| `j`/`k` or `↑`/`↓` | Navigate / scroll |
-| `g` / `G` | Jump to top / bottom |
-| `Ctrl+u` / `Ctrl+d` | Half-page up / down |
-| `1`-`9` | Quick jump to file by index |
-| `Tab` | Cycle focus between panels |
-| `Enter` | Select / expand / view detail |
-| `Space` | Toggle expand |
-| **File Operations** | |
-| `o` / `Ctrl+O` | Open .http file (type path) |
-| `n` / `Ctrl+N` | Create new file |
-| `s` / `Ctrl+S` | Save current file |
-| `x` | Close file |
-| `Ctrl+E` | Load .env file |
-| **Execution** | |
-| `r` | Run selected block / group / file |
-| `R` / `F5` | Run all tests |
-| `t` | Toggle block enabled / disabled |
-| **Variables** (`Ctrl+V` to switch tab) | |
-| `a` | Add variable |
-| `e` | Edit variable |
-| `d` | Delete variable |
-| **Response** (when focused) | |
-| `b` / `h` / `a` | Body / Headers / Assertions tab |
-| `y` | Copy response body |
-| **History** (`F3`) | |
-| `/` | Filter history |
-| `Enter` | View entry detail |
-| `C` | Clear history |
-| `E` | Export history to JSON |
-| **General** | |
-| `F1` | Files mode |
-| `F3` | History mode |
-| `?` | Toggle help overlay |
-| `q` | Quit |
-
-### TUI Features
+### Core Features
 
 | Feature | Description |
 |---|---|
-| **File Tree** | Hierarchical sidebar — files → groups → blocks with status icons |
-| **Code View** | Syntax-colored display of method, URL, headers, body, assertions, extracts |
-| **Response Viewer** | Body / Headers / Assertions sub-tabs with status badge and timing |
-| **Test Runner** | Async execution with live spinner + progress bar (setup → test → teardown) |
-| **Variables Panel** | Sorted list, extracted vars highlighted in purple with ⇐ prefix |
-| **History Mode** | Stats panel (total/pass rate/avg time), filter bar, scrollable entry list |
-| **Input Prompts** | Inline text input at bottom of screen for file paths, variable names, etc. |
-| **Catppuccin Theme** | Warm Mocha-inspired color palette with proper contrast |
-
-## Desktop App (Rust + Tauri v2)
-
-A cross-platform HTTP client and **E2E integration test framework** — author requests, run structured test suites from enhanced `.http` files, and inspect responses.
-
-| Feature | Description |
-|---|---|
-| **Enhanced `.http` Format** | `@variables`, `@setup`/`@test`/`@teardown` blocks, `@assert`/`@extract`/`@description`/`@disabled`/`@group`/`@depends` directives, `{{variable}}` interpolation |
-| **Builder / Code Mode** | Toggle between visual form editor and full syntax-highlighted `.http` code editor |
+| **Enhanced `.http` Format** | `@variables`, `@setup`/`@test`/`@teardown` blocks, `@assert`/`@extract`/`@description`/`@disabled`/`@group`/`@depends`/`@mode`/`@dev_auth` directives, `{{variable}}` interpolation |
 | **Test Runner** | Setup → Test → Teardown lifecycle; parallel execution via `tokio::JoinSet` with `@group`/`@depends` dependency graph (topological wave scheduling), skip-on-failure |
-| **Variables System** | Static, `.env` file integration, dynamic extraction, built-in (`$timestamp`, `$uuid`, `$randomInt`) |
-| **Environment Panel** | Load/save `.env` files, add/edit/delete/clear variables, status indicators |
+| **Variables System** | Static definitions, `.env` file integration, dynamic `@extract` from responses, built-in generators (`$timestamp`, `$uuid`, `$randomInt`) |
+| **Assertions** | `# @assert status == 200`, `# @assert $.field != null`, `# @assert $.items.length > 0` — 7 operators with JSON path support |
+| **Run Modes** | Run All, Run Single Block, Run Group, Run File — all with live streaming progress |
+
+### UI Modes
+
+| Mode | Description |
+|---|---|
+| **🔧 Builder** | Form-based editor — method picker, URL bar, header rows, body type selector, response viewer with tabs |
+| **📝 Code** | Full syntax-highlighted `.http` editor with line numbers; auto-scrolls to selected block with jump-back indicator |
+| **📊 History** | Request history with domain→path grouping, method/status/source filters, URL autocomplete, request comparison, statistics |
+| **📋 Logs** | Application log viewer with level filters (info/warn/error/debug), auto-scroll, live streaming |
+
+### Response Viewer
+
+| Feature | Description |
+|---|---|
+| **Smart Content Detection** | Auto-detects JSON, XML, HTML, YAML, CSV, protobuf from Content-Type + body heuristics |
+| **JSON Tree Viewer** | Interactive expand/collapse at every level with syntax highlighting, Expand All / Collapse All |
+| **XML/HTML Rendering** | Pretty-printed with tag, attribute, and comment highlighting |
+| **Assertions Tab** | Pass/fail results per assertion with expected vs. actual values |
+
+### Azure Authentication
+
+Multi-scope Azure auth for developers — skip client-credentials setup blocks and authenticate with your own identity.
+
+| Feature | Description |
+|---|---|
+| **Stateful Auth Button** | 🔒 Off → 🔓 Needs Auth (amber pulse) → 🔑 Authenticated (green) → ⚠ Expired (orange) |
+| **Multi-Scope Support** | Auto-detects all `# @dev_auth <scope>` directives; caches tokens per scope |
+| **3-Strategy Cascade** | 1) `az` CLI → 2) device code with file's `client_id` → 3) device code with Azure CLI public client |
+| **`# @mode app\|dev`** | `app` blocks run in normal mode (client credentials), `dev` blocks run in dev mode (user auth) |
+| **`# @dev_auth <scope>`** | Declares Azure scope per token-fetching setup block (e.g., `https://management.azure.com/.default`) |
+| **Scope Tooltip** | Hover the auth button to see per-scope details and expiry times |
+
+**Setup:**
+1. Install [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) and run `az login`
+2. Annotate token-fetching setup blocks:
+   ```http
+   ### @setup Fetch ARM Token
+   # @mode app
+   # @dev_auth https://management.azure.com/.default
+   POST https://login.microsoftonline.com/{{tenant_id}}/oauth2/v2.0/token
+   Content-Type: application/x-www-form-urlencoded
+
+   grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope=https://management.azure.com/.default
+
+   # @extract arm_token = $.access_token
+   ```
+3. Click **🔒 Azure** in the toolbar — the app detects scopes, fetches tokens via `az account get-access-token`, and injects them as the block's `@extract` variables
+
+### Additional Features
+
+| Feature | Description |
+|---|---|
+| **Pop-out Panels** | Detach History or Logs into separate native OS windows (Tauri WebviewWindow) for dual-monitor workflows |
+| **Zoom Controls** | `Ctrl+Scroll` / `Ctrl++` / `Ctrl+-` / `Ctrl+0` with persistent level (50%–200%) |
+| **URL Autocomplete** | Rust-backed trie with segment-aware fuzzy matching, Google-style ghost text, Tab completion |
+| **Rich Hover Tooltips** | Block-level (request details, assertions, trend bar), group-level (test listing, stats), file-level (test plan, run stats) |
+| **JWT/Token Decode** | Hover any variable to see decoded value; JWT tokens show header, claims, issuer, audience, expiry status |
+| **Hierarchical Sidebar** | Files → Groups → Blocks with collapse/expand, status dots, count badges, ▶ Run buttons |
+| **Block Progress Streaming** | Live pass/fail/skip updates during test execution |
 | **Step Toggle** | Enable/disable blocks via sidebar checkbox or `# @disabled` directive |
-| **Request Client** | Manual request sending with full control over method, URL, headers, body |
-| **Response Viewer** | Status, headers, body with JSON formatting, assertions tab |
-| **Request History** | Auto-incrementing seq numbers, run ID linking, domain→path grouping, status/source filters, request detail overlay |
-| **Comparison & Scoring** | Side-by-side request diff (headers + JSON body), weighted similarity scoring, key picker |
-| **URL Autocomplete** | Rust-backed trie with segment-aware fuzzy matching, Google-style inline autocomplete with ghost text, Tab completion, domain→path quick picks |
-| **JSON Tree Viewer** | Interactive expand/collapse at every level with syntax highlighting (keys, strings, numbers, booleans, null), Expand All / Collapse All buttons |
-| **Hierarchical Sidebar** | Groups shown as collapsible tree nodes with chevron, status dot, count badge, and ▶ Run Group button; setup/teardown at top/bottom, tests nested |
-| **Rich Hover Tooltips** | Block-level (request details, assertions, extracts, trend bar), group-level (test listing, aggregate stats), file-level (test plan, run stats), workspace-level (all-files summary); scrollable with custom scrollbar |
-| **Viewed Indicator** | 👁 badge on test result rows and history entries; dims already-viewed items |
-| **Failure Reason Badges** | Inline badges on test results — ⚠ Error, HTTP 4xx/5xx, ✗ N assert, or combined |
-| **Run History & Trends** | Per-file run history tracking with trend bar visualization (last 20 runs) |
-| **Block Progress Streaming** | Live progress updates streamed to the UI during test execution |
-| **Test Plan Header** | Structured comment block at the top of `.http` files parsed and displayed as test plan metadata |
-| **Body Comment Stripping** | Trailing comments stripped from request bodies to prevent 400 errors from section decorations |
-| **URL Parser Hardening** | Special characters in query strings (PromQL, etc.) handled correctly |
-| **Auto-Format JSON** | Response bodies automatically formatted as pretty-printed JSON by default |
+| **Guided Tour** | Two-part onboarding tour covering all features; re-open via ❓ button |
 | **Cross-Platform** | Windows, macOS, Linux via Tauri v2 |
 
 ### Building & Running
@@ -287,28 +143,142 @@ cargo tauri build
 - **macOS**: Xcode CLI Tools (`xcode-select --install`)
 - **Linux**: `sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf`
 
-### Running Desktop Unit Tests
+---
+
+## Browser Extension (Edge/Chrome)
+
+A Manifest V3 extension for intercepting, modifying, and analyzing HTTP traffic.
+
+### Rules Engine
+| Feature | Description |
+|---|---|
+| **Header Injection** | Add or overwrite request headers on matching URLs |
+| **Request Blocking** | Block requests to specific endpoints entirely |
+| **URL Redirect** | Redirect matching requests to a different URL |
+| **Method Filtering** | Restrict rules to specific HTTP methods (GET, POST, etc.) |
+| **Import / Export** | Share rule configurations as JSON files |
+| **Toggle Rules** | Enable or disable individual rules without deleting |
+
+### Network Monitoring
+| Feature | Description |
+|---|---|
+| **Rule-Filtered Log** | Only shows requests matching your configured rules |
+| **Similarity Scoring** | Select a request to see match % on others based on headers + payload |
+| **Request Comparison** | Select 2 requests → side-by-side diff of headers, body (JSON key-by-key) |
+| **Response Body Capture** | Intercepted via content scripts (MAIN + ISOLATED world) with re-fetch fallback |
+| **Method & Status Filters** | Filter by HTTP method and status code range |
+| **Group By** | Group entries by URL or any request/response header |
+| **Log Export / Import** | Export as JSON, import JSON or HAR files |
+
+### Statistics
+| Feature | Description |
+|---|---|
+| **Summary Cards** | Total requests, success, client errors, server errors, rule coverage |
+| **Response Time Percentiles** | Avg, P50, P90, P95, P99, Max |
+| **Domain & Path Tree** | Collapsible accordion with rule impact badges and one-click Add Rule |
+
+### Installation
+1. Open Edge → `edge://extensions/` (or Chrome → `chrome://extensions/`)
+2. Enable **Developer mode**
+3. Click **Load unpacked** → select the **`request-pilot/extension`** folder
+4. The Request Pilot icon appears in your toolbar
+
+> **Important:** Select the `extension` subfolder, not the root directory.
+
+---
+
+## Terminal UI (TUI)
+
+A full-featured terminal interface for HTTP testing — same core engine as the desktop app, runs entirely in your terminal.
+
+### Running
 
 ```bash
-# Core library tests (163 tests — parser, assertions, variables, runner, history, url_trie, http_client)
+# Build
+cd request-pilot
+cargo build -p request-pilot-tui
+
+# Run with .http files
+cargo run -p request-pilot-tui -- api.http
+
+# Multiple files + env
+cargo run -p request-pilot-tui -- api.http tests.http --env .env
+
+# Auto-run tests on startup
+cargo run -p request-pilot-tui -- api.http --run
+```
+
+### Keybindings
+
+| Key | Action |
+|-----|--------|
+| `j`/`k` or `↑`/`↓` | Navigate / scroll |
+| `g` / `G` | Jump to top / bottom |
+| `Tab` | Cycle focus between panels |
+| `Enter` | Select / expand / view detail |
+| `r` | Run selected block / group / file |
+| `R` / `F5` | Run all tests |
+| `t` | Toggle block enabled / disabled |
+| `o` / `Ctrl+O` | Open .http file |
+| `Ctrl+E` | Load .env file |
+| `?` | Toggle help overlay |
+| `q` | Quit |
+
+### Features
+| Feature | Description |
+|---|---|
+| **File Tree** | Hierarchical sidebar — files → groups → blocks with status icons |
+| **Code View** | Syntax-colored display of method, URL, headers, body, assertions, extracts |
+| **Response Viewer** | Body / Headers / Assertions sub-tabs with status badge and timing |
+| **Test Runner** | Async execution with live spinner + progress bar |
+| **Variables Panel** | Sorted list, extracted vars highlighted in purple |
+| **History Mode** | Stats panel, filter bar, scrollable entry list |
+| **Catppuccin Theme** | Warm Mocha-inspired color palette |
+
+---
+
+## Shared Core (`request-pilot-core`)
+
+The Rust library powering all three frontends — **171 unit tests**, zero warnings.
+
+| Module | Description |
+|---|---|
+| **`http_parser`** | Parse and generate `.http` files — `@variables`, block types, all directives (`@assert`, `@extract`, `@group`, `@depends`, `@mode`, `@dev_auth`, `@disabled`), HTTP request syntax |
+| **`test_runner`** | Execute test suites — setup → parallel tests (topological wave scheduling via `@group`/`@depends`) → teardown, with streaming progress events |
+| **`http_client`** | reqwest-based async HTTP with variable interpolation, smart URL encoding |
+| **`assertions`** | Evaluate `@assert` directives — 7 operators (`==`, `!=`, `>`, `<`, `>=`, `<=`, `contains`), JSON path selectors, status/header/body targets |
+| **`variables`** | Variable store with `{{interpolation}}`, built-ins (`$timestamp`, `$uuid`, `$randomInt`), merge with .env, unresolved detection |
+| **`azure_auth`** | Azure CLI token fetch (`az`/`az.cmd`), device code flow (start + poll), availability detection |
+| **`history`** | In-memory history store (max 1000), filtering by method/status/URL/source/run_id, trie-based URL autocomplete |
+| **`url_trie`** | Segment-aware trie — split URLs by `/`, `.`, `:`, `?`, `&`, `=` for frequency-ranked autocomplete and domain→path grouping |
+| **`env_file`** | Parse/write `.env` files with quotes, comments, and sorted output |
+
+### Running Tests
+
+```bash
+# Core library tests (171 tests — parser, assertions, variables, runner, history, url_trie, http_client)
 cd request-pilot
 cargo test -p request-pilot-core
 
 # Desktop adapter check
 cd request-pilot/desktop/src-tauri
 cargo check
+
+# Browser extension tests (94 tests)
+cd request-pilot/tests
+npm install && npm test
 ```
 
-See the `desktop/` directory for full documentation.
+---
 
-### Documentation & Samples
+## Documentation & Samples
 
 The [`docs/`](docs/) folder contains:
-- **[`.http` File Format Reference](docs/http-file-format.md)** — complete guide to variables, block types, directives, assertions, extracts, and interpolation (parser backed by 156+ Rust unit tests)
+- **[`.http` File Format Reference](docs/http-file-format.md)** — complete guide to variables, block types, directives, assertions, extracts, and interpolation
 - **[Sample `.http` files](docs/samples/):**
-  - [`azure-managed-prometheus.http`](docs/samples/azure-managed-prometheus.http) — PromQL queries, rule groups, and alert rules against Azure Monitor workspace
+  - [`azure-managed-prometheus.http`](docs/samples/azure-managed-prometheus.http) — PromQL queries, rule groups, and alert rules
   - [`azure-aks-cluster.http`](docs/samples/azure-aks-cluster.http) — AKS cluster operations: node pools, upgrade profiles, credentials
-  - [`azure-aks-prometheus-monitoring.http`](docs/samples/azure-aks-prometheus-monitoring.http) — Integrated AKS + Prometheus monitoring: container CPU/memory, API server, CoreDNS, PVC usage, alert rules
+  - [`azure-aks-prometheus-monitoring.http`](docs/samples/azure-aks-prometheus-monitoring.http) — AKS + Prometheus E2E monitoring
 
 ### Architecture Guides
 
@@ -317,34 +287,18 @@ For developers and AI agents working on the codebase:
 - **[desktop/ARCHITECTURE.md](desktop/ARCHITECTURE.md)** — Rust module-by-module guide, frontend structure, IPC commands
 - **[extension/ARCHITECTURE.md](extension/ARCHITECTURE.md)** — Extension internals, message passing, rule system, content scripts
 
+### AI Skill
+
+The `.github/skills/e2e-http-test-generator/` directory contains a Copilot skill for generating `.http` test files from code changes. It analyzes diffs, PRs, or commits to produce structured test files following all Request Pilot conventions.
+
+---
+
 ## Tech Stack
 
-### Browser Extension
-- **Manifest V3** — modern Chrome/Edge extension standard
-- **declarativeNetRequest** — performant header modification, blocking, redirects
-- **webRequest** — network traffic capture with request/response details
-- **Content Scripts** — response body interception (MAIN + ISOLATED world)
-- **chrome.storage.local** — persistent rule and preference storage
-- **Jest** — 94 unit tests with Chrome API mocks
-- Vanilla HTML / CSS / JS — no build step required
-
-### Desktop App
-- **[Tauri v2](https://v2.tauri.app/)** — Cross-platform desktop framework (Rust backend + WebView frontend)
-- **[reqwest](https://github.com/seanmonstar/reqwest)** — HTTP client with rustls
-- **[tokio](https://tokio.rs/)** — Async runtime
-- **HTML / CSS / JS** — Frontend UI (dark IDE theme, sidebar, split panels)
-
-### Terminal UI (TUI)
-- **[ratatui](https://ratatui.rs/) 0.29** — Terminal rendering framework
-- **[crossterm](https://github.com/crossterm-rs/crossterm) 0.28** — Cross-platform terminal events
-- **[clap](https://github.com/clap-rs/clap) 4** — CLI argument parsing
-- **[tokio](https://tokio.rs/)** — Async runtime (shared with core)
-- **Catppuccin Mocha** — Color palette
-
-### Shared Core (`request-pilot-core`)
-- **HTTP Parser** — `.http` file format with variables, blocks, directives, assertions, extracts
-- **HTTP Client** — reqwest-based async client with variable interpolation
-- **Test Runner** — Setup → Test → Teardown lifecycle, parallel `@group`/`@depends` scheduling
-- **History** — Request/response storage with filtering, grouping, domain→path trie
-- **Variables** — Static, `.env` file, dynamic extraction, built-ins (`$timestamp`, `$uuid`, `$randomInt`)
-- **Assertions** — Status, JSON path, string matching with 7 operators
+| Layer | Technologies |
+|---|---|
+| **Shared Core** | Rust, reqwest, tokio, serde, chrono |
+| **Desktop App** | Tauri v2, HTML/CSS/JS (vanilla), Rust backend |
+| **Browser Extension** | Manifest V3, declarativeNetRequest, webRequest, content scripts, chrome.storage |
+| **Terminal UI** | ratatui 0.29, crossterm 0.28, clap 4, tokio |
+| **Tests** | Rust `#[test]` (171 core), Jest (94 extension) |

@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Request Pilot</title>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    body {
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      height: 100vh;
+      box-sizing: border-box;
+    }
+    #popoutContent {
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    /* Scrollable content areas fill remaining space */
+    #popoutContent > .history-log,
+    #popoutContent > .log-list,
+    #popoutContent .history-log,
+    #popoutContent .log-list {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+    }
+    /* Headers stay compact */
+    #popoutContent > .history-header,
+    #popoutContent > .history-filters,
+    #popoutContent > .history-stats,
+    #popoutContent > .log-header,
+    #popoutContent > .history-detail-overlay,
+    #popoutContent .history-header,
+    #popoutContent .history-filters,
+    #popoutContent .history-stats,
+    #popoutContent .log-header {
+      flex-shrink: 0;
+    }
+    /* History panel wrapper if present */
+    #popoutContent > .history-panel {
+      display: flex !important;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .popout-loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      color: var(--text-dim);
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div id="popoutContent">
+    <div class="popout-loading">Loading…</div>
+  </div>
+
+  <script>
+    const { listen, emit } = window.__TAURI__.event;
+    const container = document.getElementById('popoutContent');
+
+    // Get panel ID from URL params
+    const params = new URLSearchParams(window.location.search);
+    const panelId = params.get('panel');
+
+    function cleanupPopoutContent() {
+      // Remove pop-out buttons (already popped out)
+      container.querySelectorAll('.popout-btn').forEach(el => el.remove());
+      // Remove the "← Back" button in history detail (not functional)
+      container.querySelectorAll('#historyDetailCloseBtn').forEach(el => el.remove());
+    }
+
+    // Receive initial content
+    listen('popout-content', (event) => {
+      container.innerHTML = event.payload.html;
+      cleanupPopoutContent();
+    });
+
+    // Receive live log entries (for logs panel)
+    listen('popout-log-entry', (event) => {
+      const logList = container.querySelector('#logList');
+      if (!logList) return;
+      const entry = event.payload;
+      const div = document.createElement('div');
+      div.className = `log-entry log-${entry.level}`;
+      const ts = entry.ts.split('T')[1]?.split('.')[0] || entry.ts;
+      div.innerHTML = `<span class="log-ts">${ts}</span><span class="log-level">${entry.level}</span><span class="log-msg">${escapeHtml(entry.message)}</span>`;
+      if (entry.data) {
+        const dataDiv = document.createElement('div');
+        dataDiv.className = 'log-data';
+        dataDiv.textContent = typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2);
+        div.appendChild(dataDiv);
+      }
+      logList.appendChild(div);
+      // Auto-scroll
+      logList.scrollTop = logList.scrollHeight;
+    });
+
+    // Receive content updates (for panels that refresh)
+    listen('popout-update', (event) => {
+      if (event.payload.panelId === panelId) {
+        container.innerHTML = event.payload.html;
+        cleanupPopoutContent();
+      }
+    });
+
+    // Notify main window we're ready
+    emit('popout-ready', { panelId });
+
+    // Notify main on close
+    window.addEventListener('beforeunload', () => {
+      emit('popout-closed', { panelId });
+    });
+
+    function escapeHtml(str) {
+      const d = document.createElement('div');
+      d.textContent = str;
+      return d.innerHTML;
+    }
+  </script>
+</body>
+</html>

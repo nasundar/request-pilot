@@ -1,5 +1,5 @@
 use request_pilot_core::{
-    env_file, history, http_client, http_parser, test_runner, url_trie, variables,
+    azure_auth, env_file, history, http_client, http_parser, test_runner, url_trie, variables,
 };
 
 use history::HistoryStore;
@@ -71,12 +71,18 @@ fn generate_http(suite: http_parser::TestSuite) -> Result<String, String> {
 async fn run_test_suite(
     suite: http_parser::TestSuite,
     extra_variables: Vec<(String, String)>,
+    run_mode: Option<String>,
     store: State<'_, Mutex<HistoryStore>>,
     app: tauri::AppHandle,
 ) -> Result<test_runner::TestRunResults, String> {
     let run_id = request_pilot_core::uuid::Uuid::new_v4().to_string();
     let progress = Arc::new(TauriProgress(app.clone()));
-    let mut results = test_runner::run_suite(&suite, &extra_variables, Some(progress)).await;
+    let mut results = test_runner::run_suite(
+        &suite,
+        &extra_variables,
+        Some(progress),
+        run_mode.as_deref(),
+    ).await;
 
     // Add each executed request to history with seq numbers
     let mut s = store.lock().map_err(|e| e.to_string())?;
@@ -113,7 +119,7 @@ async fn resolve_variables(
     suite: http_parser::TestSuite,
     extra_variables: Vec<(String, String)>,
 ) -> Result<std::collections::HashMap<String, String>, String> {
-    test_runner::resolve_variables_only(&suite, &extra_variables).await
+    test_runner::resolve_variables_only(&suite, &extra_variables, None).await
 }
 
 #[tauri::command]
@@ -170,6 +176,37 @@ fn write_env_file(
 }
 
 #[tauri::command]
+fn fetch_azure_token(resource: String) -> Result<azure_auth::AzureToken, String> {
+    azure_auth::fetch_token(&resource)
+}
+
+#[tauri::command]
+fn check_azure_cli() -> Result<bool, String> {
+    Ok(azure_auth::is_az_cli_available())
+}
+
+#[tauri::command]
+async fn start_device_code(
+    tenant_id: String,
+    client_id: String,
+    scope: String,
+) -> Result<azure_auth::DeviceCodeResponse, String> {
+    azure_auth::start_device_code_flow(&tenant_id, &client_id, &scope).await
+}
+
+#[tauri::command]
+async fn poll_device_code(
+    tenant_id: String,
+    client_id: String,
+    device_code: String,
+) -> Result<azure_auth::TokenResponse, String> {
+    match azure_auth::poll_device_code_token(&tenant_id, &client_id, &device_code).await? {
+        Ok(token) => Ok(token),
+        Err(status) => Err(status),
+    }
+}
+
+#[tauri::command]
 fn check_variables(
     suite: http_parser::TestSuite,
     env_vars: Vec<(String, String)>,
@@ -212,6 +249,10 @@ pub fn run() {
             suggest_domain_paths,
             read_env_file,
             write_env_file,
+            fetch_azure_token,
+            check_azure_cli,
+            start_device_code,
+            poll_device_code,
             check_variables,
         ])
         .run(tauri::generate_context!())
