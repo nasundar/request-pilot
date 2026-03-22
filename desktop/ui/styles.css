@@ -3342,6 +3342,50 @@ input:focus, select:focus, textarea:focus { outline: none; }
   font-family: var(--font-mono);
 }
 
+/* Toggle switch */
+.tt-toggle {
+  position: relative;
+  display: inline-block;
+  width: 32px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.tt-toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.tt-toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: var(--border);
+  border-radius: 9px;
+  transition: background 0.2s;
+}
+.tt-toggle-slider::before {
+  content: '';
+  position: absolute;
+  height: 14px;
+  width: 14px;
+  left: 2px;
+  bottom: 2px;
+  background: var(--text-primary);
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+.tt-toggle input:checked + .tt-toggle-slider {
+  background: #4caf50;
+}
+.tt-toggle input:checked + .tt-toggle-slider::before {
+  transform: translateX(14px);
+}
+
+/* Paused state — dim the button */
+.telemetry-btn.paused {
+  opacity: 0.5;
+}
+
 .azure-auth-btn {
   display: none; /* hidden until a file with dev_auth_resource is loaded */
   align-items: center;

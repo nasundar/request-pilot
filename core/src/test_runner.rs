@@ -508,7 +508,9 @@ async fn run_suite_inner(
         };
 
         if let Some(cfg) = config {
-            telemetry = Some(TelemetryCollector::new(cfg, tvar));
+            let file_name = var_store.get("__telemetry_file").unwrap_or_default();
+            let display_name = if file_name.is_empty() { tvar.as_str() } else { &file_name };
+            telemetry = Some(TelemetryCollector::new(cfg, &display_name));
         }
     }
 

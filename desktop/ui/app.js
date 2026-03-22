@@ -58,6 +58,7 @@ let azCliAvailable = false;
 // States: 'off' | 'configured' | 'sending' | 'active' | 'error'
 let telemetryState = 'off';
 let telemetryStats = []; // [{file, endpoint, traces, metrics, logs, errors, time_ms}]
+let telemetryEnabled = true; // user toggle — when false, skip OTEL export even if configured
 
 // --- Zoom ---
 let zoomLevel = parseInt(localStorage.getItem('rp-zoom') || '100', 10);
@@ -1897,10 +1898,12 @@ async function runAllTests() {
   rpLog('info', 'Run All started', { fileCount: loadedFiles.length, azureAuth: azureAuthState });
 
   // Reset telemetry stats for this run
-  if (telemetryState !== 'off') {
+  if (telemetryState !== 'off' && telemetryEnabled) {
     telemetryStats = [];
     setTelemetryState('sending');
     rpLog('info', 'OTEL telemetry: export will begin after test execution');
+  } else if (!telemetryEnabled && telemetryState !== 'off') {
+    rpLog('info', 'OTEL telemetry: skipped (disabled by user)');
   }
 
   // Azure auth: use cached tokens if authenticated
@@ -1977,9 +1980,15 @@ async function runAllTests() {
       const suite = getEnabledSuite(fi);
       if (!suite || suite.blocks.length === 0) continue;
       try {
+        const fileExtraVars = [...collectVariablesArray(), ...azureExtraVars];
+        if (file.suite.telemetry_var && telemetryEnabled) {
+          fileExtraVars.push(['__telemetry_file', file.name]);
+        }
+        // Strip telemetry fields when disabled so Rust runner skips telemetry init
+        const suiteCopy = telemetryEnabled ? suite : { ...suite, telemetry_var: null, telemetry_token: null, telemetry_service: null };
         const results = await invoke('run_test_suite', {
-          suite,
-          extraVariables: [...collectVariablesArray(), ...azureExtraVars],
+          suite: suiteCopy,
+          extraVariables: fileExtraVars,
           runMode,
         });
 
@@ -5276,10 +5285,19 @@ function renderTelemetryTooltip() {
   const tooltip = $('#telemetryTooltip');
   if (!tooltip) return;
 
-  let html = '<h4>📡 OTEL Telemetry</h4>';
+  const checked = telemetryEnabled ? 'checked' : '';
+  const dimClass = telemetryEnabled ? '' : ' style="opacity: 0.5;"';
+  let html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">'
+    + '<h4 style="margin:0;">📡 OTEL Telemetry</h4>'
+    + '<label class="tt-toggle" title="Enable/disable telemetry export"><input type="checkbox" id="telemetryToggle" ' + checked + '><span class="tt-toggle-slider"></span></label>'
+    + '</div>';
+
+  html += '<div' + dimClass + '>';
 
   // Show state-specific info
-  if (telemetryState === 'configured') {
+  if (!telemetryEnabled) {
+    html += '<div class="tt-row"><span class="tt-key">Status</span><span class="tt-val" style="color:var(--text-muted);">Paused — toggle to resume</span></div>';
+  } else if (telemetryState === 'configured') {
     const hasAzureAuth = azureAuthState === 'authenticated';
     const statusText = hasAzureAuth ? 'Configured — awaiting monitor.azure.com token' : 'Configured — awaiting Azure auth';
     html += '<div class="tt-row"><span class="tt-key">Status</span><span class="tt-val">' + statusText + '</span></div>';
@@ -5378,8 +5396,26 @@ function renderTelemetryTooltip() {
   } else {
     html += '<div class="tt-row"><span class="tt-key">Status</span><span class="tt-val">Not configured</span></div>';
   }
+  html += '</div>'; // close dimClass wrapper
 
   tooltip.innerHTML = html;
+
+  // Bind toggle event
+  const toggle = document.getElementById('telemetryToggle');
+  if (toggle) {
+    toggle.addEventListener('change', () => {
+      telemetryEnabled = toggle.checked;
+      rpLog('info', `OTEL telemetry ${telemetryEnabled ? 'enabled' : 'disabled'} by user`);
+      renderTelemetryTooltip();
+      // Update button visual
+      const btn = $('#telemetryBtn');
+      if (!telemetryEnabled) {
+        btn.classList.add('paused');
+      } else {
+        btn.classList.remove('paused');
+      }
+    });
+  }
 }
 
 function escHtml(s) {
