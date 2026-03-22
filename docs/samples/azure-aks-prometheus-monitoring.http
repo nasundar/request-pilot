@@ -10,9 +10,17 @@
 # Prerequisites:
 #   - AKS cluster with Azure Monitor (Managed Prometheus) enabled
 #   - Azure AD app registration with Monitoring Reader + AKS Reader
+#   - (Optional) appinsights_connection_string in .env for telemetry
 # ============================================================
 
+# @telemetry appinsights_connection_string
+# @telemetry_service aks-prometheus-e2e
+
 @variables
+# --- Telemetry (from .env, optional) ---
+appinsights_connection_string =
+
+# --- Authentication ---
 tenant_id = your-tenant-id
 client_id = your-client-id
 client_secret = your-client-secret

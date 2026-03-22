@@ -6,7 +6,7 @@ A developer toolkit for HTTP traffic — a **Tauri v2 desktop app** for authorin
 
 ```
 request-pilot/
-├── core/              # Shared Rust core library (171 tests)
+├── core/              # Shared Rust core library (180 tests)
 │   └── src/
 │       ├── http_parser.rs     # .http file parser & generator
 │       ├── http_client.rs     # reqwest-based HTTP client
@@ -14,6 +14,7 @@ request-pilot/
 │       ├── assertions.rs      # Response assertion engine
 │       ├── variables.rs       # Variable interpolation & built-ins
 │       ├── azure_auth.rs      # Azure CLI + device code auth
+│       ├── telemetry.rs       # OTEL telemetry (OTLP/HTTP JSON export)
 │       ├── history.rs         # Request history store & filters
 │       ├── url_trie.rs        # Segment-aware URL autocomplete trie
 │       └── env_file.rs        # .env file reader/writer
@@ -119,6 +120,34 @@ Multi-scope Azure auth for developers — skip client-credentials setup blocks a
 | **Step Toggle** | Enable/disable blocks via sidebar checkbox or `# @disabled` directive |
 | **Guided Tour** | Two-part onboarding tour covering all features; re-open via ❓ button |
 | **Cross-Platform** | Windows, macOS, Linux via Tauri v2 |
+
+### E2E Observability (OTEL Telemetry)
+
+Export traces, metrics, and logs from every test run to any OTLP-compatible backend — Azure Monitor Application Insights, Jaeger, Grafana Tempo, etc.
+
+**Setup:** Add two file-level directives before `@variables`:
+```http
+# @telemetry appinsights_connection_string
+# @telemetry_service my-api-e2e-tests
+```
+
+The connection string variable value (set in `.env`) can be:
+- Azure App Insights: `InstrumentationKey=xxx;IngestionEndpoint=https://eastus-1.in.applicationinsights.azure.com`
+- Plain OTLP: `https://my-otel-collector:4318`
+
+**Signals exported per run:**
+
+| Signal | Structure | Purpose |
+|--------|-----------|---------|
+| **Traces** | Root span → block spans → HTTP request spans; assertions/extracts as span events | Failure investigation |
+| **Metrics** | 5 metrics with low-cardinality dimensions (`file`, `block_type`, `outcome`) — max ~1,100 time series for 50 files | Dashboards & alerts |
+| **Logs** | Suite lifecycle, block completions, assertion failures, HTTP errors (severity-coded) | Debugging & auditing |
+
+**Metrics:** `rp.suite.runs`, `rp.suite.duration`, `rp.block.runs`, `rp.block.duration`, `rp.assertion.total`
+
+**Desktop indicator:** The toolbar shows a 📡 OTEL button with states: configured (gray), sending (pulsing cyan), active (green ✓), error (red ✗). Hover for endpoint, per-file stats, and export errors.
+
+**Zero new dependencies** — OTLP JSON payloads are built with `serde_json` and sent via `reqwest` (both already in the core crate). Telemetry never fails the test run — errors are captured in stats.
 
 ### Building & Running
 
@@ -239,16 +268,17 @@ cargo run -p request-pilot-tui -- api.http --run
 
 ## Shared Core (`request-pilot-core`)
 
-The Rust library powering all three frontends — **171 unit tests**, zero warnings.
+The Rust library powering all three frontends — **180 unit tests**, zero warnings.
 
 | Module | Description |
 |---|---|
-| **`http_parser`** | Parse and generate `.http` files — `@variables`, block types, all directives (`@assert`, `@extract`, `@group`, `@depends`, `@mode`, `@dev_auth`, `@disabled`), HTTP request syntax |
-| **`test_runner`** | Execute test suites — setup → parallel tests (topological wave scheduling via `@group`/`@depends`) → teardown, with streaming progress events |
+| **`http_parser`** | Parse and generate `.http` files — `@variables`, block types, all directives (`@assert`, `@extract`, `@group`, `@depends`, `@mode`, `@dev_auth`, `@disabled`, `@telemetry`), HTTP request syntax |
+| **`test_runner`** | Execute test suites — setup → parallel tests (topological wave scheduling via `@group`/`@depends`) → teardown, with streaming progress events and OTEL telemetry export |
 | **`http_client`** | reqwest-based async HTTP with variable interpolation, smart URL encoding |
 | **`assertions`** | Evaluate `@assert` directives — 7 operators (`==`, `!=`, `>`, `<`, `>=`, `<=`, `contains`), JSON path selectors, status/header/body targets |
 | **`variables`** | Variable store with `{{interpolation}}`, built-ins (`$timestamp`, `$uuid`, `$randomInt`), merge with .env, unresolved detection |
 | **`azure_auth`** | Azure CLI token fetch (`az`/`az.cmd`), device code flow (start + poll), availability detection |
+| **`telemetry`** | OTEL observability — build OTLP/HTTP JSON payloads (traces, metrics, logs) and export to Azure Monitor Application Insights or any OTLP-compatible backend. Zero new dependencies (uses reqwest + serde_json). 5 metrics with low-cardinality dimensions, hierarchical trace spans, structured logs |
 | **`history`** | In-memory history store (max 1000), filtering by method/status/URL/source/run_id, trie-based URL autocomplete |
 | **`url_trie`** | Segment-aware trie — split URLs by `/`, `.`, `:`, `?`, `&`, `=` for frequency-ranked autocomplete and domain→path grouping |
 | **`env_file`** | Parse/write `.env` files with quotes, comments, and sorted output |
@@ -256,7 +286,7 @@ The Rust library powering all three frontends — **171 unit tests**, zero warni
 ### Running Tests
 
 ```bash
-# Core library tests (171 tests — parser, assertions, variables, runner, history, url_trie, http_client)
+# Core library tests (180 tests — parser, assertions, variables, runner, history, url_trie, http_client, telemetry)
 cd request-pilot
 cargo test -p request-pilot-core
 

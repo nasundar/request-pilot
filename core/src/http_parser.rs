@@ -9,10 +9,14 @@ pub struct ParsedRequest {
     pub body: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct TestSuite {
     pub variables: Vec<(String, String)>,
     pub blocks: Vec<TestBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_var: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_service: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -63,13 +67,27 @@ pub fn parse(content: &str) -> Vec<ParsedRequest> {
 pub fn parse_test_suite(content: &str) -> TestSuite {
     let mut variables = Vec::new();
     let mut blocks = Vec::new();
+    let mut telemetry_var: Option<String> = None;
+    let mut telemetry_service: Option<String> = None;
 
     let raw_blocks: Vec<&str> = content.split("###").collect();
 
-    for raw_block in raw_blocks {
+    for (chunk_idx, raw_block) in raw_blocks.iter().enumerate() {
         let block = raw_block.trim();
         if block.is_empty() {
             continue;
+        }
+
+        // The first chunk (before any ###) may contain file-level directives
+        if chunk_idx == 0 {
+            for line in block.lines() {
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix("# @telemetry_service ") {
+                    telemetry_service = Some(rest.trim().to_string());
+                } else if let Some(rest) = trimmed.strip_prefix("# @telemetry ") {
+                    telemetry_var = Some(rest.trim().to_string());
+                }
+            }
         }
 
         // Check if block contains @variables anywhere (not just first line)
@@ -88,7 +106,12 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
         }
     }
 
-    TestSuite { variables, blocks }
+    TestSuite {
+        variables,
+        blocks,
+        telemetry_var,
+        telemetry_service,
+    }
 }
 
 fn parse_variables_block(block: &str, variables: &mut Vec<(String, String)>) {
@@ -270,6 +293,17 @@ fn parse_extract_directive(text: &str) -> Option<Extract> {
 /// Generate .http file content from a TestSuite.
 pub fn generate_http_content(suite: &TestSuite) -> String {
     let mut output = String::new();
+
+    // File-level telemetry directives (before @variables)
+    if let Some(ref tv) = suite.telemetry_var {
+        output.push_str(&format!("# @telemetry {}\n", tv));
+    }
+    if let Some(ref ts) = suite.telemetry_service {
+        output.push_str(&format!("# @telemetry_service {}\n", ts));
+    }
+    if suite.telemetry_var.is_some() || suite.telemetry_service.is_some() {
+        output.push('\n');
+    }
 
     // Variables block
     if !suite.variables.is_empty() {
@@ -705,6 +739,7 @@ POST https://example.com/login";
         let suite = TestSuite {
             variables: vec![],
             blocks: vec![],
+            ..Default::default()
         };
         let output = generate_http_content(&suite);
         assert!(output.is_empty());
@@ -719,6 +754,7 @@ POST https://example.com/login";
                 ("token".into(), "abc123".into()),
             ],
             blocks: vec![],
+            ..Default::default()
         };
         let output = generate_http_content(&suite);
         assert!(output.contains("@variables"));
@@ -750,6 +786,7 @@ POST https://example.com/login";
                 assertions: vec![],
                 extracts: vec![],
             }],
+            ..Default::default()
         };
         let output = generate_http_content(&suite);
         assert!(output.contains("###"));
@@ -781,6 +818,7 @@ POST https://example.com/login";
                 assertions: vec![],
                 extracts: vec![],
             }],
+            ..Default::default()
         };
         let output = generate_http_content(&suite);
         assert!(output.contains("# @name Create User"));
@@ -827,6 +865,7 @@ POST https://example.com/login";
                     source_path: "response.body.0.id".into(),
                 }],
             }],
+            ..Default::default()
         };
         let output = generate_http_content(&suite);
         assert!(output.contains("### @test Check Users"));
@@ -920,6 +959,7 @@ POST https://example.com/login";
                     extracts: vec![],
                 },
             ],
+            ..Default::default()
         };
         let output = generate_http_content(&suite);
         assert!(output.contains("@variables"));
@@ -1009,6 +1049,7 @@ POST https://example.com/login";
                     extracts: vec![],
                 },
             ],
+            ..Default::default()
         };
 
         let generated = generate_http_content(&original);
@@ -1114,6 +1155,7 @@ POST https://example.com/login";
                 assertions: vec![],
                 extracts: vec![],
             }],
+            ..Default::default()
         };
         let content = generate_http_content(&suite);
         assert!(content.contains("# @description Tests something"));
@@ -1183,6 +1225,7 @@ grant_type=client_credentials
                 assertions: vec![],
                 extracts: vec![],
             }],
+            ..Default::default()
         };
         let content = generate_http_content(&suite);
         assert!(content.starts_with("@variables\n"), "Generated content should start with @variables");
@@ -1227,6 +1270,7 @@ grant_type=client_credentials
                 assertions: vec![],
                 extracts: vec![],
             }],
+            ..Default::default()
         };
         let content = generate_http_content(&suite);
         assert!(content.contains("# @depends Update User"));
@@ -1280,6 +1324,7 @@ grant_type=client_credentials
                 assertions: vec![],
                 extracts: vec![],
             }],
+            ..Default::default()
         };
         let content = generate_http_content(&suite);
         assert!(content.contains("# @group validation"));
@@ -1524,6 +1569,7 @@ Authorization: Bearer {{token}}
                 assertions: vec![],
                 extracts: vec![],
             }],
+            ..Default::default()
         };
         let content = generate_http_content(&suite);
         assert!(content.contains("# @mode app"));

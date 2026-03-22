@@ -54,6 +54,11 @@ function rpLog(level, message, data) {
 let azureAuthState = 'off';
 let azCliAvailable = false;
 
+// --- OTEL Telemetry ---
+// States: 'off' | 'configured' | 'sending' | 'active' | 'error'
+let telemetryState = 'off';
+let telemetryStats = []; // [{file, endpoint, traces, metrics, logs, errors, time_ms}]
+
 // --- Zoom ---
 let zoomLevel = parseInt(localStorage.getItem('rp-zoom') || '100', 10);
 const ZOOM_MIN = 50, ZOOM_MAX = 200, ZOOM_STEP = 10;
@@ -937,6 +942,7 @@ async function loadFile(file) {
     loadedFiles.push(fileEntry);
     const fileIdx = loadedFiles.length - 1;
     detectAzureAuthNeeded();
+    detectTelemetryConfig();
 
     // Populate envVars from .http file variable values (non-placeholders)
     if (suite.variables) {
@@ -1884,6 +1890,12 @@ async function runAllTests() {
   setRunning(true);
   rpLog('info', 'Run All started', { fileCount: loadedFiles.length, azureAuth: azureAuthState });
 
+  // Reset telemetry stats for this run
+  if (telemetryState !== 'off') {
+    telemetryStats = [];
+    setTelemetryState('sending');
+  }
+
   // Azure auth: use cached tokens if authenticated
   let azureExtraVars = [];
   const isAzureActive = azureAuthState === 'authenticated';
@@ -1950,6 +1962,7 @@ async function runAllTests() {
         // Remap results to align with original block indices
         file.results = remapResults(fi, results);
         pushRunHistory(file.name, results);
+        processTelemetryResult(file.name, results);
         totalPassed += results.passed;
         totalFailed += results.failed;
         totalSkipped += results.skipped;
@@ -5086,6 +5099,154 @@ function emitToLogPopout(entry) {
   if (popoutWindows.has('logsPanel')) {
     emit('popout-log-entry', entry).catch(() => {});
   }
+}
+
+// ── OTEL Telemetry ──
+
+function detectTelemetryConfig() {
+  let hasTelemetry = false;
+  for (const f of loadedFiles) {
+    if (f.suite.telemetry_var) {
+      hasTelemetry = true;
+      break;
+    }
+    // Fallback: check raw content for directive
+    if (f.content && /^#\s*@telemetry\s+\S/m.test(f.content)) {
+      hasTelemetry = true;
+      break;
+    }
+  }
+  const btn = $('#telemetryBtn');
+  if (hasTelemetry) {
+    btn.classList.add('visible');
+    if (telemetryState === 'off') setTelemetryState('configured');
+  } else {
+    btn.classList.remove('visible');
+    setTelemetryState('off');
+  }
+}
+
+function setTelemetryState(state) {
+  telemetryState = state;
+  const btn = $('#telemetryBtn');
+  const icon = $('#telemetryIcon');
+  const label = $('#telemetryLabel');
+  btn.classList.remove('active', 'sending', 'error');
+
+  switch (state) {
+    case 'off':
+      icon.textContent = '📡';
+      label.textContent = 'OTEL';
+      break;
+    case 'configured':
+      btn.classList.add('visible');
+      icon.textContent = '📡';
+      label.textContent = 'OTEL';
+      break;
+    case 'sending':
+      btn.classList.add('visible', 'sending');
+      icon.textContent = '📡';
+      label.textContent = 'Sending…';
+      break;
+    case 'active':
+      btn.classList.add('visible', 'active');
+      icon.textContent = '📡';
+      label.textContent = 'OTEL ✓';
+      break;
+    case 'error':
+      btn.classList.add('visible', 'error');
+      icon.textContent = '📡';
+      label.textContent = 'OTEL ✗';
+      break;
+  }
+}
+
+function processTelemetryResult(fileName, results) {
+  if (!results.telemetry) return;
+  const t = results.telemetry;
+  const entry = {
+    file: fileName,
+    endpoint: t.endpoint || '',
+    traces: t.traces_sent || 0,
+    metrics: t.metrics_sent || 0,
+    logs: t.logs_sent || 0,
+    errors: t.errors || [],
+    time_ms: t.export_time_ms || 0,
+  };
+  telemetryStats.push(entry);
+
+  const hasErrors = entry.errors.length > 0;
+  if (hasErrors) {
+    setTelemetryState('error');
+    rpLog('warn', `Telemetry export had errors for ${fileName}`, entry.errors);
+  } else {
+    setTelemetryState('active');
+  }
+  rpLog('info', `Telemetry exported for ${fileName}`, {
+    traces: entry.traces,
+    metrics: entry.metrics,
+    logs: entry.logs,
+    time_ms: entry.time_ms,
+  });
+  renderTelemetryTooltip();
+}
+
+function renderTelemetryTooltip() {
+  const tooltip = $('#telemetryTooltip');
+  if (!tooltip) return;
+  if (telemetryStats.length === 0) {
+    tooltip.innerHTML = '<h4>📡 OTEL Telemetry</h4><div class="tt-row"><span class="tt-key">No data exported yet</span></div>';
+    return;
+  }
+
+  // Aggregate totals
+  let totalTraces = 0, totalMetrics = 0, totalLogs = 0, totalErrors = 0, totalTime = 0;
+  const allErrors = [];
+  for (const s of telemetryStats) {
+    totalTraces += s.traces;
+    totalMetrics += s.metrics;
+    totalLogs += s.logs;
+    totalErrors += s.errors.length;
+    totalTime += s.time_ms;
+    allErrors.push(...s.errors);
+  }
+
+  const endpoint = telemetryStats[0]?.endpoint || 'N/A';
+  const maskedEndpoint = endpoint.length > 40
+    ? endpoint.slice(0, 30) + '…' + endpoint.slice(-10)
+    : endpoint;
+
+  let html = `<h4>📡 OTEL Telemetry</h4>`;
+  html += `<div class="tt-row"><span class="tt-key">Endpoint</span><span class="tt-val" title="${escHtml(endpoint)}">${escHtml(maskedEndpoint)}</span></div>`;
+  html += `<div class="tt-row"><span class="tt-key">Traces</span><span class="tt-val success">${totalTraces}</span></div>`;
+  html += `<div class="tt-row"><span class="tt-key">Metrics</span><span class="tt-val success">${totalMetrics}</span></div>`;
+  html += `<div class="tt-row"><span class="tt-key">Logs</span><span class="tt-val success">${totalLogs}</span></div>`;
+  html += `<div class="tt-row"><span class="tt-key">Export time</span><span class="tt-val">${totalTime}ms</span></div>`;
+
+  if (telemetryStats.length > 1) {
+    html += `<div class="tt-section"><div class="tt-section-title">Per File</div>`;
+    for (const s of telemetryStats) {
+      const status = s.errors.length > 0 ? '✗' : '✓';
+      const cls = s.errors.length > 0 ? 'error' : 'success';
+      html += `<div class="tt-row"><span class="tt-key">${escHtml(s.file)}</span><span class="tt-val ${cls}">${status} ${s.traces}T ${s.metrics}M ${s.logs}L</span></div>`;
+    }
+    html += `</div>`;
+  }
+
+  if (allErrors.length > 0) {
+    html += `<div class="tt-section"><div class="tt-section-title">Errors (${allErrors.length})</div><div class="tt-error-list">`;
+    for (const e of allErrors.slice(0, 5)) {
+      html += `<div>${escHtml(e)}</div>`;
+    }
+    if (allErrors.length > 5) html += `<div>… and ${allErrors.length - 5} more</div>`;
+    html += `</div></div>`;
+  }
+
+  tooltip.innerHTML = html;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 // --- Initialize ---

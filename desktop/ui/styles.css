@@ -3186,6 +3186,136 @@ input:focus, select:focus, textarea:focus { outline: none; }
 .tour-picker-dismiss:hover { color: var(--text-secondary); }
 
 /* ── Azure Auth Button ───────────────────────────────────── */
+/* ── Telemetry Indicator Button ── */
+.telemetry-btn {
+  display: none; /* hidden until a file with @telemetry is loaded */
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  position: relative;
+}
+.telemetry-btn:hover {
+  background: var(--hover);
+}
+.telemetry-btn.visible {
+  display: flex;
+}
+/* State: active — green glow */
+.telemetry-btn.active {
+  border-color: rgba(76, 175, 80, 0.5);
+  background: rgba(76, 175, 80, 0.08);
+  color: #4caf50;
+}
+.telemetry-btn.active:hover {
+  background: rgba(76, 175, 80, 0.18);
+  border-color: #4caf50;
+}
+/* State: sending — pulsing cyan */
+.telemetry-btn.sending {
+  border-color: rgba(0, 188, 212, 0.5);
+  background: rgba(0, 188, 212, 0.08);
+  color: #00bcd4;
+  animation: telemetry-pulse 1.2s ease-in-out infinite;
+}
+@keyframes telemetry-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0, 188, 212, 0); }
+  50% { box-shadow: 0 0 8px 2px rgba(0, 188, 212, 0.25); }
+}
+/* State: error — red */
+.telemetry-btn.error {
+  border-color: rgba(244, 67, 54, 0.5);
+  background: rgba(244, 67, 54, 0.08);
+  color: #f44336;
+}
+.telemetry-btn.error:hover {
+  background: rgba(244, 67, 54, 0.18);
+  border-color: #f44336;
+}
+.telemetry-icon {
+  font-size: 14px;
+}
+.telemetry-label {
+  font-size: 11px;
+  letter-spacing: 0.5px;
+}
+
+/* Telemetry tooltip */
+.telemetry-tooltip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 280px;
+  max-width: 380px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.telemetry-btn:hover .telemetry-tooltip,
+.telemetry-tooltip.pinned {
+  display: block;
+}
+.telemetry-tooltip h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+  font-weight: 700;
+}
+.telemetry-tooltip .tt-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.telemetry-tooltip .tt-row:last-child {
+  border-bottom: none;
+}
+.telemetry-tooltip .tt-key {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.telemetry-tooltip .tt-val {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+}
+.telemetry-tooltip .tt-val.success { color: #4caf50; }
+.telemetry-tooltip .tt-val.error { color: #f44336; }
+.telemetry-tooltip .tt-section {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.telemetry-tooltip .tt-section-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.telemetry-tooltip .tt-error-list {
+  max-height: 80px;
+  overflow-y: auto;
+  font-size: 11px;
+  color: #f44336;
+  font-family: var(--font-mono);
+}
+
 .azure-auth-btn {
   display: none; /* hidden until a file with dev_auth_resource is loaded */
   align-items: center;

@@ -6,6 +6,7 @@ use tokio::task::JoinSet;
 use crate::assertions::{self, AssertionResult};
 use crate::http_client;
 use crate::http_parser::{TestBlock, TestSuite};
+use crate::telemetry::{self, TelemetryCollector, TelemetryStats};
 use crate::variables::VariableStore;
 
 /// Lightweight progress event emitted per-block during suite execution.
@@ -39,6 +40,8 @@ pub struct TestRunResults {
     pub total_time_ms: u64,
     pub block_results: Vec<BlockResult>,
     pub final_variables: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<TelemetryStats>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -235,6 +238,65 @@ async fn execute_block(block: TestBlock, var_store: VariableStore) -> BlockResul
     }
 }
 
+/// Feed a completed block result into the telemetry collector.
+fn record_block_telemetry(
+    telemetry: &mut Option<TelemetryCollector>,
+    result: &BlockResult,
+    group: Option<&str>,
+) {
+    let t = match telemetry.as_mut() {
+        Some(t) => t,
+        None => return,
+    };
+
+    let assertions: Vec<(String, String, String, bool)> = result
+        .assertion_results
+        .iter()
+        .map(|a| {
+            (
+                a.assertion.clone(),
+                a.expected.clone().unwrap_or_default(),
+                a.actual.clone().unwrap_or_default(),
+                a.passed,
+            )
+        })
+        .collect();
+
+    let extracts: Vec<(String, Option<String>, bool)> = result
+        .extract_results
+        .iter()
+        .map(|e| (e.variable.clone(), e.value.clone(), e.success))
+        .collect();
+
+    let http_method = if result.request_method.is_empty() {
+        None
+    } else {
+        Some(result.request_method.as_str())
+    };
+    let http_url = if result.request_url.is_empty() {
+        None
+    } else {
+        Some(result.request_url.as_str())
+    };
+    let http_status = result.response.as_ref().map(|r| r.status);
+    let http_time = result.response.as_ref().map(|_| result.time_ms);
+
+    t.block_complete(
+        &result.name,
+        &result.block_type,
+        group,
+        &result.status,
+        result.time_ms,
+        http_method,
+        http_url,
+        http_status,
+        http_time,
+        &assertions,
+        &extracts,
+        result.error.as_deref(),
+    );
+}
+
 /// Run test blocks with group-based parallelism using topological waves.
 async fn run_tests_with_groups(
     tests: &[&TestBlock],
@@ -381,6 +443,20 @@ async fn run_suite_inner(
     let mut var_store = VariableStore::from_pairs(&suite.variables);
     var_store.merge(extra_variables);
 
+    // ── Initialize telemetry if configured ──
+    let mut telemetry: Option<TelemetryCollector> = None;
+    if let Some(ref tvar) = suite.telemetry_var {
+        let conn_str = var_store.get(tvar).unwrap_or_default();
+        if let Some(mut config) = telemetry::parse_connection_string(&conn_str) {
+            config.service_name = suite
+                .telemetry_service
+                .clone()
+                .unwrap_or_else(|| "request-pilot".to_string());
+            let file_name = tvar.clone(); // use variable name as fallback identifier
+            telemetry = Some(TelemetryCollector::new(config, &file_name));
+        }
+    }
+
     // Partition blocks by type (preserving file order)
     let mut setups: Vec<&TestBlock> = Vec::new();
     let mut tests: Vec<&TestBlock> = Vec::new();
@@ -405,6 +481,11 @@ async fn run_suite_inner(
     let tests: Vec<&TestBlock> = tests.into_iter().filter(mode_filter).collect();
     let teardowns: Vec<&TestBlock> = teardowns.into_iter().filter(mode_filter).collect();
 
+    let total_blocks = setups.len() + tests.len() + teardowns.len();
+    if let Some(ref mut t) = telemetry {
+        t.suite_start(total_blocks);
+    }
+
     let mut block_results: Vec<BlockResult> = Vec::new();
     let mut setup_failed = false;
     let total_start = std::time::Instant::now();
@@ -425,6 +506,7 @@ async fn run_suite_inner(
             setup_failed = true;
         }
         emit_completed(&handler, &result);
+        record_block_telemetry(&mut telemetry, &result, block.group.as_deref());
         block_results.push(result);
         if setup_failed {
             break;
@@ -434,6 +516,9 @@ async fn run_suite_inner(
     // ── Phase 2: Tests — parallel with dependency graph ──
     if !setup_failed {
         let test_results = run_tests_with_groups(&tests, &mut var_store, &handler).await;
+        for (result, block) in test_results.iter().zip(tests.iter()) {
+            record_block_telemetry(&mut telemetry, result, block.group.as_deref());
+        }
         block_results.extend(test_results);
     } else {
         // Skip all tests
@@ -444,7 +529,9 @@ async fn run_suite_inner(
                 &block.block_type,
                 "Skipped due to setup failure",
             );
-            block_results.push(make_skipped_result(block, "Skipped due to setup failure"));
+            let skip_result = make_skipped_result(block, "Skipped due to setup failure");
+            record_block_telemetry(&mut telemetry, &skip_result, block.group.as_deref());
+            block_results.push(skip_result);
         }
     }
 
@@ -460,6 +547,7 @@ async fn run_suite_inner(
             }
         }
         emit_completed(&handler, &result);
+        record_block_telemetry(&mut telemetry, &result, block.group.as_deref());
         block_results.push(result);
     }
 
@@ -477,6 +565,14 @@ async fn run_suite_inner(
         .filter(|r| r.status == "skipped")
         .count();
 
+    // ── Finalize and export telemetry ──
+    let telemetry_stats = if let Some(mut t) = telemetry {
+        t.suite_complete(passed, failed, skipped, total_time_ms);
+        Some(t.export().await)
+    } else {
+        None
+    };
+
     TestRunResults {
         passed,
         failed,
@@ -484,6 +580,7 @@ async fn run_suite_inner(
         total_time_ms,
         block_results,
         final_variables: var_store.to_map(),
+        telemetry: telemetry_stats,
     }
 }
 
@@ -611,6 +708,7 @@ mod tests {
             total_time_ms: 0,
             block_results: Vec::new(),
             final_variables: HashMap::new(),
+            telemetry: None,
         };
         assert_eq!(results.passed, 0);
         assert!(results.block_results.is_empty());
@@ -687,6 +785,7 @@ mod tests {
                 ("token".to_string(), "abc123".to_string()),
             ],
             blocks: Vec::new(),
+            ..Default::default()
         };
         let result = resolve_variables_only(&suite, &[], None).await.unwrap();
         assert_eq!(result.get("host").unwrap(), "example.com");
@@ -698,6 +797,7 @@ mod tests {
         let suite = TestSuite {
             variables: vec![("host".to_string(), "example.com".to_string())],
             blocks: Vec::new(),
+            ..Default::default()
         };
         let extras = vec![("env".to_string(), "staging".to_string())];
         let result = resolve_variables_only(&suite, &extras, None).await.unwrap();
@@ -716,6 +816,7 @@ mod tests {
                 make_block("test", "my_test", Vec::new(), vec![], None),
                 make_block("teardown", "my_teardown", Vec::new(), vec![], None),
             ],
+            ..Default::default()
         };
         let result = resolve_variables_only(&suite, &[], None).await.unwrap();
         assert_eq!(result.len(), 1);
@@ -740,6 +841,7 @@ mod tests {
                 vec![],
                 None,
             )],
+            ..Default::default()
         };
         let result = resolve_variables_only(&suite, &[], None).await.unwrap();
         assert_eq!(result.get("static_var").unwrap(), "hello");
@@ -760,6 +862,7 @@ mod tests {
                 make_block("test", "B", vec![], vec![], Some("group1")),
                 make_block("test", "C", vec![], vec![], Some("group2")),
             ],
+            ..Default::default()
         };
         let results = run_suite_inner(&suite, &[], None, None).await;
         assert_eq!(results.block_results.len(), 3);
@@ -783,6 +886,7 @@ mod tests {
                     Some("group-b"),
                 ),
             ],
+            ..Default::default()
         };
         let results = run_suite_inner(&suite, &[], None, None).await;
         assert_eq!(results.block_results.len(), 2);
@@ -801,6 +905,7 @@ mod tests {
                 make_block("test", "Solo2", vec![], vec![], None),
                 make_block("test", "Solo3", vec![], vec![], None),
             ],
+            ..Default::default()
         };
         let results = run_suite_inner(&suite, &[], None, None).await;
         assert_eq!(results.block_results.len(), 3);
@@ -816,6 +921,7 @@ mod tests {
                 make_block("test", "T2", vec![], vec![], Some("tests")),
                 make_block("teardown", "Cleanup", vec![], vec![], None),
             ],
+            ..Default::default()
         };
         let results = run_suite_inner(&suite, &[], None, None).await;
         // Setup fails (unreachable addr) → tests skipped, but teardown always runs
@@ -843,6 +949,7 @@ mod tests {
                     Some("group-b"),
                 ),
             ],
+            ..Default::default()
         };
         let results = run_suite_inner(&suite, &[], None, None).await;
         assert_eq!(results.block_results.len(), 2);
@@ -860,6 +967,7 @@ mod tests {
                 make_block("test", "T1", vec![], vec![], None),
                 make_block("teardown", "Cleanup", vec![], vec![], None),
             ],
+            ..Default::default()
         };
         let results = run_suite_inner(&suite, &[], None, None).await;
         assert_eq!(results.block_results.len(), 3);
@@ -880,6 +988,7 @@ mod tests {
                 make_block("test", "Second", vec![], vec![], Some("g2")),
                 make_block("test", "Third", vec![], vec![], Some("g3")),
             ],
+            ..Default::default()
         };
         let results = run_suite_inner(&suite, &[], None, None).await;
         assert_eq!(results.block_results[0].name, "First");

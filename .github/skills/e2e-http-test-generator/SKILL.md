@@ -79,6 +79,8 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 # @extract var_name = $.json.path     — save response value for later blocks
 # @mode app|dev                    — restrict to app mode or dev mode (mutually exclusive auth)
 # @dev_auth <scope>               — Azure scope for user auth (used with @mode app)
+# @telemetry <connection_var>      — (file-level) enable OTEL telemetry export using this variable's connection string
+# @telemetry_service <name>        — (file-level) override the service.name resource attribute (defaults to filename)
 ```
 
 **Assertion operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `contains`
@@ -421,6 +423,126 @@ Authorization: Bearer {{access_token}}
 - `# @dev_auth <scope>` on a `@mode app` block tells the app which Azure scope to request when authenticating the user
 - The injected token uses the same variable name (`access_token`) so downstream tests work unchanged
 
+### Pattern 9: E2E Observability — OTEL Telemetry
+
+When test files need to export traces, metrics, and logs to an OTLP-compatible backend (e.g., Azure Monitor Application Insights), add the `# @telemetry` file-level directive. This instruments the entire test run with OTEL telemetry — no code changes needed in test blocks.
+
+#### Telemetry Directives (file-level, before @variables)
+
+```http
+# @telemetry appinsights_connection_string
+# @telemetry_service my-api-e2e-tests
+
+@variables
+# --- Telemetry (from .env) ---
+appinsights_connection_string =
+
+# --- Environment ---
+base_url = https://api.example.com
+```
+
+**Connection string format (Azure Application Insights):**
+```
+InstrumentationKey=abc-123;IngestionEndpoint=https://eastus-1.in.applicationinsights.azure.com
+```
+
+Also supports plain OTLP endpoints: `https://my-otel-collector:4318`
+
+#### What Gets Exported
+
+| Signal | Content | Purpose |
+|--------|---------|---------|
+| **Traces** | Root span per suite, child spans per block, grandchild per HTTP request. Assertions/extracts as span events. | Investigation of failures |
+| **Metrics** | `rp.suite.runs`, `rp.suite.duration`, `rp.block.runs`, `rp.block.duration`, `rp.assertion.total` — low-cardinality dimensions (file, block_type, outcome) | Dashboards and alerts |
+| **Logs** | Structured log records for suite start, block completion, assertion failures, HTTP errors | Debugging and auditing |
+
+#### Example: Full Test File with Telemetry
+
+```http
+# ============================================================
+# User API — E2E Tests with OTEL Telemetry
+#
+# Exports traces, metrics, and logs to Application Insights
+# on every run for dashboarding and alerting.
+#
+# Test Scenarios:
+#   Setup: Authenticate, Create User
+#   Tests: Get User, Update User
+#   Teardown: Delete User
+#
+# Prerequisites:
+#   - appinsights_connection_string in .env
+# ============================================================
+
+# @telemetry appinsights_connection_string
+# @telemetry_service user-api-e2e
+
+@variables
+# --- Telemetry ---
+appinsights_connection_string =
+
+# --- Auth ---
+auth_url = https://login.microsoftonline.com/your-tenant-id
+client_id = your-client-id
+client_secret = your-client-secret
+auth_scope = https://api.example.com/.default
+
+# --- Environment ---
+base_url = https://api.example.com/v1
+
+### @setup Authenticate
+# @mode app
+# @dev_auth https://api.example.com/.default
+POST {{auth_url}}/oauth2/v2.0/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope={{auth_scope}}
+
+# @extract access_token = $.access_token
+# @assert status == 200
+
+### @setup Create User
+POST {{base_url}}/users
+Authorization: Bearer {{access_token}}
+Content-Type: application/json
+
+{ "name": "e2e-user-{{$uuid}}", "email": "e2e-{{$uuid}}@test.com" }
+
+# @extract user_id = $.id
+# @assert status == 201
+
+### @test Get User
+GET {{base_url}}/users/{{user_id}}
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @assert $.id == {{user_id}}
+
+### @test Update User
+PATCH {{base_url}}/users/{{user_id}}
+Authorization: Bearer {{access_token}}
+Content-Type: application/json
+
+{ "name": "updated-e2e-user" }
+
+# @assert status == 200
+
+### @teardown Delete User
+DELETE {{base_url}}/users/{{user_id}}
+Authorization: Bearer {{access_token}}
+
+# @assert status >= 200
+# @assert status <= 204
+```
+
+**Rules:**
+- `# @telemetry <var>` must appear before the `@variables` block (file-level directive)
+- The variable value should be an Azure App Insights connection string or a plain OTLP endpoint URL
+- Keep connection strings in `.env` files, not in the `.http` file
+- `# @telemetry_service` is optional — defaults to the filename
+- Telemetry export never fails the test run — errors are captured in stats
+- The desktop app shows a 📡 indicator when telemetry is configured
+
 ## Common Pitfalls
 
 ### Comments leaking into request body
@@ -488,6 +610,7 @@ access_token =
 - **Use `{{$uuid}}` in resource names** to avoid collisions between test runs
 - **Use `# @mode app` on client-credentials auth blocks** — marks them as app-mode-only so dev mode can skip them and use Azure CLI user auth instead. Add `# @dev_auth <scope>` to specify the Azure scope for user auth.
 - **Use `# @dev_auth <scope>` on `@mode app` token-fetch blocks** — specifies the Azure scope for user auth. When the user authenticates via device code flow, the app fetches a user token with this scope and injects it into the block's `@extract` variable.
+- **Add `# @telemetry` for E2E observability** — when the test file should export OTEL telemetry (traces, metrics, logs), add `# @telemetry <connection_var>` as a file-level directive before `@variables`. The connection variable should hold an Azure App Insights connection string or a plain OTLP endpoint URL. Keep the actual connection string in a `.env` file. Optionally add `# @telemetry_service <name>` to set the `service.name` resource attribute (defaults to filename).
 - **Comments explain non-obvious logic** — especially complex assertions or why a specific test exists
 - **Always start with a Test Plan header comment** — a structured comment block listing all test scenarios, grouped by type and group name, with prerequisites and assertion summary (see Pattern 7)
 - **Section decoration comments MUST be placed AFTER `###`, not before**— the parser splits the file at `###` boundaries, so any comments between blocks that appear before the next `###` become part of the previous block's request body. Put section headers, group labels, and decorative separators immediately after a `###` line:
