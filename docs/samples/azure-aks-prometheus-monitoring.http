@@ -10,15 +10,16 @@
 # Prerequisites:
 #   - AKS cluster with Azure Monitor (Managed Prometheus) enabled
 #   - Azure AD app registration with Monitoring Reader + AKS Reader
-#   - (Optional) appinsights_connection_string in .env for telemetry
+#   - (Optional) appinsights_resource_id in .env for telemetry
 # ============================================================
 
-# @telemetry appinsights_connection_string
+# @telemetry appinsights_resource_id
+# @telemetry_token arm_token
 # @telemetry_service aks-prometheus-e2e
 
 @variables
-# --- Telemetry (from .env, optional) ---
-appinsights_connection_string =
+# --- Telemetry ---
+appinsights_resource_id = /subscriptions/your-subscription-id/resourceGroups/your-resource-group/providers/microsoft.insights/components/your-app-insights
 
 # --- Authentication ---
 tenant_id = your-tenant-id
@@ -42,6 +43,7 @@ Content-Type: application/x-www-form-urlencoded
 grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope=https://management.azure.com/.default
 
 # @extract access_token = $.access_token
+# @extract arm_token = $.access_token
 # @assert status == 200
 # @assert $.access_token != null
 

@@ -446,14 +446,49 @@ async fn run_suite_inner(
     // ── Initialize telemetry if configured ──
     let mut telemetry: Option<TelemetryCollector> = None;
     if let Some(ref tvar) = suite.telemetry_var {
-        let conn_str = var_store.get(tvar).unwrap_or_default();
-        if let Some(mut config) = telemetry::parse_connection_string(&conn_str) {
-            config.service_name = suite
-                .telemetry_service
-                .clone()
-                .unwrap_or_else(|| "request-pilot".to_string());
-            let file_name = tvar.clone(); // use variable name as fallback identifier
-            telemetry = Some(TelemetryCollector::new(config, &file_name));
+        let telem_value = var_store.get(tvar).unwrap_or_default();
+        let service_name = suite
+            .telemetry_service
+            .clone()
+            .unwrap_or_else(|| "request-pilot".to_string());
+
+        let config = if let Some(mut cfg) = telemetry::parse_connection_string(&telem_value) {
+            // Connection string or plain OTLP URL — use directly
+            cfg.service_name = service_name;
+            Some(cfg)
+        } else if telem_value.starts_with("/subscriptions/") {
+            // ARM resource ID — fetch OTLP endpoints
+            let token = suite
+                .telemetry_token
+                .as_ref()
+                .and_then(|tv| {
+                    let v = var_store.get(tv).unwrap_or_default();
+                    if v.is_empty() { None } else { Some(v) }
+                });
+            match token {
+                Some(t) => {
+                    match telemetry::fetch_otlp_endpoints(&telem_value, &t).await {
+                        Ok(mut cfg) => {
+                            cfg.service_name = service_name;
+                            Some(cfg)
+                        }
+                        Err(e) => {
+                            eprintln!("[telemetry] Failed to fetch OTLP endpoints: {}", e);
+                            None
+                        }
+                    }
+                }
+                None => {
+                    eprintln!("[telemetry] Resource ID provided but no telemetry_token variable resolved");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(cfg) = config {
+            telemetry = Some(TelemetryCollector::new(cfg, tvar));
         }
     }
 

@@ -79,7 +79,8 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 # @extract var_name = $.json.path     — save response value for later blocks
 # @mode app|dev                    — restrict to app mode or dev mode (mutually exclusive auth)
 # @dev_auth <scope>               — Azure scope for user auth (used with @mode app)
-# @telemetry <connection_var>      — (file-level) enable OTEL telemetry export using this variable's connection string
+# @telemetry <var>                 — (file-level) enable OTEL telemetry export; var holds an App Insights resource ID or connection string
+# @telemetry_token <var>           — (file-level) variable holding a Bearer token with ARM access (required for resource ID mode)
 # @telemetry_service <name>        — (file-level) override the service.name resource attribute (defaults to filename)
 ```
 
@@ -425,26 +426,39 @@ Authorization: Bearer {{access_token}}
 
 ### Pattern 9: E2E Observability — OTEL Telemetry
 
-When test files need to export traces, metrics, and logs to an OTLP-compatible backend (e.g., Azure Monitor Application Insights), add the `# @telemetry` file-level directive. This instruments the entire test run with OTEL telemetry — no code changes needed in test blocks.
+When test files need to export traces, metrics, and logs to Azure Monitor Application Insights (or any OTLP-compatible backend), add the `# @telemetry` file-level directive. This instruments the entire test run with OTEL telemetry — no code changes needed in test blocks.
+
+The **primary approach** uses an App Insights resource ID — the system calls the ARM API to fetch dedicated OTLP endpoints (`OTLPTracesEndpoint`, `OTLPMetricsEndpoint`, `OTLPLogsEndpoint`) automatically. A connection string approach is also supported for backward compatibility.
 
 #### Telemetry Directives (file-level, before @variables)
 
+**Resource ID approach (recommended):**
 ```http
-# @telemetry appinsights_connection_string
+# @telemetry appinsights_resource_id
+# @telemetry_token arm_token
 # @telemetry_service my-api-e2e-tests
 
 @variables
-# --- Telemetry (from .env) ---
-appinsights_connection_string =
+# --- Telemetry ---
+appinsights_resource_id = /subscriptions/xxx/resourceGroups/xxx/providers/microsoft.insights/components/xxx
+arm_token =
 
 # --- Environment ---
 base_url = https://api.example.com
 ```
 
-**Connection string format (Azure Application Insights):**
+The `arm_token` variable is populated by the Azure auth setup block (see Pattern 1). The system GETs `https://management.azure.com{resource_id}?api-version=2025-01-23-preview` using the ARM token and extracts the per-signal OTLP endpoints from the response.
+
+**Connection string approach (alternative):**
+```http
+# @telemetry appinsights_connection_string
+# @telemetry_service my-api-e2e-tests
+
+@variables
+appinsights_connection_string =
 ```
-InstrumentationKey=abc-123;IngestionEndpoint=https://eastus-1.in.applicationinsights.azure.com
-```
+
+If the variable resolves to `InstrumentationKey=...;IngestionEndpoint=...`, the system uses the legacy `x-ms-ikey` auth path.
 
 Also supports plain OTLP endpoints: `https://my-otel-collector:4318`
 
@@ -452,9 +466,9 @@ Also supports plain OTLP endpoints: `https://my-otel-collector:4318`
 
 | Signal | Content | Purpose |
 |--------|---------|---------|
-| **Traces** | Root span per suite, child spans per block, grandchild per HTTP request. Assertions/extracts as span events. | Investigation of failures |
-| **Metrics** | `rp.suite.runs`, `rp.suite.duration`, `rp.block.runs`, `rp.block.duration`, `rp.assertion.total` — low-cardinality dimensions (file, block_type, outcome) | Dashboards and alerts |
-| **Logs** | Structured log records for suite start, block completion, assertion failures, HTTP errors | Debugging and auditing |
+| **Traces** | Root span per suite, child spans per block, grandchild per HTTP request. Assertions/extracts as span events. Exported to the dedicated `OTLPTracesEndpoint`. | Investigation of failures |
+| **Metrics** | `rp.suite.runs`, `rp.suite.duration`, `rp.block.runs`, `rp.block.duration`, `rp.assertion.total` — low-cardinality dimensions (file, block_type, outcome). Exported to the dedicated `OTLPMetricsEndpoint`. | Dashboards and alerts |
+| **Logs** | Structured log records for suite start, block completion, assertion failures, HTTP errors. Exported to the dedicated `OTLPLogsEndpoint`. | Debugging and auditing |
 
 #### Example: Full Test File with Telemetry
 
@@ -471,26 +485,40 @@ Also supports plain OTLP endpoints: `https://my-otel-collector:4318`
 #   Teardown: Delete User
 #
 # Prerequisites:
-#   - appinsights_connection_string in .env
+#   - App Insights resource ID (or connection string in .env)
+#   - ARM access token (from Azure auth setup or dev mode)
 # ============================================================
 
-# @telemetry appinsights_connection_string
+# @telemetry appinsights_resource_id
+# @telemetry_token arm_token
 # @telemetry_service user-api-e2e
 
 @variables
 # --- Telemetry ---
-appinsights_connection_string =
+appinsights_resource_id = /subscriptions/your-subscription-id/resourceGroups/your-resource-group/providers/microsoft.insights/components/your-app-insights
 
 # --- Auth ---
 auth_url = https://login.microsoftonline.com/your-tenant-id
 client_id = your-client-id
 client_secret = your-client-secret
 auth_scope = https://api.example.com/.default
+arm_scope = https://management.azure.com/.default
 
 # --- Environment ---
 base_url = https://api.example.com/v1
 
-### @setup Authenticate
+### @setup Fetch ARM Token
+# @mode app
+# @dev_auth https://management.azure.com/.default
+POST {{auth_url}}/oauth2/v2.0/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope={{arm_scope}}
+
+# @extract arm_token = $.access_token
+# @assert status == 200
+
+### @setup Authenticate API
 # @mode app
 # @dev_auth https://api.example.com/.default
 POST {{auth_url}}/oauth2/v2.0/token
@@ -537,8 +565,10 @@ Authorization: Bearer {{access_token}}
 
 **Rules:**
 - `# @telemetry <var>` must appear before the `@variables` block (file-level directive)
-- The variable value should be an Azure App Insights connection string or a plain OTLP endpoint URL
-- Keep connection strings in `.env` files, not in the `.http` file
+- The variable can hold an App Insights ARM resource ID (`/subscriptions/.../microsoft.insights/components/...`) or a connection string (`InstrumentationKey=...;IngestionEndpoint=...`) or a plain OTLP endpoint URL
+- When using a resource ID, add `# @telemetry_token <var>` pointing to a variable with a Bearer token that has ARM read access — the system calls `https://management.azure.com{resource_id}?api-version=2025-01-23-preview` to fetch dedicated OTLP endpoints
+- Connection string mode is still supported for backward compatibility — if the value starts with `InstrumentationKey=`, the system uses the legacy `x-ms-ikey` auth path
+- Keep resource IDs and connection strings in `.env` files or extract tokens via setup blocks
 - `# @telemetry_service` is optional — defaults to the filename
 - Telemetry export never fails the test run — errors are captured in stats
 - The desktop app shows a 📡 indicator when telemetry is configured
@@ -610,7 +640,7 @@ access_token =
 - **Use `{{$uuid}}` in resource names** to avoid collisions between test runs
 - **Use `# @mode app` on client-credentials auth blocks** — marks them as app-mode-only so dev mode can skip them and use Azure CLI user auth instead. Add `# @dev_auth <scope>` to specify the Azure scope for user auth.
 - **Use `# @dev_auth <scope>` on `@mode app` token-fetch blocks** — specifies the Azure scope for user auth. When the user authenticates via device code flow, the app fetches a user token with this scope and injects it into the block's `@extract` variable.
-- **Add `# @telemetry` for E2E observability** — when the test file should export OTEL telemetry (traces, metrics, logs), add `# @telemetry <connection_var>` as a file-level directive before `@variables`. The connection variable should hold an Azure App Insights connection string or a plain OTLP endpoint URL. Keep the actual connection string in a `.env` file. Optionally add `# @telemetry_service <name>` to set the `service.name` resource attribute (defaults to filename).
+- **Add `# @telemetry` for E2E observability** — when the test file should export OTEL telemetry (traces, metrics, logs), add `# @telemetry <var>` as a file-level directive before `@variables`. The variable can hold an App Insights ARM resource ID (recommended — the system fetches dedicated OTLP endpoints via ARM) or a connection string (`InstrumentationKey=...`), or a plain OTLP endpoint URL. When using a resource ID, also add `# @telemetry_token <var>` pointing to the ARM Bearer token (from the auth setup block). Keep resource IDs and connection strings in `.env` files. Optionally add `# @telemetry_service <name>` to set the `service.name` resource attribute (defaults to filename).
 - **Comments explain non-obvious logic** — especially complex assertions or why a specific test exists
 - **Always start with a Test Plan header comment** — a structured comment block listing all test scenarios, grouped by type and group name, with prerequisites and assertion summary (see Pattern 7)
 - **Section decoration comments MUST be placed AFTER `###`, not before**— the parser splits the file at `###` boundaries, so any comments between blocks that appear before the next `###` become part of the previous block's request body. Put section headers, group labels, and decorative separators immediately after a `###` line:

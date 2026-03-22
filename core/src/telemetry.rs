@@ -4,11 +4,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ── Configuration ──
 
-/// Parsed telemetry configuration derived from a connection string.
+/// Parsed telemetry configuration with per-signal OTLP endpoints.
 #[derive(Debug, Clone)]
 pub struct TelemetryConfig {
-    pub endpoint: String,
-    pub instrumentation_key: Option<String>,
+    pub traces_endpoint: String,
+    pub metrics_endpoint: String,
+    pub logs_endpoint: String,
+    /// Optional auth header sent with every export request, e.g.
+    /// `("x-ms-ikey", "abc-123")` or `("Authorization", "Bearer xxx")`.
+    pub auth_header: Option<(String, String)>,
     pub service_name: String,
 }
 
@@ -26,16 +30,26 @@ pub struct TelemetryStats {
 
 // ── Connection String Parsing ──
 
-/// Parse an Azure Application Insights connection string into parts.
-/// Format: `InstrumentationKey=xxx;IngestionEndpoint=https://...`
-/// Also supports a plain OTLP endpoint URL (no key-value pairs).
+/// Parse a telemetry connection value into a `TelemetryConfig`.
+///
+/// Supports three formats:
+/// - **Connection string** (`InstrumentationKey=xxx;IngestionEndpoint=https://...`):
+///   builds per-signal endpoints from the ingestion endpoint and sets `x-ms-ikey` auth.
+/// - **ARM resource ID** (starts with `/subscriptions/`): returns `None` — the caller
+///   must use [`fetch_otlp_endpoints`] with a bearer token instead.
+/// - **Plain OTLP URL** (`https://...`): builds per-signal endpoints, no auth header.
 pub fn parse_connection_string(conn_str: &str) -> Option<TelemetryConfig> {
     let trimmed = conn_str.trim();
     if trimmed.is_empty() {
         return None;
     }
 
-    // Check if it's a key=value format (Azure App Insights connection string)
+    // ARM resource ID — needs async fetch, not handled here
+    if trimmed.starts_with("/subscriptions/") {
+        return None;
+    }
+
+    // Key=value format (Azure App Insights connection string)
     if trimmed.contains('=') && !trimmed.starts_with("http") {
         let mut parts: HashMap<&str, &str> = HashMap::new();
         for segment in trimmed.split(';') {
@@ -46,30 +60,112 @@ pub fn parse_connection_string(conn_str: &str) -> Option<TelemetryConfig> {
         }
 
         let ikey = parts.get("InstrumentationKey").map(|s| s.to_string());
-        let endpoint = parts
+        let base = parts
             .get("IngestionEndpoint")
             .map(|s| s.trim_end_matches('/').to_string())
             .unwrap_or_else(|| "https://dc.services.visualstudio.com".to_string());
 
-        if ikey.is_none() {
-            return None;
-        }
+        let ikey = ikey?;
 
         Some(TelemetryConfig {
-            endpoint,
-            instrumentation_key: ikey,
+            traces_endpoint: format!("{}/v1/traces", base),
+            metrics_endpoint: format!("{}/v1/metrics", base),
+            logs_endpoint: format!("{}/v1/logs", base),
+            auth_header: Some(("x-ms-ikey".to_string(), ikey)),
             service_name: String::new(), // filled in later
         })
     } else if trimmed.starts_with("http") {
         // Plain OTLP endpoint URL
+        let base = trimmed.trim_end_matches('/');
         Some(TelemetryConfig {
-            endpoint: trimmed.trim_end_matches('/').to_string(),
-            instrumentation_key: None,
+            traces_endpoint: format!("{}/v1/traces", base),
+            metrics_endpoint: format!("{}/v1/metrics", base),
+            logs_endpoint: format!("{}/v1/logs", base),
+            auth_header: None,
             service_name: String::new(),
         })
     } else {
         None
     }
+}
+
+/// Parse the JSON body returned by the ARM API for an App Insights resource.
+/// Returns `(traces_endpoint, metrics_endpoint, logs_endpoint)`.
+pub fn parse_arm_response(json_str: &str) -> Result<(String, String, String), String> {
+    let v: serde_json::Value =
+        serde_json::from_str(json_str).map_err(|e| format!("Invalid JSON from ARM API: {}", e))?;
+
+    let props = v
+        .get("properties")
+        .ok_or("ARM response missing 'properties' object")?;
+
+    let traces = props
+        .get("OTLPTracesEndpoint")
+        .and_then(|v| v.as_str())
+        .ok_or("ARM response missing properties.OTLPTracesEndpoint — ensure api-version=2025-01-23-preview and OTLP ingestion is enabled")?;
+
+    let metrics = props
+        .get("OTLPMetricsEndpoint")
+        .and_then(|v| v.as_str())
+        .ok_or("ARM response missing properties.OTLPMetricsEndpoint — ensure api-version=2025-01-23-preview and OTLP ingestion is enabled")?;
+
+    let logs = props
+        .get("OTLPLogsEndpoint")
+        .and_then(|v| v.as_str())
+        .ok_or("ARM response missing properties.OTLPLogsEndpoint — ensure api-version=2025-01-23-preview and OTLP ingestion is enabled")?;
+
+    Ok((
+        traces.to_string(),
+        metrics.to_string(),
+        logs.to_string(),
+    ))
+}
+
+/// Fetch OTLP endpoints from an Azure App Insights resource via ARM API.
+///
+/// `resource_id` is an ARM resource ID such as
+/// `/subscriptions/.../providers/microsoft.insights/components/my-ai`.
+/// `token` is a Bearer token for ARM API authentication.
+pub async fn fetch_otlp_endpoints(
+    resource_id: &str,
+    token: &str,
+) -> Result<TelemetryConfig, String> {
+    let url = format!(
+        "https://management.azure.com{}?api-version=2025-01-23-preview",
+        resource_id
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| format!("ARM API request failed: {}", e))?;
+
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+
+    if status >= 400 {
+        return Err(format!("ARM API returned HTTP {}: {}", status, body));
+    }
+
+    let (traces, metrics, logs) = parse_arm_response(&body)?;
+
+    Ok(TelemetryConfig {
+        traces_endpoint: traces,
+        metrics_endpoint: metrics,
+        logs_endpoint: logs,
+        auth_header: Some((
+            "Authorization".to_string(),
+            format!("Bearer {}", token),
+        )),
+        service_name: String::new(),
+    })
 }
 
 // ── OTLP JSON Types (subset needed for traces, metrics, logs) ──
@@ -675,8 +771,11 @@ impl TelemetryCollector {
             kv_str("telemetry.sdk.name", "request-pilot"),
             kv_str("telemetry.sdk.language", "rust"),
         ];
-        if let Some(ref ikey) = self.config.instrumentation_key {
-            attrs.push(kv_str("ai.ikey", ikey));
+        // Propagate ikey as resource attribute when using App Insights connection strings
+        if let Some((ref hdr, ref val)) = self.config.auth_header {
+            if hdr == "x-ms-ikey" {
+                attrs.push(kv_str("ai.ikey", val));
+            }
         }
         OtlpResource { attributes: attrs }
     }
@@ -887,7 +986,7 @@ impl TelemetryCollector {
         let start = Instant::now();
         let mut stats = TelemetryStats {
             enabled: true,
-            endpoint: self.config.endpoint.clone(),
+            endpoint: self.config.traces_endpoint.clone(),
             ..Default::default()
         };
 
@@ -922,15 +1021,15 @@ impl TelemetryCollector {
             .unwrap_or(0);
 
         // POST traces
-        if let Err(e) = self.post_payload(&client, "/v1/traces", &traces).await {
+        if let Err(e) = self.post_to(&client, &self.config.traces_endpoint, &traces).await {
             stats.errors.push(format!("Traces export: {}", e));
         }
         // POST metrics
-        if let Err(e) = self.post_payload(&client, "/v1/metrics", &metrics).await {
+        if let Err(e) = self.post_to(&client, &self.config.metrics_endpoint, &metrics).await {
             stats.errors.push(format!("Metrics export: {}", e));
         }
         // POST logs
-        if let Err(e) = self.post_payload(&client, "/v1/logs", &logs).await {
+        if let Err(e) = self.post_to(&client, &self.config.logs_endpoint, &logs).await {
             stats.errors.push(format!("Logs export: {}", e));
         }
 
@@ -938,19 +1037,18 @@ impl TelemetryCollector {
         stats
     }
 
-    async fn post_payload<T: Serialize>(
+    async fn post_to<T: Serialize>(
         &self,
         client: &reqwest::Client,
-        path: &str,
+        url: &str,
         payload: &T,
     ) -> Result<(), String> {
-        let url = format!("{}{}", self.config.endpoint, path);
         let mut req = client
-            .post(&url)
+            .post(url)
             .header("Content-Type", "application/json");
 
-        if let Some(ref ikey) = self.config.instrumentation_key {
-            req = req.header("x-ms-ikey", ikey);
+        if let Some((ref hdr, ref val)) = self.config.auth_header {
+            req = req.header(hdr, val);
         }
 
         let body = serde_json::to_string(payload).map_err(|e| e.to_string())?;
@@ -989,10 +1087,21 @@ mod tests {
     fn test_parse_appinsights_connection_string() {
         let cs = "InstrumentationKey=abc-123;IngestionEndpoint=https://eastus.in.applicationinsights.azure.com";
         let config = parse_connection_string(cs).unwrap();
-        assert_eq!(config.instrumentation_key.as_deref(), Some("abc-123"));
         assert_eq!(
-            config.endpoint,
-            "https://eastus.in.applicationinsights.azure.com"
+            config.traces_endpoint,
+            "https://eastus.in.applicationinsights.azure.com/v1/traces"
+        );
+        assert_eq!(
+            config.metrics_endpoint,
+            "https://eastus.in.applicationinsights.azure.com/v1/metrics"
+        );
+        assert_eq!(
+            config.logs_endpoint,
+            "https://eastus.in.applicationinsights.azure.com/v1/logs"
+        );
+        assert_eq!(
+            config.auth_header,
+            Some(("x-ms-ikey".to_string(), "abc-123".to_string()))
         );
     }
 
@@ -1000,23 +1109,42 @@ mod tests {
     fn test_parse_connection_string_trailing_slash() {
         let cs = "InstrumentationKey=key1;IngestionEndpoint=https://example.com/";
         let config = parse_connection_string(cs).unwrap();
-        assert_eq!(config.endpoint, "https://example.com");
+        assert_eq!(config.traces_endpoint, "https://example.com/v1/traces");
+        assert_eq!(config.metrics_endpoint, "https://example.com/v1/metrics");
+        assert_eq!(config.logs_endpoint, "https://example.com/v1/logs");
     }
 
     #[test]
     fn test_parse_connection_string_no_endpoint() {
         let cs = "InstrumentationKey=key1";
         let config = parse_connection_string(cs).unwrap();
-        assert_eq!(config.endpoint, "https://dc.services.visualstudio.com");
-        assert_eq!(config.instrumentation_key.as_deref(), Some("key1"));
+        assert_eq!(
+            config.traces_endpoint,
+            "https://dc.services.visualstudio.com/v1/traces"
+        );
+        assert_eq!(
+            config.auth_header,
+            Some(("x-ms-ikey".to_string(), "key1".to_string()))
+        );
     }
 
     #[test]
     fn test_parse_generic_otlp_endpoint() {
         let cs = "https://my-otel-collector:4318";
         let config = parse_connection_string(cs).unwrap();
-        assert_eq!(config.endpoint, "https://my-otel-collector:4318");
-        assert!(config.instrumentation_key.is_none());
+        assert_eq!(
+            config.traces_endpoint,
+            "https://my-otel-collector:4318/v1/traces"
+        );
+        assert_eq!(
+            config.metrics_endpoint,
+            "https://my-otel-collector:4318/v1/metrics"
+        );
+        assert_eq!(
+            config.logs_endpoint,
+            "https://my-otel-collector:4318/v1/logs"
+        );
+        assert!(config.auth_header.is_none());
     }
 
     #[test]
@@ -1034,8 +1162,10 @@ mod tests {
     #[test]
     fn test_collector_suite_lifecycle() {
         let config = TelemetryConfig {
-            endpoint: "https://test.example.com".to_string(),
-            instrumentation_key: Some("test-key".to_string()),
+            traces_endpoint: "https://test.example.com/v1/traces".to_string(),
+            metrics_endpoint: "https://test.example.com/v1/metrics".to_string(),
+            logs_endpoint: "https://test.example.com/v1/logs".to_string(),
+            auth_header: Some(("x-ms-ikey".to_string(), "test-key".to_string())),
             service_name: "test-service".to_string(),
         };
         let mut collector = TelemetryCollector::new(config, "test.http");
@@ -1092,8 +1222,10 @@ mod tests {
     #[test]
     fn test_metric_dimension_cardinality() {
         let config = TelemetryConfig {
-            endpoint: "https://test.example.com".to_string(),
-            instrumentation_key: Some("key".to_string()),
+            traces_endpoint: "https://test.example.com/v1/traces".to_string(),
+            metrics_endpoint: "https://test.example.com/v1/metrics".to_string(),
+            logs_endpoint: "https://test.example.com/v1/logs".to_string(),
+            auth_header: Some(("x-ms-ikey".to_string(), "key".to_string())),
             service_name: "test".to_string(),
         };
         let mut collector = TelemetryCollector::new(config, "api.http");
@@ -1114,8 +1246,194 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_resource_id_returns_none() {
+        let rid = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/my-rg/providers/microsoft.insights/components/my-ai";
+        assert!(parse_connection_string(rid).is_none());
+    }
+
+    #[test]
+    fn test_fetch_otlp_endpoints_parses_response() {
+        let json = r#"{
+            "properties": {
+                "OTLPMetricsEndpoint": "https://managed-my-ai-dce.region.metrics.ingest.monitor.azure.com/dataCollectionRules/dcr-xxx/streams/Microsoft-OtelMetrics/otlp/v1/metrics",
+                "OTLPLogsEndpoint": "https://managed-my-ai-dce.region.ingest.monitor.azure.com/dataCollectionRules/dcr-xxx/streams/Microsoft-OTLP-Logs/otlp/v1/logs",
+                "OTLPTracesEndpoint": "https://managed-my-ai-dce.region.ingest.monitor.azure.com/dataCollectionRules/dcr-xxx/streams/Microsoft-OTLP-Traces/otlp/v1/traces"
+            }
+        }"#;
+        let (traces, metrics, logs) = parse_arm_response(json).unwrap();
+        assert_eq!(
+            traces,
+            "https://managed-my-ai-dce.region.ingest.monitor.azure.com/dataCollectionRules/dcr-xxx/streams/Microsoft-OTLP-Traces/otlp/v1/traces"
+        );
+        assert_eq!(
+            metrics,
+            "https://managed-my-ai-dce.region.metrics.ingest.monitor.azure.com/dataCollectionRules/dcr-xxx/streams/Microsoft-OtelMetrics/otlp/v1/metrics"
+        );
+        assert_eq!(
+            logs,
+            "https://managed-my-ai-dce.region.ingest.monitor.azure.com/dataCollectionRules/dcr-xxx/streams/Microsoft-OTLP-Logs/otlp/v1/logs"
+        );
+    }
+
+    #[test]
+    fn test_parse_arm_response_missing_properties() {
+        let json = r#"{"id": "/subscriptions/..."}"#;
+        let err = parse_arm_response(json).unwrap_err();
+        assert!(err.contains("missing 'properties'"));
+    }
+
+    #[test]
+    fn test_parse_arm_response_missing_endpoint() {
+        let json = r#"{"properties": {"OTLPTracesEndpoint": "https://t"}}"#;
+        let err = parse_arm_response(json).unwrap_err();
+        assert!(err.contains("OTLPMetricsEndpoint"));
+    }
+
+    #[test]
     fn test_hex_encode() {
         assert_eq!(hex::encode(&[0xab, 0xcd, 0xef]), "abcdef");
         assert_eq!(hex::encode(&[0x00, 0xff]), "00ff");
+    }
+
+    // ── parse_arm_response edge cases ──
+
+    #[test]
+    fn test_parse_arm_response_malformed_json() {
+        let err = parse_arm_response("not json at all {{{").unwrap_err();
+        assert!(err.contains("Invalid JSON"));
+    }
+
+    #[test]
+    fn test_parse_arm_response_missing_traces_endpoint() {
+        let json = r#"{"properties": {
+            "OTLPMetricsEndpoint": "https://m",
+            "OTLPLogsEndpoint": "https://l"
+        }}"#;
+        let err = parse_arm_response(json).unwrap_err();
+        assert!(err.contains("OTLPTracesEndpoint"));
+    }
+
+    #[test]
+    fn test_parse_arm_response_missing_logs_endpoint() {
+        let json = r#"{"properties": {
+            "OTLPTracesEndpoint": "https://t",
+            "OTLPMetricsEndpoint": "https://m"
+        }}"#;
+        let err = parse_arm_response(json).unwrap_err();
+        assert!(err.contains("OTLPLogsEndpoint"));
+    }
+
+    #[test]
+    fn test_parse_arm_response_null_endpoint_values() {
+        let json = r#"{"properties": {
+            "OTLPTracesEndpoint": null,
+            "OTLPMetricsEndpoint": "https://m",
+            "OTLPLogsEndpoint": "https://l"
+        }}"#;
+        let err = parse_arm_response(json).unwrap_err();
+        assert!(err.contains("OTLPTracesEndpoint"));
+    }
+
+    #[test]
+    fn test_parse_arm_response_empty_properties() {
+        let json = r#"{"properties": {}}"#;
+        let err = parse_arm_response(json).unwrap_err();
+        assert!(err.contains("OTLPTracesEndpoint"));
+    }
+
+    // ── parse_connection_string auth_header consistency ──
+
+    #[test]
+    fn test_parse_connection_string_trailing_slash_has_auth() {
+        let cs = "InstrumentationKey=key1;IngestionEndpoint=https://example.com/";
+        let config = parse_connection_string(cs).unwrap();
+        assert_eq!(
+            config.auth_header,
+            Some(("x-ms-ikey".to_string(), "key1".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_connection_string_no_endpoint_all_signals() {
+        let cs = "InstrumentationKey=key1";
+        let config = parse_connection_string(cs).unwrap();
+        assert_eq!(
+            config.metrics_endpoint,
+            "https://dc.services.visualstudio.com/v1/metrics"
+        );
+        assert_eq!(
+            config.logs_endpoint,
+            "https://dc.services.visualstudio.com/v1/logs"
+        );
+    }
+
+    #[test]
+    fn test_parse_otlp_url_trailing_slash() {
+        let cs = "https://my-collector:4318/";
+        let config = parse_connection_string(cs).unwrap();
+        assert_eq!(config.traces_endpoint, "https://my-collector:4318/v1/traces");
+        assert_eq!(config.metrics_endpoint, "https://my-collector:4318/v1/metrics");
+        assert_eq!(config.logs_endpoint, "https://my-collector:4318/v1/logs");
+        assert!(config.auth_header.is_none());
+    }
+
+    // ── Collector per-signal endpoint routing ──
+
+    #[test]
+    fn test_collector_stores_distinct_per_signal_endpoints() {
+        let config = TelemetryConfig {
+            traces_endpoint: "https://traces.host/v1/traces".to_string(),
+            metrics_endpoint: "https://metrics.host/v1/metrics".to_string(),
+            logs_endpoint: "https://logs.host/v1/logs".to_string(),
+            auth_header: Some(("Authorization".to_string(), "Bearer tok".to_string())),
+            service_name: "svc".to_string(),
+        };
+        let collector = TelemetryCollector::new(config, "f.http");
+
+        assert_eq!(collector.config.traces_endpoint, "https://traces.host/v1/traces");
+        assert_eq!(collector.config.metrics_endpoint, "https://metrics.host/v1/metrics");
+        assert_eq!(collector.config.logs_endpoint, "https://logs.host/v1/logs");
+        assert_eq!(
+            collector.config.auth_header,
+            Some(("Authorization".to_string(), "Bearer tok".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_collector_build_payloads_with_distinct_endpoints() {
+        let config = TelemetryConfig {
+            traces_endpoint: "https://traces.host/v1/traces".to_string(),
+            metrics_endpoint: "https://metrics.host/v1/metrics".to_string(),
+            logs_endpoint: "https://logs.host/v1/logs".to_string(),
+            auth_header: None,
+            service_name: "svc".to_string(),
+        };
+        let mut collector = TelemetryCollector::new(config, "t.http");
+        collector.suite_start(1);
+        collector.block_complete(
+            "A", "test", None, "passed", 10,
+            Some("GET"), Some("https://api/x"), Some(200), Some(8),
+            &[], &[], None,
+        );
+        collector.suite_complete(1, 0, 0, 10);
+
+        // Payloads build without error and contain data
+        let t = collector.build_traces();
+        assert!(!t.resource_spans[0].scope_spans[0].spans.is_empty());
+
+        let m = collector.build_metrics();
+        assert!(!m.resource_metrics[0].scope_metrics[0].metrics.is_empty());
+
+        let l = collector.build_logs();
+        assert!(!l.resource_logs[0].scope_logs[0].log_records.is_empty());
+
+        // Config still holds the distinct endpoints for export routing
+        assert_ne!(collector.config.traces_endpoint, collector.config.metrics_endpoint);
+        assert_ne!(collector.config.metrics_endpoint, collector.config.logs_endpoint);
+    }
+
+    #[test]
+    fn test_parse_nonsense_string_returns_none() {
+        assert!(parse_connection_string("random-garbage").is_none());
     }
 }

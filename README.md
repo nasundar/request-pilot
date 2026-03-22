@@ -6,7 +6,7 @@ A developer toolkit for HTTP traffic — a **Tauri v2 desktop app** for authorin
 
 ```
 request-pilot/
-├── core/              # Shared Rust core library (180 tests)
+├── core/              # Shared Rust core library (196 tests)
 │   └── src/
 │       ├── http_parser.rs     # .http file parser & generator
 │       ├── http_client.rs     # reqwest-based HTTP client
@@ -125,15 +125,17 @@ Multi-scope Azure auth for developers — skip client-credentials setup blocks a
 
 Export traces, metrics, and logs from every test run to any OTLP-compatible backend — Azure Monitor Application Insights, Jaeger, Grafana Tempo, etc.
 
-**Setup:** Add two file-level directives before `@variables`:
+**Setup:** Add file-level directives before `@variables`:
 ```http
-# @telemetry appinsights_connection_string
+# @telemetry appinsights_resource_id
+# @telemetry_token arm_token
 # @telemetry_service my-api-e2e-tests
 ```
 
-The connection string variable value (set in `.env`) can be:
-- Azure App Insights: `InstrumentationKey=xxx;IngestionEndpoint=https://eastus-1.in.applicationinsights.azure.com`
-- Plain OTLP: `https://my-otel-collector:4318`
+The telemetry variable can be:
+- **App Insights resource ID (recommended):** `/subscriptions/{sub}/resourceGroups/{rg}/providers/microsoft.insights/components/{name}` — the system calls `https://management.azure.com{resource_id}?api-version=2025-01-23-preview` with the ARM token to fetch dedicated OTLP endpoints (`OTLPTracesEndpoint`, `OTLPMetricsEndpoint`, `OTLPLogsEndpoint`). Add `# @telemetry_token arm_token` to specify the Bearer token variable.
+- **Connection string (alternative):** `InstrumentationKey=xxx;IngestionEndpoint=https://eastus-1.in.applicationinsights.azure.com` — uses the legacy `x-ms-ikey` auth path
+- **Plain OTLP:** `https://my-otel-collector:4318`
 
 **Signals exported per run:**
 
@@ -268,7 +270,7 @@ cargo run -p request-pilot-tui -- api.http --run
 
 ## Shared Core (`request-pilot-core`)
 
-The Rust library powering all three frontends — **180 unit tests**, zero warnings.
+The Rust library powering all three frontends — **196 unit tests**, zero warnings.
 
 | Module | Description |
 |---|---|
@@ -286,7 +288,7 @@ The Rust library powering all three frontends — **180 unit tests**, zero warni
 ### Running Tests
 
 ```bash
-# Core library tests (180 tests — parser, assertions, variables, runner, history, url_trie, http_client, telemetry)
+# Core library tests (196 tests — parser, assertions, variables, runner, history, url_trie, http_client, telemetry)
 cd request-pilot
 cargo test -p request-pilot-core
 
@@ -331,4 +333,4 @@ The `.github/skills/e2e-http-test-generator/` directory contains a Copilot skill
 | **Desktop App** | Tauri v2, HTML/CSS/JS (vanilla), Rust backend |
 | **Browser Extension** | Manifest V3, declarativeNetRequest, webRequest, content scripts, chrome.storage |
 | **Terminal UI** | ratatui 0.29, crossterm 0.28, clap 4, tokio |
-| **Tests** | Rust `#[test]` (171 core), Jest (94 extension) |
+| **Tests** | Rust `#[test]` (196 core), Jest (94 extension) |

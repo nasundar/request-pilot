@@ -17,6 +17,8 @@ pub struct TestSuite {
     pub telemetry_var: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_service: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_token: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -69,6 +71,7 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
     let mut blocks = Vec::new();
     let mut telemetry_var: Option<String> = None;
     let mut telemetry_service: Option<String> = None;
+    let mut telemetry_token: Option<String> = None;
 
     let raw_blocks: Vec<&str> = content.split("###").collect();
 
@@ -82,7 +85,9 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
         if chunk_idx == 0 {
             for line in block.lines() {
                 let trimmed = line.trim();
-                if let Some(rest) = trimmed.strip_prefix("# @telemetry_service ") {
+                if let Some(rest) = trimmed.strip_prefix("# @telemetry_token ") {
+                    telemetry_token = Some(rest.trim().to_string());
+                } else if let Some(rest) = trimmed.strip_prefix("# @telemetry_service ") {
                     telemetry_service = Some(rest.trim().to_string());
                 } else if let Some(rest) = trimmed.strip_prefix("# @telemetry ") {
                     telemetry_var = Some(rest.trim().to_string());
@@ -111,6 +116,7 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
         blocks,
         telemetry_var,
         telemetry_service,
+        telemetry_token,
     }
 }
 
@@ -301,7 +307,10 @@ pub fn generate_http_content(suite: &TestSuite) -> String {
     if let Some(ref ts) = suite.telemetry_service {
         output.push_str(&format!("# @telemetry_service {}\n", ts));
     }
-    if suite.telemetry_var.is_some() || suite.telemetry_service.is_some() {
+    if let Some(ref tt) = suite.telemetry_token {
+        output.push_str(&format!("# @telemetry_token {}\n", tt));
+    }
+    if suite.telemetry_var.is_some() || suite.telemetry_service.is_some() || suite.telemetry_token.is_some() {
         output.push('\n');
     }
 
@@ -1610,5 +1619,19 @@ Authorization: Bearer {{token}}
         let content = "### @setup Verify Cluster\nGET https://management.azure.com/subscriptions/123\n";
         let suite = parse_test_suite(content);
         assert_eq!(suite.blocks[0].dev_auth, None);
+    }
+
+    #[test]
+    fn test_telemetry_directives_roundtrip() {
+        let input = "# @telemetry conn_str_var\n# @telemetry_service my-e2e\n# @telemetry_token arm_token\n\n@variables\nconn_str_var = test\narm_token = bearer123\n\n### @test Ping\nGET https://example.com\n\n# @assert status == 200\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.telemetry_var.as_deref(), Some("conn_str_var"));
+        assert_eq!(suite.telemetry_service.as_deref(), Some("my-e2e"));
+        assert_eq!(suite.telemetry_token.as_deref(), Some("arm_token"));
+
+        let output = generate_http_content(&suite);
+        assert!(output.contains("# @telemetry conn_str_var"));
+        assert!(output.contains("# @telemetry_service my-e2e"));
+        assert!(output.contains("# @telemetry_token arm_token"));
     }
 }
