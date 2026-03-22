@@ -941,8 +941,8 @@ async function loadFile(file) {
 
     loadedFiles.push(fileEntry);
     const fileIdx = loadedFiles.length - 1;
-    detectAzureAuthNeeded();
     detectTelemetryConfig();
+    detectAzureAuthNeeded();
 
     // Populate envVars from .http file variable values (non-placeholders)
     if (suite.variables) {
@@ -5171,6 +5171,8 @@ function detectTelemetryConfig() {
     if (telemetryState === 'off') {
       setTelemetryState('configured');
       rpLog('info', `OTEL telemetry configured`, { files: telemetryFiles });
+      // Check if Azure auth already has monitor token (e.g. auth happened before file load)
+      updateTelemetryAuthState();
     }
   } else {
     btn.classList.remove('visible');
