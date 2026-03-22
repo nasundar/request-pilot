@@ -1066,18 +1066,28 @@ impl TelemetryCollector {
             .map(|sl| sl.log_records.len())
             .unwrap_or(0);
 
-        // Encode to protobuf and POST
-        let traces_pb = crate::otlp_proto::encode_traces(&traces);
-        if let Err(e) = self.post_to(&client, &self.config.traces_endpoint, traces_pb).await {
-            stats.errors.push(format!("Traces export: {}", e));
-        }
-        let metrics_pb = crate::otlp_proto::encode_metrics(&metrics);
-        if let Err(e) = self.post_to(&client, &self.config.metrics_endpoint, metrics_pb).await {
-            stats.errors.push(format!("Metrics export: {}", e));
-        }
-        let logs_pb = crate::otlp_proto::encode_logs(&logs);
-        if let Err(e) = self.post_to(&client, &self.config.logs_endpoint, logs_pb).await {
-            stats.errors.push(format!("Logs export: {}", e));
+        // Encode to protobuf and POST each signal
+        let signals: Vec<(&str, Vec<u8>, &str, usize)> = vec![
+            ("Traces", crate::otlp_proto::encode_traces(&traces), &self.config.traces_endpoint, stats.traces_sent),
+            ("Metrics", crate::otlp_proto::encode_metrics(&metrics), &self.config.metrics_endpoint, stats.metrics_sent),
+            ("Logs", crate::otlp_proto::encode_logs(&logs), &self.config.logs_endpoint, stats.logs_sent),
+        ];
+
+        for (signal, pb, endpoint, count) in signals {
+            if count == 0 {
+                eprintln!("[telemetry] {}: 0 items, skipping export", signal);
+                continue;
+            }
+            eprintln!("[telemetry] {} export: {} items, {} bytes → {}", signal, count, pb.len(), endpoint);
+            match self.post_to(&client, endpoint, pb).await {
+                Ok(status) => {
+                    eprintln!("[telemetry] {} export: HTTP {} OK", signal, status);
+                }
+                Err(e) => {
+                    eprintln!("[telemetry] {} export FAILED: {}", signal, e);
+                    stats.errors.push(format!("{} export: {}", signal, e));
+                }
+            }
         }
 
         stats.export_time_ms = start.elapsed().as_millis() as u64;
@@ -1089,7 +1099,7 @@ impl TelemetryCollector {
         client: &reqwest::Client,
         url: &str,
         body: Vec<u8>,
-    ) -> Result<(), String> {
+    ) -> Result<u16, String> {
         let mut req = client
             .post(url)
             .header("Content-Type", "application/x-protobuf");
@@ -1114,7 +1124,7 @@ impl TelemetryCollector {
             }
             return Err(msg);
         }
-        Ok(())
+        Ok(status)
     }
 }
 
