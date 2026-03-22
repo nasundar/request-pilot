@@ -1034,16 +1034,17 @@ impl TelemetryCollector {
             .map(|sl| sl.log_records.len())
             .unwrap_or(0);
 
-        // POST traces
-        if let Err(e) = self.post_to(&client, &self.config.traces_endpoint, &traces).await {
+        // Encode to protobuf and POST
+        let traces_pb = crate::otlp_proto::encode_traces(&traces);
+        if let Err(e) = self.post_to(&client, &self.config.traces_endpoint, traces_pb).await {
             stats.errors.push(format!("Traces export: {}", e));
         }
-        // POST metrics
-        if let Err(e) = self.post_to(&client, &self.config.metrics_endpoint, &metrics).await {
+        let metrics_pb = crate::otlp_proto::encode_metrics(&metrics);
+        if let Err(e) = self.post_to(&client, &self.config.metrics_endpoint, metrics_pb).await {
             stats.errors.push(format!("Metrics export: {}", e));
         }
-        // POST logs
-        if let Err(e) = self.post_to(&client, &self.config.logs_endpoint, &logs).await {
+        let logs_pb = crate::otlp_proto::encode_logs(&logs);
+        if let Err(e) = self.post_to(&client, &self.config.logs_endpoint, logs_pb).await {
             stats.errors.push(format!("Logs export: {}", e));
         }
 
@@ -1051,21 +1052,20 @@ impl TelemetryCollector {
         stats
     }
 
-    async fn post_to<T: Serialize>(
+    async fn post_to(
         &self,
         client: &reqwest::Client,
         url: &str,
-        payload: &T,
+        body: Vec<u8>,
     ) -> Result<(), String> {
         let mut req = client
             .post(url)
-            .header("Content-Type", "application/json");
+            .header("Content-Type", "application/x-protobuf");
 
         if let Some((ref hdr, ref val)) = self.config.auth_header {
             req = req.header(hdr, val);
         }
 
-        let body = serde_json::to_string(payload).map_err(|e| e.to_string())?;
         let resp = req.body(body).send().await.map_err(|e| e.to_string())?;
         let status = resp.status().as_u16();
         if status >= 400 {
