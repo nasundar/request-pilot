@@ -443,7 +443,13 @@ function getEnabledSuite(fileIdx) {
   const file = loadedFiles[fileIdx];
   if (!file) return null;
   const enabledBlocks = file.suite.blocks.filter((_, blockIdx) => !disabledBlocks[`${fileIdx}-${blockIdx}`]);
-  return { variables: file.suite.variables, blocks: enabledBlocks };
+  return {
+    variables: file.suite.variables,
+    blocks: enabledBlocks,
+    telemetry_var: file.suite.telemetry_var || null,
+    telemetry_service: file.suite.telemetry_service || null,
+    telemetry_token: file.suite.telemetry_token || null,
+  };
 }
 
 // Map from enabled-suite result index → original block index
