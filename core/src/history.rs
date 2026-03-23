@@ -73,9 +73,14 @@ impl HistoryStore {
     /// Update an existing entry by id, replacing its fields.
     pub fn update(&mut self, entry: HistoryEntry) -> bool {
         if let Some(existing) = self.entries.iter_mut().find(|e| e.id == entry.id) {
+            let old_url = existing.url.clone();
             let seq = existing.seq; // preserve original seq
             *existing = entry;
             existing.seq = seq;
+            // Keep url_trie in sync when URL changes
+            if existing.url != old_url {
+                self.url_trie.insert(&existing.url);
+            }
             true
         } else {
             false
@@ -681,6 +686,25 @@ mod tests {
     fn update_empty_store_returns_false() {
         let mut store = HistoryStore::new();
         assert!(!store.update(make_entry("no-one-home")));
+    }
+
+    #[test]
+    fn update_syncs_url_trie_on_url_change() {
+        let mut store = HistoryStore::new();
+        let mut e = make_entry("trie-test");
+        e.url = "https://old.example.com/api".to_string();
+        store.add(e);
+
+        let suggestions = store.url_trie.suggest("https://old", 10);
+        assert_eq!(suggestions.len(), 1);
+
+        let mut updated = make_entry("trie-test");
+        updated.url = "https://new.example.com/api".to_string();
+        assert!(store.update(updated));
+
+        let new_suggestions = store.url_trie.suggest("https://new", 10);
+        assert_eq!(new_suggestions.len(), 1);
+        assert_eq!(new_suggestions[0].url, "https://new.example.com/api");
     }
 
     // --- filter by source extension-live ---

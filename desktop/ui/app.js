@@ -6067,9 +6067,9 @@ function addLiveRequestToHistory(req) {
     blockName = `${req.method} request`;
   }
 
-  const sessionTime = liveCaptureSessionId
+  const sessionTime = (liveCaptureSessionId
     ? new Date(liveCaptureSessionId).toLocaleTimeString('en-US', { hour12: false })
-    : new Date().toLocaleTimeString('en-US', { hour12: false });
+    : new Date().toLocaleTimeString('en-US', { hour12: false })).replace(/:/g, '-');
 
   const entry = {
     seq: 0, // assigned by Rust
@@ -6112,7 +6112,7 @@ function startNewCaptureSession() {
   document.getElementById('liveCaptureCount').textContent = '0';
   document.getElementById('liveSaveBtn').disabled = true;
 
-  const sessionTime = new Date().toLocaleTimeString('en-US', { hour12: false });
+  const sessionTime = new Date().toLocaleTimeString('en-US', { hour12: false }).replace(/:/g, '-');
   const fileName = `Live Capture - ${sessionTime}.http`;
   const initialContent = `# Live Capture Session\n# Started: ${new Date().toISOString()}\n# Source: Request Pilot Extension\n\n`;
 
