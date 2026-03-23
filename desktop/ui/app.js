@@ -6128,14 +6128,17 @@ function appendToLiveCaptureFile(req) {
 
   const file = loadedFiles[liveCaptureFileIndex];
 
-  // Block name uses full URL for clarity
-  let block = '###';
+  // Build descriptive block name from host + pathname
+  let label;
   try {
     const u = new URL(req.url);
-    block += ` ${req.method} ${u.origin}${u.pathname}\n`;
+    label = `${req.method} ${u.hostname}${u.pathname}`;
   } catch {
-    block += ` ${req.method} request\n`;
+    label = `${req.method} request`;
   }
+
+  let block = `### ${label}\n`;
+  block += `# @name ${label}\n`;
   block += `${req.method} ${req.url}\n`;
 
   // Only include meaningful headers, skip browser-internal ones
