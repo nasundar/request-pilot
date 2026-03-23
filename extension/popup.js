@@ -34,6 +34,7 @@ const TYPE_LABELS = {
   "modify-headers": "Headers",
   "block": "Block",
   "redirect": "Redirect",
+  "forward": "Forward",
 };
 
 /* ============================================================
@@ -465,7 +466,7 @@ function selectType(type) {
     headersSection.classList.add("hidden");
     redirectSection.classList.remove("hidden");
   } else {
-    // "block" — hide both
+    // "block" or "forward" — hide both
     headersSection.classList.add("hidden");
     redirectSection.classList.add("hidden");
   }

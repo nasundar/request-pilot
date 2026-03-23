@@ -330,6 +330,11 @@ body::-webkit-scrollbar-thumb {
   color: var(--warning);
 }
 
+.rule-type-badge.forward {
+  background: rgba(115, 218, 202, 0.15);
+  color: #73daca;
+}
+
 /* ========== Method Tags ========== */
 .method-tag {
   display: inline-flex;
@@ -929,6 +934,11 @@ body.standalone .popout-btn {
 
 [data-theme="light"] .rule-type-badge.redirect {
   background: rgba(201, 148, 22, 0.12);
+}
+
+[data-theme="light"] .rule-type-badge.forward {
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
 }
 
 [data-theme="light"] .method-chip:has(input:checked) {

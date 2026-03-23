@@ -235,8 +235,10 @@ async function syncAllRules() {
   const existing = await chrome.declarativeNetRequest.getDynamicRules();
   const removeIds = existing.map((r) => r.id);
 
-  // Build DNR rules for enabled user rules only
-  const addRules = rules.filter((r) => r.enabled).map(buildDnrRule);
+  // Build DNR rules for enabled user rules only (skip forward-only rules)
+  const addRules = rules
+    .filter((r) => r.enabled && r.type !== 'forward')
+    .map(buildDnrRule);
 
   await chrome.declarativeNetRequest.updateDynamicRules({
     removeRuleIds: removeIds,
