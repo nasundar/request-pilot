@@ -82,6 +82,40 @@ function zoomIn() { if (zoomLevel < ZOOM_MAX) { zoomLevel += ZOOM_STEP; applyZoo
 function zoomOut() { if (zoomLevel > ZOOM_MIN) { zoomLevel -= ZOOM_STEP; applyZoom(); } }
 function zoomReset() { zoomLevel = 100; applyZoom(); }
 
+// --- Theme ---
+function initTheme() {
+  const saved = localStorage.getItem('rp-theme');
+  if (saved) {
+    document.documentElement.setAttribute('data-theme', saved);
+  } else {
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+  }
+  updateThemeIcon();
+}
+
+function toggleTheme() {
+  document.documentElement.classList.add('theme-transition');
+  const current = document.documentElement.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('rp-theme', next);
+  updateThemeIcon();
+  setTimeout(() => document.documentElement.classList.remove('theme-transition'), 350);
+}
+
+function updateThemeIcon() {
+  const theme = document.documentElement.getAttribute('data-theme');
+  const btn = document.getElementById('themeToggle');
+  if (btn) {
+    btn.querySelector('.theme-icon').textContent = theme === 'dark' ? '🌙' : '☀️';
+    btn.title = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+  }
+}
+
+// Apply theme before DOM renders to prevent flash
+initTheme();
+
 // Simple hash for tri-state viewed detection
 function resultHash(br) {
   if (!br) return '0';
@@ -5887,3 +5921,12 @@ initAzureAuth();
 }
 
 rpLog('info', 'Request Pilot initialized');
+
+// --- Theme toggle ---
+document.getElementById('themeToggle').addEventListener('click', toggleTheme);
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+  if (!localStorage.getItem('rp-theme')) {
+    document.documentElement.setAttribute('data-theme', e.matches ? 'dark' : 'light');
+    updateThemeIcon();
+  }
+});
