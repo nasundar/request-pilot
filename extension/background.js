@@ -19,6 +19,7 @@ let captureDebugCount = 0;
 let liveSocket = null;
 let liveMode = 'off'; // 'off' | 'all' | 'filtered'
 let liveReconnectTimer = null;
+let liveEnabled = false; // user must opt-in via popup toggle
 const LIVE_WS_URL = 'ws://127.0.0.1:9718';
 const LIVE_RECONNECT_DELAY = 3000;
 
@@ -105,6 +106,7 @@ function disconnectFromDesktop() {
 
 function scheduleReconnect() {
   clearReconnectTimer();
+  if (!liveEnabled) return; // don't reconnect if user disabled
   liveReconnectTimer = setTimeout(() => {
     connectToDesktop();
   }, LIVE_RECONNECT_DELAY);
@@ -493,16 +495,21 @@ async function handleMessage(msg) {
     }
 
     // ── Live capture control ─────────────────────────────────
-    case "startLiveCapture":
+    case "enableLiveCapture":
+      liveEnabled = true;
+      await chrome.storage.local.set({ requestPilotLiveEnabled: true });
       connectToDesktop();
       return { success: true };
 
-    case "stopLiveCapture":
+    case "disableLiveCapture":
+      liveEnabled = false;
+      await chrome.storage.local.set({ requestPilotLiveEnabled: false });
       disconnectFromDesktop();
       return { success: true };
 
     case "getLiveCaptureStatus":
       return {
+        enabled: liveEnabled,
         connected: isLiveConnected(),
         mode: liveMode,
       };
@@ -753,5 +760,10 @@ chrome.runtime.onStartup.addListener(() => {
   syncAllRules();
 });
 
-// Attempt to connect to desktop app on startup (will silently retry if not running)
-connectToDesktop();
+// Restore live capture preference — only connect if user previously enabled it
+chrome.storage.local.get('requestPilotLiveEnabled', (data) => {
+  if (data.requestPilotLiveEnabled === true) {
+    liveEnabled = true;
+    connectToDesktop();
+  }
+});

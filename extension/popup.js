@@ -129,13 +129,24 @@ async function updateDesktopStatus() {
     const dot = document.getElementById('desktopDot');
     const text = document.getElementById('desktopStatusText');
     const modeLabel = document.getElementById('desktopModeLabel');
+    const toggle = document.getElementById('liveToggle');
     if (!dot || !text || !modeLabel) return;
 
     dot.className = 'desktop-dot';
     modeLabel.className = 'desktop-mode-label';
     modeLabel.textContent = '';
 
-    if (status.connected) {
+    // Sync toggle checkbox with backend state (avoid re-triggering change event)
+    if (toggle && toggle.checked !== status.enabled) {
+      toggle._updating = true;
+      toggle.checked = status.enabled;
+      toggle._updating = false;
+    }
+
+    if (!status.enabled) {
+      dot.classList.add('disabled');
+      text.textContent = 'Desktop: Disabled';
+    } else if (status.connected) {
       if (status.mode === 'all') {
         dot.classList.add('capturing');
         text.textContent = 'Desktop: Capturing';
@@ -153,8 +164,8 @@ async function updateDesktopStatus() {
         modeLabel.classList.add('mode-off');
       }
     } else {
-      dot.classList.add('disconnected');
-      text.textContent = 'Desktop: Not connected';
+      dot.classList.add('connecting');
+      text.textContent = 'Desktop: Connecting…';
     }
   } catch {
     /* extension context may not have live capture support */
@@ -173,6 +184,17 @@ function attachEventListeners() {
   btnExport.addEventListener("click", exportRules);
   fileImport.addEventListener("change", importRules);
   btnClearLog.addEventListener("click", clearLog);
+
+  // Live capture toggle
+  const liveToggle = document.getElementById('liveToggle');
+  if (liveToggle) {
+    liveToggle.addEventListener('change', async () => {
+      if (liveToggle._updating) return; // skip programmatic changes
+      const action = liveToggle.checked ? 'enableLiveCapture' : 'disableLiveCapture';
+      await sendMessage({ action });
+      updateDesktopStatus();
+    });
+  }
 
   // Log export/import
   const btnExportLog = $("#btn-export-log");

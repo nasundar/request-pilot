@@ -852,3 +852,42 @@ describe("Live Capture — formDataToBody", () => {
     expect(second.responseBody).toBe("body-2");
   });
 });
+
+/* =============================================================
+ * Live Capture — enable/disable toggle
+ * ============================================================= */
+
+describe("Live Capture — enable/disable toggle", () => {
+  test("getLiveCaptureStatus returns enabled: false by default", async () => {
+    const status = await send({ action: "getLiveCaptureStatus" });
+    expect(status.enabled).toBe(false);
+    expect(status.connected).toBeFalsy();
+    expect(status.mode).toBe("off");
+  });
+
+  test("enableLiveCapture sets enabled flag and persists to storage", async () => {
+    const result = await send({ action: "enableLiveCapture" });
+    expect(result.success).toBe(true);
+
+    expect(chromeMock.storage.local.set).toHaveBeenCalledWith(
+      { requestPilotLiveEnabled: true }
+    );
+
+    const status = await send({ action: "getLiveCaptureStatus" });
+    expect(status.enabled).toBe(true);
+  });
+
+  test("disableLiveCapture clears enabled flag and persists to storage", async () => {
+    await send({ action: "enableLiveCapture" });
+    const result = await send({ action: "disableLiveCapture" });
+    expect(result.success).toBe(true);
+
+    expect(chromeMock.storage.local.set).toHaveBeenCalledWith(
+      { requestPilotLiveEnabled: false }
+    );
+
+    const status = await send({ action: "getLiveCaptureStatus" });
+    expect(status.enabled).toBe(false);
+    expect(status.mode).toBe("off");
+  });
+});
