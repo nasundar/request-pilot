@@ -6137,7 +6137,7 @@ function appendToLiveCaptureFile(req) {
     label = `${req.method} request`;
   }
 
-  let block = `### ${label}\n`;
+  let block = `###\n`;
   block += `# @name ${label}\n`;
   block += `${req.method} ${req.url}\n`;
 
