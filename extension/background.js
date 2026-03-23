@@ -168,6 +168,8 @@ function forwardToDesktop(entry) {
   try {
     const msg = JSON.stringify({ action: 'request', data });
     liveSocket.send(msg);
+    console.log('[RequestPilot] Forwarded:', entry.method, entry.url,
+      'reqBody:', !!bodyStr, 'respBody:', !!(entry.responseBody), 'status:', entry.statusCode);
   } catch (e) {
     console.warn('[RequestPilot] Failed to forward request:', e);
   }
@@ -184,6 +186,7 @@ function forwardResponseBody(entry) {
       status_code: entry.statusCode || null,
     });
     liveSocket.send(msg);
+    console.log('[RequestPilot] Forwarded response body:', entry.url, 'size:', (entry.responseBody || '').length);
   } catch (e) {
     console.warn('[RequestPilot] Failed to forward response body:', e);
   }
@@ -219,7 +222,10 @@ async function shouldForwardEntry(entry) {
 function tryForwardEntry(entry) {
   if (!isLiveConnected() || liveMode === 'off') return;
   shouldForwardEntry(entry).then(should => {
-    if (should) forwardToDesktop(entry);
+    if (!should) return;
+    // Delay 500ms so content script can capture response body before forwarding.
+    // The initial forward then includes the body in most cases.
+    setTimeout(() => forwardToDesktop(entry), 500);
   }).catch(err => {
     console.warn('[RequestPilot] Forward check failed:', err);
   });
