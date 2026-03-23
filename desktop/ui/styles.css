@@ -92,15 +92,25 @@ html, body {
 .extra-headers-wrapper {
   position: relative;
 }
+.extra-headers-btn {
+  position: relative;
+  font-size: 14px;
+}
 .extra-headers-count:empty { display: none; }
 .extra-headers-count {
+  position: absolute;
+  top: -2px;
+  right: -4px;
   background: var(--accent);
   color: var(--bg-primary);
-  font-size: 10px;
-  padding: 0 5px;
-  border-radius: 8px;
-  font-weight: 600;
-  margin-left: 2px;
+  font-size: 9px;
+  min-width: 14px;
+  height: 14px;
+  line-height: 14px;
+  text-align: center;
+  padding: 0 3px;
+  border-radius: 7px;
+  font-weight: 700;
 }
 .extra-headers-panel {
   position: absolute;
