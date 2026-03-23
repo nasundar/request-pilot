@@ -2721,13 +2721,13 @@ saveEnvBtn.addEventListener('click', async (e) => {
     const defaultName = (envFilePath && envFilePath.endsWith('.env'))
       ? envFilePath.split(/[\\/]/).pop()
       : '.env';
-    const path = await invoke('save_file_dialog', {
+    const path = await invoke('save_file_with_dialog', {
       defaultName,
+      content,
       title: 'Save Environment File',
       filters: [['Env Files', 'env']],
     });
     if (!path) return; // cancelled
-    await invoke('write_file', { path, content });
     envFilePath = path;
     showToast(`Saved to ${path.split(/[\\/]/).pop()}`, 'success');
   } catch (err) {
@@ -6156,12 +6156,15 @@ function appendToLiveCaptureFile(req) {
   block += `# @name ${label}\n`;
   block += `${req.method} ${req.url}\n`;
 
-  // Only include meaningful headers, skip browser-internal ones
+  // Only include meaningful headers, skip browser-internal and sensitive ones
   const skipPrefixes = [':', 'sec-ch-', 'sec-fetch-'];
   const skipNames = new Set([
     'host', 'connection', 'accept-encoding', 'accept-language',
     'upgrade-insecure-requests', 'priority', 'pragma', 'cache-control',
     'user-agent', 'dnt', 'origin', 'referer',
+    // Sensitive — redact by default to avoid persisting credentials to disk
+    'authorization', 'cookie', 'set-cookie', 'proxy-authorization',
+    'x-api-key', 'x-auth-token',
   ]);
 
   for (const h of (req.request_headers || [])) {
@@ -6202,13 +6205,13 @@ document.getElementById('liveSaveBtn').addEventListener('click', async () => {
 
   const file = loadedFiles[liveCaptureFileIndex];
   try {
-    const path = await invoke('save_file_dialog', {
+    const path = await invoke('save_file_with_dialog', {
       defaultName: file.name,
+      content: file.content,
       title: 'Save Live Capture',
       filters: [['HTTP Files', 'http']],
     });
     if (!path) return; // cancelled
-    await invoke('write_file', { path, content: file.content });
     showToast(`Saved to ${path.split(/[\\/]/).pop()}`, 'success');
     rpLog('info', `Live capture file saved: ${path}`);
   } catch (err) {

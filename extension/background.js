@@ -392,6 +392,13 @@ async function handleMessage(msg) {
       captureDebugCount++;
       const targetUrl = msg.url;
 
+      // Enforce body size limit (matches content-script-main.js MAX_BODY_SIZE)
+      const MAX_BODY_SIZE = 100000;
+      const body = typeof msg.body === 'string'
+        ? (msg.body.length > MAX_BODY_SIZE ? msg.body.substring(0, MAX_BODY_SIZE) + '\n...[truncated]' : msg.body)
+        : null;
+      if (!body) return { success: true };
+
       // Strategy 1: exact URL match in networkLog
       let matched = networkLog.find(
         (e) => e.url === targetUrl && !e.responseBody
@@ -437,7 +444,7 @@ async function handleMessage(msg) {
       }
 
       if (matched) {
-        matched.responseBody = msg.body;
+        matched.responseBody = body;
       }
       return { success: true };
     }

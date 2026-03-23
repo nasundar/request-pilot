@@ -155,9 +155,30 @@ async fn handle_connection(
     state: Arc<LiveCaptureState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let ws_stream = tokio_tungstenite::accept_async(stream)
-        .await
-        .map_err(|e| format!("WS handshake failed: {}", e))?;
+    use tokio_tungstenite::tungstenite::handshake::server::{
+        Request as WsRequest, Response as WsResponse, ErrorResponse,
+    };
+    use tokio_tungstenite::tungstenite::http;
+
+    // Validate Origin header — only accept browser extension origins
+    let ws_stream = tokio_tungstenite::accept_hdr_async(
+        stream,
+        |req: &WsRequest, resp: WsResponse| -> Result<WsResponse, ErrorResponse> {
+            if let Some(origin) = req.headers().get("origin") {
+                let origin_str = origin.to_str().unwrap_or("");
+                if origin_str.starts_with("chrome-extension://")
+                    || origin_str.starts_with("moz-extension://")
+                {
+                    return Ok(resp);
+                }
+            }
+            let mut err = http::Response::new(Some("Forbidden: invalid origin".to_string()));
+            *err.status_mut() = http::StatusCode::FORBIDDEN;
+            Err(err)
+        },
+    )
+    .await
+    .map_err(|e| format!("WS handshake rejected: {}", e))?;
 
     let (mut write, mut read) = ws_stream.split();
 

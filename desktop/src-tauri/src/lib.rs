@@ -199,16 +199,13 @@ fn read_env_file(path: String) -> Result<std::collections::HashMap<String, Strin
     env_file::read_env_from_path(&path)
 }
 
-/// Write content to a file at the given path (used with native save dialog).
+/// Atomically open a native save-file dialog and write content to the chosen path.
+/// Returns the chosen path (or null if cancelled). The frontend never receives a raw
+/// writable path — preventing arbitrary file write attacks.
 #[tauri::command]
-fn write_file(path: String, content: String) -> Result<(), String> {
-    std::fs::write(&path, &content).map_err(|e| format!("Failed to write {}: {}", path, e))
-}
-
-/// Open a native save-file dialog and return the chosen path (or null if cancelled).
-#[tauri::command]
-fn save_file_dialog(
+fn save_file_with_dialog(
     default_name: String,
+    content: String,
     title: Option<String>,
     filters: Option<Vec<(String, String)>>,
 ) -> Result<Option<String>, String> {
@@ -222,7 +219,12 @@ fn save_file_dialog(
         }
     }
     match dialog.save_file() {
-        Some(path) => Ok(Some(path.to_string_lossy().to_string())),
+        Some(path) => {
+            let path_str = path.to_string_lossy().to_string();
+            std::fs::write(&path, &content)
+                .map_err(|e| format!("Failed to write {}: {}", path_str, e))?;
+            Ok(Some(path_str))
+        }
         None => Ok(None),
     }
 }
@@ -249,14 +251,6 @@ fn update_history_entry(
 ) -> Result<bool, String> {
     let mut s = store.lock().map_err(|e| e.to_string())?;
     Ok(s.update(entry))
-}
-
-#[tauri::command]
-fn write_env_file(
-    path: String,
-    vars: std::collections::HashMap<String, String>,
-) -> Result<(), String> {
-    env_file::write_env_to_path(&path, &vars)
 }
 
 #[tauri::command]
@@ -386,14 +380,12 @@ pub fn run() {
             suggest_urls,
             suggest_domain_paths,
             read_env_file,
-            write_env_file,
             fetch_azure_token,
             check_azure_cli,
             start_device_code,
             poll_device_code,
             check_variables,
-            write_file,
-            save_file_dialog,
+            save_file_with_dialog,
             add_history_entry,
             update_history_entry,
             start_live_capture,
