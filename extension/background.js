@@ -177,6 +177,8 @@ function tryForwardEntry(entry) {
   if (isLiveConnected() && liveMode !== 'off') {
     shouldForwardEntry(entry).then(should => {
       if (should) forwardToDesktop(entry);
+    }).catch(err => {
+      console.warn('[RequestPilot] Forward check failed:', err);
     });
   }
 }

@@ -5963,18 +5963,16 @@ document.querySelectorAll('input[name="liveMode"]').forEach(radio => {
     liveCaptureMode = mode;
 
     try {
-      if (mode === 'off') {
-        await invoke('set_live_capture_mode', { mode: 'off' });
-        await invoke('stop_live_capture');
-        document.getElementById('liveNewSessionBtn').disabled = true;
-      } else {
+      // Always ensure server is running (no-op if already running)
+      if (mode !== 'off') {
         await invoke('start_live_capture');
-        await invoke('set_live_capture_mode', { mode });
-        if (!liveCaptureSessionId) {
-          startNewCaptureSession();
-        }
-        document.getElementById('liveNewSessionBtn').disabled = false;
       }
+      await invoke('set_live_capture_mode', { mode });
+
+      if (mode !== 'off' && !liveCaptureSessionId) {
+        startNewCaptureSession();
+      }
+      document.getElementById('liveNewSessionBtn').disabled = (mode === 'off');
     } catch (err) {
       rpLog('error', 'Live capture mode switch failed', String(err));
     }
@@ -6003,6 +6001,15 @@ document.querySelectorAll('input[name="liveMode"]').forEach(radio => {
     const { status } = event.payload;
     const dot = document.getElementById('liveDot');
     const statusText = document.getElementById('liveStatusText');
+
+    // If mode is off, keep showing "Off" regardless of connection events
+    if (liveCaptureMode === 'off') {
+      dot.className = 'live-dot';
+      statusText.className = 'live-status';
+      statusText.textContent = 'Off';
+      liveCaptureConnected = (status === 'connected');
+      return;
+    }
 
     dot.className = 'live-dot';
     statusText.className = 'live-status';
