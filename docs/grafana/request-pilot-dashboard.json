@@ -43,7 +43,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum(sum_over_time({__name__=\"rp.suite.runs\"}[$__range]))",
+          "expr": "sum(sum_over_time({__name__=\"rp.suite.runs\", file=~\"$file\"}[$__range]))",
           "legendFormat": "Total Runs",
           "refId": "A"
         }
@@ -77,7 +77,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum(sum_over_time({__name__=\"rp.suite.runs\", outcome=\"passed\"}[$__range])) / sum(sum_over_time({__name__=\"rp.suite.runs\"}[$__range])) * 100",
+          "expr": "sum(sum_over_time({__name__=\"rp.suite.runs\", outcome=\"passed\", file=~\"$file\"}[$__range])) / sum(sum_over_time({__name__=\"rp.suite.runs\", file=~\"$file\"}[$__range])) * 100",
           "legendFormat": "Pass Rate",
           "refId": "A"
         }
@@ -114,7 +114,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum(sum_over_time({__name__=\"rp.suite.runs\", outcome=\"passed\"}[$__range])) or vector(0)",
+          "expr": "sum(sum_over_time({__name__=\"rp.suite.runs\", outcome=\"passed\", file=~\"$file\"}[$__range])) or vector(0)",
           "legendFormat": "Passed",
           "refId": "A"
         }
@@ -141,7 +141,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum(sum_over_time({__name__=\"rp.suite.runs\", outcome=\"fail\"}[$__range])) or vector(0)",
+          "expr": "sum(sum_over_time({__name__=\"rp.suite.runs\", outcome=\"fail\", file=~\"$file\"}[$__range])) or vector(0)",
           "legendFormat": "Failed",
           "refId": "A"
         }
@@ -169,7 +169,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum(sum_over_time({__name__=\"rp.suite.duration_sum\"}[$__range])) / sum(sum_over_time({__name__=\"rp.suite.duration_count\"}[$__range]))",
+          "expr": "sum(sum_over_time({__name__=\"rp.suite.duration_sum\", file=~\"$file\"}[$__range])) / sum(sum_over_time({__name__=\"rp.suite.duration_count\", file=~\"$file\"}[$__range]))",
           "legendFormat": "Avg Duration",
           "refId": "A"
         }
@@ -204,7 +204,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum(sum_over_time({__name__=\"rp.assertion.total\"}[$__range])) or vector(0)",
+          "expr": "sum(sum_over_time({__name__=\"rp.assertion.total\", file=~\"$file\", block_name=~\"$block_name\"}[$__range])) or vector(0)",
           "legendFormat": "Assertions",
           "refId": "A"
         }
@@ -239,7 +239,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (outcome) (sum_over_time({__name__=\"rp.suite.runs\", file=~\"$file\"}[$__interval]))",
+          "expr": "sum by (outcome) (sum_over_time({__name__=\"rp.suite.runs\", file=~\"$file\", outcome=~\"$outcome\"}[$__interval]))",
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }
@@ -316,7 +316,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (outcome) (sum_over_time({__name__=\"rp.block.runs\", file=~\"$file\", block_type=~\"$block_type\"}[$__range]))",
+          "expr": "sum by (outcome) (sum_over_time({__name__=\"rp.block.runs\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\", outcome=~\"$outcome\"}[$__range]))",
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }
@@ -346,7 +346,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (block_type) (sum_over_time({__name__=\"rp.block.runs\", file=~\"$file\"}[$__range]))",
+          "expr": "sum by (block_type) (sum_over_time({__name__=\"rp.block.runs\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\", outcome=~\"$outcome\"}[$__range]))",
           "legendFormat": "{{block_type}}",
           "refId": "A"
         }
@@ -375,7 +375,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (outcome) (sum_over_time({__name__=\"rp.assertion.total\", file=~\"$file\"}[$__range]))",
+          "expr": "sum by (outcome) (sum_over_time({__name__=\"rp.assertion.total\", file=~\"$file\", block_name=~\"$block_name\", outcome=~\"$outcome\"}[$__range]))",
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }
@@ -403,7 +403,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (outcome) (sum_over_time({__name__=\"rp.block.runs\", file=~\"$file\", block_type=~\"$block_type\"}[$__interval]))",
+          "expr": "sum by (outcome) (sum_over_time({__name__=\"rp.block.runs\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\", outcome=~\"$outcome\"}[$__interval]))",
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }
@@ -438,7 +438,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (outcome) (sum_over_time({__name__=\"rp.assertion.total\", file=~\"$file\"}[$__interval]))",
+          "expr": "sum by (outcome) (sum_over_time({__name__=\"rp.assertion.total\", file=~\"$file\", block_name=~\"$block_name\", outcome=~\"$outcome\"}[$__interval]))",
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }
@@ -478,7 +478,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sort_desc(\n  sum by (block_name, file) (\n    sum_over_time({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=~\"$block_type\"}[$__range])\n  )\n  /\n  sum by (block_name, file) (\n    sum_over_time({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=~\"$block_type\"}[$__range])\n  )\n)",
+          "expr": "sort_desc(\n  sum by (block_name, file) (\n    sum_over_time({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\"}[$__range])\n  )\n  /\n  sum by (block_name, file) (\n    sum_over_time({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\"}[$__range])\n  )\n)",
           "legendFormat": "{{block_name}} ({{file}})",
           "refId": "A"
         }
@@ -516,7 +516,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (block_name) (\n  sum_over_time({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=~\"$block_type\"}[$__interval])\n)\n/\nsum by (block_name) (\n  sum_over_time({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=~\"$block_type\"}[$__interval])\n)",
+          "expr": "sum by (block_name) (\n  sum_over_time({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\"}[$__interval])\n)\n/\nsum by (block_name) (\n  sum_over_time({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\"}[$__interval])\n)",
           "legendFormat": "{{block_name}}",
           "refId": "A"
         }
@@ -553,12 +553,12 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (file) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"passed\", file=~\"$file\", block_type=\"test\"}[$__range]))",
+          "expr": "sum by (file) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"passed\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\"}[$__range]))",
           "legendFormat": "Passed \u2014 {{file}}",
           "refId": "A"
         },
         {
-          "expr": "sum by (file) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"failed\", file=~\"$file\", block_type=\"test\"}[$__range]))",
+          "expr": "sum by (file) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"failed\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\"}[$__range]))",
           "legendFormat": "Failed \u2014 {{file}}",
           "refId": "B"
         }
@@ -592,12 +592,12 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (group) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"passed\", group=~\".+\", file=~\"$file\", block_type=\"test\"}[$__range]))",
+          "expr": "sum by (group) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"passed\", group=~\"$group\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\"}[$__range]))",
           "legendFormat": "Passed \u2014 {{group}}",
           "refId": "A"
         },
         {
-          "expr": "sum by (group) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"failed\", group=~\".+\", file=~\"$file\", block_type=\"test\"}[$__range]))",
+          "expr": "sum by (group) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"failed\", group=~\"$group\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\"}[$__range]))",
           "legendFormat": "Failed \u2014 {{group}}",
           "refId": "B"
         }
@@ -638,35 +638,35 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "sum by (block_name, file, block_type, group) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"passed\", file=~\"$file\", block_type=~\"$block_type\"}[$__range]))",
+          "expr": "sum by (block_name, file, block_type, group) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"passed\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\"}[$__range]))",
           "legendFormat": "",
           "refId": "Passed",
           "format": "table",
           "instant": true
         },
         {
-          "expr": "sum by (block_name, file, block_type, group) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"failed\", file=~\"$file\", block_type=~\"$block_type\"}[$__range]))",
+          "expr": "sum by (block_name, file, block_type, group) (sum_over_time({__name__=\"rp.block.runs\", outcome=\"failed\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\"}[$__range]))",
           "legendFormat": "",
           "refId": "Failed",
           "format": "table",
           "instant": true
         },
         {
-          "expr": "sum by (block_name, file, block_type, group) (sum_over_time({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=~\"$block_type\"}[$__range])) / sum by (block_name, file, block_type, group) (sum_over_time({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=~\"$block_type\"}[$__range]))",
+          "expr": "sum by (block_name, file, block_type, group) (sum_over_time({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\"}[$__range])) / sum by (block_name, file, block_type, group) (sum_over_time({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\"}[$__range]))",
           "legendFormat": "",
           "refId": "AvgDuration",
           "format": "table",
           "instant": true
         },
         {
-          "expr": "sum by (block_name, file) (sum_over_time({__name__=\"rp.assertion.total\", outcome=\"passed\", file=~\"$file\"}[$__range]))",
+          "expr": "sum by (block_name, file) (sum_over_time({__name__=\"rp.assertion.total\", outcome=\"passed\", file=~\"$file\", block_name=~\"$block_name\"}[$__range]))",
           "legendFormat": "",
           "refId": "AssertPassed",
           "format": "table",
           "instant": true
         },
         {
-          "expr": "sum by (block_name, file) (sum_over_time({__name__=\"rp.assertion.total\", outcome=\"failed\", file=~\"$file\"}[$__range]))",
+          "expr": "sum by (block_name, file) (sum_over_time({__name__=\"rp.assertion.total\", outcome=\"failed\", file=~\"$file\", block_name=~\"$block_name\"}[$__range]))",
           "legendFormat": "",
           "refId": "AssertFailed",
           "format": "table",
@@ -752,7 +752,7 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
-          "expr": "topk(10,\n  sum by (block_name, file) (\n    sum_over_time({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=\"test\"}[$__range])\n  )\n  /\n  sum by (block_name, file) (\n    sum_over_time({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=\"test\"}[$__range])\n  )\n)",
+          "expr": "topk(10,\n  sum by (block_name, file) (\n    sum_over_time({__name__=\"rp.block.duration_sum\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\"}[$__range])\n  )\n  /\n  sum by (block_name, file) (\n    sum_over_time({__name__=\"rp.block.duration_count\", file=~\"$file\", block_type=~\"$block_type\", block_name=~\"$block_name\"}[$__range])\n  )\n)",
           "legendFormat": "{{block_name}} ({{file}})",
           "refId": "A"
         }
@@ -815,6 +815,57 @@
         "label": "Block Type",
         "options": [],
         "query": { "qryType": 1, "query": "label_values({__name__=\"rp.block.runs\"}, block_type)" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values({__name__=\"rp.block.runs\"}, outcome)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "outcome",
+        "label": "Outcome",
+        "options": [],
+        "query": { "qryType": 1, "query": "label_values({__name__=\"rp.block.runs\"}, outcome)" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values({__name__=\"rp.block.runs\", group=~\".+\"}, group)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "group",
+        "label": "Group",
+        "options": [],
+        "query": { "qryType": 1, "query": "label_values({__name__=\"rp.block.runs\", group=~\".+\"}, group)" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values({__name__=\"rp.block.runs\"}, block_name)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "block_name",
+        "label": "Test Name",
+        "options": [],
+        "query": { "qryType": 1, "query": "label_values({__name__=\"rp.block.runs\"}, block_name)" },
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
