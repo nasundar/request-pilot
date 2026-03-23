@@ -2,6 +2,10 @@
 
 A developer toolkit for HTTP traffic — a **Tauri v2 desktop app** for authoring and running E2E integration test suites from `.http` files, a **browser extension** for header injection, request blocking, and traffic analysis, a **terminal UI** for headless testing, and a **shared Rust core** that powers them all.
 
+<p align="center">
+  <img src="docs/images/Request-Pilot-Desktop.gif" alt="Request Pilot Desktop Demo" width="800" />
+</p>
+
 ## Architecture
 
 ```
