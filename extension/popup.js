@@ -117,7 +117,48 @@ document.addEventListener("DOMContentLoaded", async () => {
   await applyTheme();
   await loadRules();
   attachEventListeners();
+  updateDesktopStatus();
+  // Poll desktop connection status every 2 seconds
+  setInterval(updateDesktopStatus, 2000);
 });
+
+async function updateDesktopStatus() {
+  try {
+    const status = await sendMessage({ action: 'getLiveCaptureStatus' });
+    const dot = document.getElementById('desktopDot');
+    const text = document.getElementById('desktopStatusText');
+    const modeLabel = document.getElementById('desktopModeLabel');
+    if (!dot || !text || !modeLabel) return;
+
+    dot.className = 'desktop-dot';
+    modeLabel.className = 'desktop-mode-label';
+    modeLabel.textContent = '';
+
+    if (status.connected) {
+      if (status.mode === 'all') {
+        dot.classList.add('capturing');
+        text.textContent = 'Desktop: Capturing';
+        modeLabel.textContent = 'ALL';
+        modeLabel.classList.add('mode-all');
+      } else if (status.mode === 'filtered') {
+        dot.classList.add('capturing');
+        text.textContent = 'Desktop: Capturing';
+        modeLabel.textContent = 'FILTERED';
+        modeLabel.classList.add('mode-filtered');
+      } else {
+        dot.classList.add('connected');
+        text.textContent = 'Desktop: Connected';
+        modeLabel.textContent = 'PAUSED';
+        modeLabel.classList.add('mode-off');
+      }
+    } else {
+      dot.classList.add('disconnected');
+      text.textContent = 'Desktop: Not connected';
+    }
+  } catch {
+    /* extension context may not have live capture support */
+  }
+}
 
 function attachEventListeners() {
   // Tab switching

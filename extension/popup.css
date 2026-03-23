@@ -187,6 +187,37 @@ body::-webkit-scrollbar-thumb {
   color: var(--danger);
 }
 
+/* ========== Desktop Connection Status Bar ========== */
+.desktop-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  background: var(--bg-secondary, #161b22);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-muted, #6e7681);
+}
+.desktop-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--text-muted, #6e7681);
+  flex-shrink: 0;
+}
+.desktop-dot.connected { background: #3fb950; }
+.desktop-dot.capturing { background: #3fb950; animation: desktop-pulse 1.5s infinite; }
+.desktop-dot.disconnected { background: var(--text-muted, #6e7681); }
+.desktop-mode-label {
+  margin-left: auto;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+.desktop-mode-label.mode-all { background: rgba(63,185,80,.15); color: #3fb950; }
+.desktop-mode-label.mode-filtered { background: rgba(88,166,255,.15); color: #58a6ff; }
+.desktop-mode-label.mode-off { background: rgba(139,148,158,.1); color: var(--text-muted, #6e7681); }
+@keyframes desktop-pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+
 /* ========== Tab Bar ========== */
 .tab-bar {
   display: flex;

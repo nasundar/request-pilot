@@ -2,7 +2,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::Emitter;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, Notify};
 use tokio_tungstenite::tungstenite::Message;
 
 const LIVE_CAPTURE_PORT: u16 = 9718;
@@ -63,6 +63,8 @@ pub struct LiveCaptureState {
     pub running: Mutex<bool>,
     /// Connection status
     pub connected: Mutex<bool>,
+    /// Shutdown signal to wake the accept loop
+    pub shutdown: Notify,
 }
 
 impl LiveCaptureState {
@@ -73,6 +75,7 @@ impl LiveCaptureState {
             command_tx,
             running: Mutex::new(false),
             connected: Mutex::new(false),
+            shutdown: Notify::new(),
         }
     }
 }
@@ -110,11 +113,6 @@ pub async fn start_server(
     );
 
     loop {
-        // Check if we should stop
-        if !*state.running.lock().await {
-            break;
-        }
-
         tokio::select! {
             accept_result = listener.accept() => {
                 match accept_result {
@@ -132,11 +130,15 @@ pub async fn start_server(
                     }
                 }
             }
+            _ = state.shutdown.notified() => {
+                break;
+            }
         }
     }
 
     // Reset running flag so the server can be restarted
     *state.running.lock().await = false;
+    *state.connected.lock().await = false;
 
     let _ = app_handle.emit(
         "live-connection-status",
@@ -218,8 +220,12 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Stop the server by setting running to false.
+/// Stop the server by notifying the accept loop to exit.
 pub async fn stop_server(state: &LiveCaptureState) {
+    let was_running = *state.running.lock().await;
     *state.running.lock().await = false;
     *state.connected.lock().await = false;
+    if was_running {
+        state.shutdown.notify_one();
+    }
 }
