@@ -6055,41 +6055,6 @@ document.querySelectorAll('input[name="liveMode"]').forEach(radio => {
     const { error, preview } = event.payload;
     rpLog('error', `Live capture parse error: ${error}`, { preview });
   });
-
-  // Listen for response body follow-ups from extension
-  await listen('live-response-body', (event) => {
-    const { url, response_body, status_code } = event.payload;
-    // Find matching request in captured list (most recent first)
-    for (let i = liveCapturedRequests.length - 1; i >= 0; i--) {
-      const req = liveCapturedRequests[i];
-      if (req.url === url && !req.response_body) {
-        req.response_body = response_body;
-        if (status_code) req.status_code = status_code;
-        break;
-      }
-    }
-    // Update matching history entry — try exact URL, then pathname fallback
-    let matched = historyCache.find(
-      e => e.url === url && e.source === 'extension-live' && !e.response_body
-    );
-    if (!matched) {
-      try {
-        const targetPath = new URL(url).pathname;
-        matched = historyCache.find(e =>
-          e.source === 'extension-live' && !e.response_body &&
-          new URL(e.url).pathname === targetPath
-        );
-      } catch {}
-    }
-    if (matched) {
-      matched.response_body = response_body || '';
-      if (status_code) matched.status = status_code;
-      matched.response_size_bytes = response_body ? response_body.length : 0;
-      invoke('update_history_entry', { entry: matched }).catch(() => {});
-      if (currentMode === 'history') loadHistory();
-    }
-    rpLog('debug', `Live capture response body: ${url}`, { hasBody: !!response_body, matched: !!matched });
-  });
 })();
 
 // Add captured request to history and persist to Rust HistoryStore
