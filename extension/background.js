@@ -221,13 +221,53 @@ async function shouldForwardEntry(entry) {
 
 function tryForwardEntry(entry) {
   if (!isLiveConnected() || liveMode === 'off') return;
-  shouldForwardEntry(entry).then(should => {
+  shouldForwardEntry(entry).then(async (should) => {
     if (!should) return;
-    // Forward immediately — response body arrives later via captureResponseBody follow-up
+    // Wait briefly for content script to capture response body
+    await new Promise(r => setTimeout(r, 300));
+    if (!entry.responseBody) {
+      // Content script didn't capture — fetch from service worker
+      await fetchLiveCaptureBody(entry);
+    }
     forwardToDesktop(entry);
   }).catch(err => {
     console.warn('[RequestPilot] Forward check failed:', err);
   });
+}
+
+/** Fetch response body from service worker when content script misses it. */
+async function fetchLiveCaptureBody(entry) {
+  try {
+    const headers = {};
+    (entry.requestHeaders || []).forEach(h => {
+      const lower = h.name.toLowerCase();
+      if (['host', 'connection', 'content-length'].includes(lower) || h.name.startsWith(':')) return;
+      headers[h.name] = h.value || '';
+    });
+
+    const opts = { method: entry.method, headers, credentials: 'include' };
+
+    if (!['GET', 'HEAD'].includes(entry.method.toUpperCase()) && entry.requestBody) {
+      if (entry.requestBody.type === 'formData') {
+        opts.body = formDataToBody(entry.requestBody.data);
+        if (!headers['Content-Type'] && !headers['content-type']) {
+          headers['Content-Type'] = 'application/x-www-form-urlencoded';
+        }
+      } else if (entry.requestBody.type === 'raw') {
+        opts.body = entry.requestBody.data;
+      }
+    }
+
+    const resp = await fetch(entry.url, opts);
+    const text = await resp.text();
+    const MAX = 100000;
+    entry.responseBody = text.length > MAX
+      ? text.substring(0, MAX) + '\n...[truncated]'
+      : text;
+    console.log('[RequestPilot] SW fetched response body:', entry.url, 'size:', entry.responseBody.length);
+  } catch (e) {
+    console.warn('[RequestPilot] SW body fetch failed:', entry.url, e.message);
+  }
 }
 
 /* ============================================================
