@@ -357,4 +357,85 @@ mod tests {
             _ => panic!("Expected Request variant"),
         }
     }
+
+    #[test]
+    fn reject_unknown_action() {
+        let json = r#"{"action":"unknown_action","data":{}}"#;
+        assert!(serde_json::from_str::<IncomingMessage>(json).is_err());
+    }
+
+    #[test]
+    fn parse_request_no_response_body_field() {
+        // Live capture sends requests without response_body
+        let json = r#"{"action":"request","data":{"url":"https://prom.azure.com/api/v1/query_range","method":"POST","request_headers":[{"name":"Authorization","value":"Bearer token123"}],"request_body":"query=up&start=1700000000&end=1700003600&step=60","status_code":200,"response_headers":[{"name":"content-type","value":"application/json"}],"duration":320,"timestamp":1700000000.5}}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            IncomingMessage::Request { data } => {
+                assert_eq!(data.url, "https://prom.azure.com/api/v1/query_range");
+                assert_eq!(data.method, "POST");
+                assert_eq!(data.request_body, Some("query=up&start=1700000000&end=1700003600&step=60".to_string()));
+                assert_eq!(data.status_code, Some(200));
+                assert!(data.response_body.is_none()); // not sent by live capture
+                assert_eq!(data.duration, Some(320));
+                assert_eq!(data.request_headers.len(), 1);
+                assert_eq!(data.response_headers.len(), 1);
+            }
+            _ => panic!("Expected Request variant"),
+        }
+    }
+
+    #[test]
+    fn parse_request_form_urlencoded_body() {
+        // formData converted to URL-encoded by extension
+        let json = r#"{"action":"request","data":{"url":"https://api.test/query","method":"POST","request_body":"query=max%20by%20(pod)%20(%0A%20%20up%0A)&start=1700000000&step=60","status_code":200}}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            IncomingMessage::Request { data } => {
+                assert!(data.request_body.as_ref().unwrap().contains("query=max%20by"));
+                assert!(data.request_body.as_ref().unwrap().contains("&start=1700000000"));
+            }
+            _ => panic!("Expected Request variant"),
+        }
+    }
+
+    #[test]
+    fn captured_request_serialization_roundtrip() {
+        let req = CapturedRequest {
+            url: "https://example.com/test".to_string(),
+            method: "PUT".to_string(),
+            request_headers: vec![
+                HeaderPair { name: "Content-Type".to_string(), value: "application/json".to_string() },
+                HeaderPair { name: "Authorization".to_string(), value: "Bearer abc".to_string() },
+            ],
+            request_body: Some(r#"{"key":"val"}"#.to_string()),
+            status_code: Some(204),
+            response_headers: vec![],
+            response_body: None,
+            duration: Some(88),
+            timestamp: Some(1700000000.0),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: CapturedRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.url, req.url);
+        assert_eq!(deserialized.method, req.method);
+        assert_eq!(deserialized.request_headers.len(), 2);
+        assert_eq!(deserialized.request_body, req.request_body);
+        assert_eq!(deserialized.status_code, Some(204));
+        assert!(deserialized.response_body.is_none());
+        assert_eq!(deserialized.duration, Some(88));
+    }
+
+    #[test]
+    fn serialize_ping_mode_messages() {
+        let ping = OutgoingMessage::Ping;
+        let json = serde_json::to_string(&ping).unwrap();
+        assert!(json.contains(r#""action":"ping""#));
+
+        let modes = ["off", "all", "filtered"];
+        for mode in modes {
+            let msg = OutgoingMessage::SetMode { mode: mode.to_string() };
+            let json = serde_json::to_string(&msg).unwrap();
+            assert!(json.contains(&format!(r#""mode":"{}""#, mode)));
+        }
+    }
 }

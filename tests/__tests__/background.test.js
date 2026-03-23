@@ -714,3 +714,141 @@ describe("webRequest Listeners", () => {
     expect(chromeMock.webRequest.onErrorOccurred.addListener).toHaveBeenCalled();
   });
 });
+
+/* =============================================================
+ * Live Capture — formDataToBody
+ * ============================================================= */
+
+describe("Live Capture — formDataToBody", () => {
+  // formDataToBody is internal, test via forwardToDesktop behavior
+  // We can test it indirectly via the captureResponseBody path
+
+  test("captureResponseBody does not forward to desktop when no socket", async () => {
+    // When live capture is not connected, captureResponseBody should not throw
+    const result = await send({
+      action: "captureResponseBody",
+      url: "https://api.test.com/endpoint",
+      body: '{"data":"response"}',
+      status: 200,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  test("captureResponseBody matches entry by exact URL", async () => {
+    // Import an entry to networkLog, then capture body for it
+    const entry = {
+      id: "match-test-1",
+      url: "https://api.test.com/exact-match",
+      method: "GET",
+      statusCode: 200,
+      responseBody: null,
+      timestamp: Date.now(),
+    };
+    await send({ action: "importNetworkLog", log: [entry] });
+
+    const result = await send({
+      action: "captureResponseBody",
+      url: "https://api.test.com/exact-match",
+      body: '{"matched":"yes"}',
+      status: 200,
+    });
+    expect(result.success).toBe(true);
+
+    // Verify the body was stored
+    const log = await send({ action: "getNetworkLog" });
+    const matched = log.log.find(e => e.id === "match-test-1");
+    expect(matched).toBeDefined();
+    expect(matched.responseBody).toBe('{"matched":"yes"}');
+  });
+
+  test("captureResponseBody matches by URL without query string", async () => {
+    await send({ action: "clearNetworkLog" });
+    const entry = {
+      id: "query-test",
+      url: "https://api.test.com/search?q=test&page=1",
+      method: "GET",
+      statusCode: 200,
+      responseBody: null,
+      timestamp: Date.now(),
+    };
+    await send({ action: "importNetworkLog", log: [entry] });
+
+    const result = await send({
+      action: "captureResponseBody",
+      url: "https://api.test.com/search",
+      body: "search results",
+      status: 200,
+    });
+    expect(result.success).toBe(true);
+
+    const log = await send({ action: "getNetworkLog" });
+    const matched = log.log.find(e => e.id === "query-test");
+    expect(matched.responseBody).toBe("search results");
+  });
+
+  test("captureResponseBody matches by pathname when full URL differs", async () => {
+    await send({ action: "clearNetworkLog" });
+    const entry = {
+      id: "path-test",
+      url: "https://api.test.com/api/v1/data?a=1",
+      method: "POST",
+      statusCode: 200,
+      responseBody: null,
+      timestamp: Date.now(),
+    };
+    await send({ action: "importNetworkLog", log: [entry] });
+
+    // Content script might report slightly different URL
+    const result = await send({
+      action: "captureResponseBody",
+      url: "https://api.test.com/api/v1/data?a=1&b=2",
+      body: "path matched",
+      status: 200,
+    });
+    expect(result.success).toBe(true);
+
+    const log = await send({ action: "getNetworkLog" });
+    const matched = log.log.find(e => e.id === "path-test");
+    expect(matched.responseBody).toBe("path matched");
+  });
+
+  test("captureResponseBody skips entries that already have a body", async () => {
+    await send({ action: "clearNetworkLog" });
+    const entries = [
+      { id: "has-body", url: "https://api.test.com/dup", method: "GET", statusCode: 200, responseBody: "existing", timestamp: Date.now() },
+      { id: "no-body", url: "https://api.test.com/dup", method: "GET", statusCode: 200, responseBody: null, timestamp: Date.now() },
+    ];
+    await send({ action: "importNetworkLog", log: entries });
+
+    await send({
+      action: "captureResponseBody",
+      url: "https://api.test.com/dup",
+      body: "new body",
+      status: 200,
+    });
+
+    const log = await send({ action: "getNetworkLog" });
+    const hasBody = log.log.find(e => e.id === "has-body");
+    const noBody = log.log.find(e => e.id === "no-body");
+    expect(hasBody.responseBody).toBe("existing"); // unchanged
+    expect(noBody.responseBody).toBe("new body"); // updated
+  });
+
+  test("multiple captureResponseBody calls each match different entries", async () => {
+    await send({ action: "clearNetworkLog" });
+    const entries = [
+      { id: "first", url: "https://api.test.com/multi", method: "GET", statusCode: 200, responseBody: null, timestamp: Date.now() },
+      { id: "second", url: "https://api.test.com/multi", method: "GET", statusCode: 200, responseBody: null, timestamp: Date.now() },
+    ];
+    await send({ action: "importNetworkLog", log: entries });
+
+    await send({ action: "captureResponseBody", url: "https://api.test.com/multi", body: "body-1", status: 200 });
+    await send({ action: "captureResponseBody", url: "https://api.test.com/multi", body: "body-2", status: 200 });
+
+    const log = await send({ action: "getNetworkLog" });
+    const first = log.log.find(e => e.id === "first");
+    const second = log.log.find(e => e.id === "second");
+    expect(first.responseBody).toBe("body-1");
+    expect(second.responseBody).toBe("body-2");
+  });
+});

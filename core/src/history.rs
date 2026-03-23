@@ -603,4 +603,99 @@ mod tests {
         let names = store.distinct_block_names();
         assert_eq!(names, vec!["Create Token", "Delete User", "List Users", "Login Test"]);
     }
+
+    // --- update tests ---
+
+    #[test]
+    fn update_existing_entry() {
+        let mut store = HistoryStore::new();
+        let mut entry = make_entry("update-me");
+        entry.seq = 42;
+        entry.status = 200;
+        entry.method = "GET".to_string();
+        store.add(entry);
+
+        let mut updated = make_entry("update-me");
+        updated.seq = 999; // should be overwritten with original seq
+        updated.status = 201;
+        updated.method = "POST".to_string();
+        updated.response_body = Some("new body".to_string());
+
+        assert!(store.update(updated));
+        assert_eq!(store.entries.len(), 1);
+        assert_eq!(store.entries[0].seq, 42); // preserved
+        assert_eq!(store.entries[0].status, 201); // updated
+        assert_eq!(store.entries[0].method, "POST"); // updated
+        assert_eq!(store.entries[0].response_body.as_deref(), Some("new body"));
+    }
+
+    #[test]
+    fn update_nonexistent_returns_false() {
+        let mut store = HistoryStore::new();
+        store.add(make_entry("existing"));
+        let ghost = make_entry("ghost-id");
+        assert!(!store.update(ghost));
+        assert_eq!(store.entries.len(), 1);
+        assert_eq!(store.entries[0].id, "existing");
+    }
+
+    #[test]
+    fn update_preserves_seq_not_other_fields() {
+        let mut store = HistoryStore::new();
+        let mut original = make_entry("e1");
+        original.seq = 10;
+        original.url = "https://old.com".to_string();
+        original.request_body = Some("old body".to_string());
+        store.add(original);
+
+        let mut replacement = make_entry("e1");
+        replacement.seq = 99;
+        replacement.url = "https://new.com".to_string();
+        replacement.request_body = None;
+
+        assert!(store.update(replacement));
+        let e = &store.entries[0];
+        assert_eq!(e.seq, 10); // seq preserved
+        assert_eq!(e.url, "https://new.com"); // replaced
+        assert!(e.request_body.is_none()); // replaced (was Some, now None)
+    }
+
+    #[test]
+    fn update_correct_entry_among_many() {
+        let mut store = HistoryStore::new();
+        store.add(make_entry("a"));
+        store.add(make_entry("b"));
+        store.add(make_entry("c"));
+
+        let mut updated = make_entry("b");
+        updated.status = 500;
+
+        assert!(store.update(updated));
+        // Only "b" should be updated
+        assert_eq!(store.entries.iter().find(|e| e.id == "a").unwrap().status, 200);
+        assert_eq!(store.entries.iter().find(|e| e.id == "b").unwrap().status, 500);
+        assert_eq!(store.entries.iter().find(|e| e.id == "c").unwrap().status, 200);
+    }
+
+    #[test]
+    fn update_empty_store_returns_false() {
+        let mut store = HistoryStore::new();
+        assert!(!store.update(make_entry("no-one-home")));
+    }
+
+    // --- filter by source extension-live ---
+
+    #[test]
+    fn filter_by_extension_live_source() {
+        let mut store = HistoryStore::new();
+        store.add(make_entry_with(1, "GET", "https://api.com/a", 200, "manual", None));
+        store.add(make_entry_with(2, "POST", "https://api.com/b", 200, "extension-live", None));
+        store.add(make_entry_with(3, "GET", "https://api.com/c", 200, "extension-live", None));
+        store.add(make_entry_with(4, "DELETE", "https://api.com/d", 204, "test-run", Some("r1")));
+
+        let f = HistoryFilter { source: Some("extension-live".to_string()), ..Default::default() };
+        let results = store.filter(&f);
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|e| e.source == "extension-live"));
+    }
 }
