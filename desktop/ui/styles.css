@@ -3381,9 +3381,9 @@ input:focus, select:focus, textarea:focus { outline: none; }
   transform: translateX(14px);
 }
 
-/* Paused state — dim the button */
+/* Paused state — mute the button text, not the whole element (preserves tooltip) */
 .telemetry-btn.paused {
-  opacity: 0.5;
+  color: var(--text-muted);
 }
 
 .azure-auth-btn {

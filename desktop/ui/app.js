@@ -2609,7 +2609,7 @@ saveEnvBtn.addEventListener('click', async (e) => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = envFilePath || '.env';
+  a.download = (envFilePath && envFilePath.endsWith('.env')) ? envFilePath : '.env';
   a.click();
   URL.revokeObjectURL(url);
   showToast('Env file downloaded', 'success');
@@ -5432,7 +5432,7 @@ initAzureAuth();
   const tooltip = $('#telemetryTooltip');
   let hideTimer = null;
   const show = () => { clearTimeout(hideTimer); btn.classList.add('tooltip-visible'); };
-  const scheduleHide = () => { hideTimer = setTimeout(() => btn.classList.remove('tooltip-visible'), 150); };
+  const scheduleHide = () => { hideTimer = setTimeout(() => btn.classList.remove('tooltip-visible'), 350); };
   if (btn && tooltip) {
     btn.addEventListener('mouseenter', show);
     btn.addEventListener('mouseleave', scheduleHide);
