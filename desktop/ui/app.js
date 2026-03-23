@@ -193,9 +193,13 @@ const historyCountBadge   = $('#historyCountBadge');
 const historyMethodFilter = $('#historyMethodFilter');
 const historyStatusFilter = $('#historyStatusFilter');
 const historySourceFilter = $('#historySourceFilter');
-const historyFileFilter   = $('#historyFileFilter');
-const historyGroupFilter  = $('#historyGroupFilter');
-const historyBlockFilter  = $('#historyBlockFilter');
+const histTreeFilterWrapper = $('#histTreeFilterWrapper');
+const histTreeFilterBtn = $('#histTreeFilterBtn');
+const histTreeFilterLabel = $('#histTreeFilterLabel');
+const histTreeFilterDropdown = $('#histTreeFilterDropdown');
+const histTreeFilterList = $('#histTreeFilterList');
+const histTreeSelectAll = $('#histTreeSelectAll');
+const histTreeClearAll = $('#histTreeClearAll');
 const historyUrlSearch    = $('#historyUrlSearch');
 const historyGroupBySelect= $('#historyGroupBySelect');
 const historyDetailOverlay= $('#historyDetailOverlay');
@@ -3761,15 +3765,27 @@ function buildHistoryFilter() {
   else if (status === '5xx') { filter.status_min = 500; filter.status_max = 599; }
   const source = historySourceFilter.value;
   if (source) filter.source = source;
-  const fileName = historyFileFilter.value;
-  if (fileName) filter.file_name = fileName;
-  const group = historyGroupFilter.value;
-  if (group) filter.group = group;
-  const blockName = historyBlockFilter.value;
-  if (blockName) filter.block_name = blockName;
   const urlSearch = historyUrlSearch.value.trim();
   if (urlSearch) filter.url_contains = urlSearch;
   return filter;
+}
+
+/** Apply tree filter selections client-side (multi-select). */
+function applyTreeFilter(entries) {
+  const sel = getTreeFilterSelections();
+  if (!sel) return entries; // nothing selected = show all
+  return entries.filter(e => {
+    const file = e.file_name || null;
+    const group = e.group || null;
+    const block = e.block_name || null;
+    // Check if this entry matches any selected leaf
+    for (const s of sel) {
+      if (s.type === 'file' && file === s.file) return true;
+      if (s.type === 'group' && file === s.file && group === s.group) return true;
+      if (s.type === 'test' && file === s.file && group === s.group && block === s.test) return true;
+    }
+    return false;
+  });
 }
 
 async function loadHistory() {
@@ -3779,14 +3795,17 @@ async function loadHistory() {
   try {
     const filter = buildHistoryFilter();
     const hasFilter = Object.keys(filter).length > 0;
-    historyCache = hasFilter
+    let entries = hasFilter
       ? await invoke('get_filtered_history', { filter })
       : await invoke('get_history');
+    // Rebuild tree filter options from full dataset, then apply selection
+    rebuildTreeFilter(entries);
+    entries = applyTreeFilter(entries);
+    historyCache = entries;
     renderHistoryStats(historyCache);
     renderHistoryLog(historyCache);
     historyCountBadge.textContent = historyCache.length;
     rpLog('debug', 'History loaded', { count: historyCache.length });
-    await refreshHistoryFilterOptions();
   } catch (err) {
     historyCache = [];
     renderHistoryStats([]);
@@ -3796,42 +3815,216 @@ async function loadHistory() {
   }
 }
 
-async function refreshHistoryFilterOptions() {
-  try {
-    const vals = await invoke('get_history_distinct_values');
-    // File filter
-    const curFile = historyFileFilter.value;
-    historyFileFilter.innerHTML = '<option value="">All Files</option>';
-    vals.file_names.forEach(f => {
-      const opt = document.createElement('option');
-      opt.value = f;
-      opt.textContent = f;
-      if (f === curFile) opt.selected = true;
-      historyFileFilter.appendChild(opt);
-    });
-    // Group filter
-    const curGroup = historyGroupFilter.value;
-    historyGroupFilter.innerHTML = '<option value="">All Groups</option>';
-    vals.groups.forEach(g => {
-      const opt = document.createElement('option');
-      opt.value = g;
-      opt.textContent = g;
-      if (g === curGroup) opt.selected = true;
-      historyGroupFilter.appendChild(opt);
-    });
-    // Block/Test filter
-    const curBlock = historyBlockFilter.value;
-    historyBlockFilter.innerHTML = '<option value="">All Tests</option>';
-    vals.block_names.forEach(b => {
-      const opt = document.createElement('option');
-      opt.value = b;
-      opt.textContent = b;
-      if (b === curBlock) opt.selected = true;
-      historyBlockFilter.appendChild(opt);
-    });
-  } catch (err) {
-    rpLog('warn', 'Failed to refresh history filter options', String(err));
+// ── Hierarchical tree filter ──
+
+let _treeFilterState = new Map(); // key -> checked boolean
+
+function _treeKey(type, file, group, test) {
+  if (type === 'file') return `f:${file}`;
+  if (type === 'group') return `f:${file}/g:${group}`;
+  return `f:${file}/g:${group}/t:${test}`;
+}
+
+function rebuildTreeFilter(entries) {
+  // Build hierarchy: file -> group -> test -> count
+  const tree = new Map(); // file -> Map<group, Map<test, count>>
+  entries.forEach(e => {
+    const file = e.file_name || '(No File)';
+    const group = e.group || '(Ungrouped)';
+    const test = e.block_name || '(Unnamed)';
+    if (!tree.has(file)) tree.set(file, new Map());
+    const gm = tree.get(file);
+    if (!gm.has(group)) gm.set(group, new Map());
+    const tm = gm.get(group);
+    tm.set(test, (tm.get(test) || 0) + 1);
+  });
+
+  // Preserve existing checked state, default all checked for new items
+  const oldState = new Map(_treeFilterState);
+  _treeFilterState.clear();
+  const allKeysInTree = new Set();
+
+  histTreeFilterList.innerHTML = '';
+
+  for (const [file, groupMap] of [...tree.entries()].sort((a,b) => a[0].localeCompare(b[0]))) {
+    const fileKey = _treeKey('file', file);
+    allKeysInTree.add(fileKey);
+    const fileCount = [...groupMap.values()].reduce((s, tm) => s + [...tm.values()].reduce((s2, c) => s2 + c, 0), 0);
+    const fileChecked = oldState.has(fileKey) ? oldState.get(fileKey) : true;
+    _treeFilterState.set(fileKey, fileChecked);
+    histTreeFilterList.appendChild(_createTreeNode('file', file, fileCount, fileChecked, fileKey, '📄'));
+
+    for (const [group, testMap] of [...groupMap.entries()].sort((a,b) => a[0].localeCompare(b[0]))) {
+      const groupKey = _treeKey('group', file, group);
+      allKeysInTree.add(groupKey);
+      const groupCount = [...testMap.values()].reduce((s, c) => s + c, 0);
+      const groupChecked = oldState.has(groupKey) ? oldState.get(groupKey) : true;
+      _treeFilterState.set(groupKey, groupChecked);
+      histTreeFilterList.appendChild(_createTreeNode('group', group, groupCount, groupChecked, groupKey, '📁'));
+
+      for (const [test, count] of [...testMap.entries()].sort((a,b) => a[0].localeCompare(b[0]))) {
+        const testKey = _treeKey('test', file, group, test);
+        allKeysInTree.add(testKey);
+        const testChecked = oldState.has(testKey) ? oldState.get(testKey) : true;
+        _treeFilterState.set(testKey, testChecked);
+        histTreeFilterList.appendChild(_createTreeNode('test', test, count, testChecked, testKey, '🧪'));
+      }
+    }
   }
+
+  updateTreeFilterLabel();
+}
+
+function _createTreeNode(level, label, count, checked, key, icon) {
+  const node = document.createElement('div');
+  node.className = `hist-tree-node level-${level}`;
+  node.dataset.key = key;
+  node.dataset.level = level;
+  node.innerHTML = `
+    <input type="checkbox" ${checked ? 'checked' : ''}>
+    <span class="hist-tree-node-icon">${icon}</span>
+    <span class="hist-tree-node-label" title="${escapeAttr(label)}">${escapeHtml(label)}</span>
+    <span class="hist-tree-node-count">${count}</span>
+  `;
+  const cb = node.querySelector('input');
+  cb.addEventListener('change', () => {
+    _treeFilterState.set(key, cb.checked);
+    // Cascade: if file/group toggled, toggle all children
+    if (level === 'file') {
+      _cascadeCheck(key + '/', cb.checked);
+    } else if (level === 'group') {
+      _cascadeCheck(key + '/', cb.checked);
+    }
+    // Also update parent state
+    _syncParentChecks();
+    updateTreeFilterLabel();
+    loadHistory();
+  });
+  node.addEventListener('click', (e) => {
+    if (e.target === cb) return;
+    cb.checked = !cb.checked;
+    cb.dispatchEvent(new Event('change'));
+  });
+  return node;
+}
+
+function _cascadeCheck(prefix, checked) {
+  for (const [key] of _treeFilterState) {
+    if (key.startsWith(prefix)) {
+      _treeFilterState.set(key, checked);
+    }
+  }
+  // Update DOM checkboxes
+  histTreeFilterList.querySelectorAll('.hist-tree-node').forEach(node => {
+    if (node.dataset.key.startsWith(prefix)) {
+      node.querySelector('input').checked = checked;
+    }
+  });
+}
+
+function _syncParentChecks() {
+  // For each file node, check if all children are checked
+  histTreeFilterList.querySelectorAll('.hist-tree-node[data-level="file"]').forEach(fileNode => {
+    const fileKey = fileNode.dataset.key;
+    const children = [..._treeFilterState.entries()].filter(([k]) => k.startsWith(fileKey + '/'));
+    if (children.length > 0) {
+      const allChecked = children.every(([, v]) => v);
+      fileNode.querySelector('input').checked = allChecked;
+      _treeFilterState.set(fileKey, allChecked);
+    }
+  });
+  histTreeFilterList.querySelectorAll('.hist-tree-node[data-level="group"]').forEach(groupNode => {
+    const groupKey = groupNode.dataset.key;
+    const children = [..._treeFilterState.entries()].filter(([k]) => k.startsWith(groupKey + '/'));
+    if (children.length > 0) {
+      const allChecked = children.every(([, v]) => v);
+      groupNode.querySelector('input').checked = allChecked;
+      _treeFilterState.set(groupKey, allChecked);
+    }
+  });
+}
+
+function getTreeFilterSelections() {
+  // If all are checked, return null (no filter)
+  const allChecked = [..._treeFilterState.values()].every(v => v);
+  if (allChecked || _treeFilterState.size === 0) return null;
+
+  // Collect selected nodes — return the most specific checked items
+  const selections = [];
+  for (const [key, checked] of _treeFilterState) {
+    if (!checked) continue;
+    const parts = key.split('/');
+    if (parts.length === 1) {
+      // File level: f:filename
+      const file = parts[0].slice(2);
+      selections.push({ type: 'file', file: file === '(No File)' ? null : file });
+    } else if (parts.length === 2) {
+      const file = parts[0].slice(2);
+      const group = parts[1].slice(2);
+      selections.push({ type: 'group', file: file === '(No File)' ? null : file, group: group === '(Ungrouped)' ? null : group });
+    } else if (parts.length === 3) {
+      const file = parts[0].slice(2);
+      const group = parts[1].slice(2);
+      const test = parts[2].slice(2);
+      selections.push({ type: 'test', file: file === '(No File)' ? null : file, group: group === '(Ungrouped)' ? null : group, test: test === '(Unnamed)' ? null : test });
+    }
+  }
+  // Deduplicate: if a file is fully selected, remove its children
+  const fileKeys = new Set(selections.filter(s => s.type === 'file').map(s => s.file));
+  const groupKeys = new Set(selections.filter(s => s.type === 'group').map(s => `${s.file}/${s.group}`));
+  return selections.filter(s => {
+    if (s.type === 'group' && fileKeys.has(s.file)) return false;
+    if (s.type === 'test' && fileKeys.has(s.file)) return false;
+    if (s.type === 'test' && groupKeys.has(`${s.file}/${s.group}`)) return false;
+    return true;
+  });
+}
+
+function updateTreeFilterLabel() {
+  const allChecked = [..._treeFilterState.values()].every(v => v);
+  if (allChecked || _treeFilterState.size === 0) {
+    histTreeFilterLabel.textContent = 'All Files / Groups / Tests';
+    return;
+  }
+  const noneChecked = [..._treeFilterState.values()].every(v => !v);
+  if (noneChecked) {
+    histTreeFilterLabel.textContent = 'None selected';
+    return;
+  }
+  // Count selected leaf nodes
+  const checkedLeaves = [..._treeFilterState.entries()].filter(([k, v]) => v && k.includes('/g:') && k.includes('/t:'));
+  const totalLeaves = [..._treeFilterState.entries()].filter(([k]) => k.includes('/g:') && k.includes('/t:'));
+  if (checkedLeaves.length === totalLeaves.length) {
+    histTreeFilterLabel.textContent = 'All Files / Groups / Tests';
+  } else {
+    histTreeFilterLabel.textContent = `${checkedLeaves.length} of ${totalLeaves.length} tests`;
+  }
+}
+
+// Toggle dropdown
+histTreeFilterBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  histTreeFilterDropdown.classList.toggle('hidden');
+});
+document.addEventListener('click', (e) => {
+  if (!histTreeFilterDropdown.classList.contains('hidden') &&
+      !histTreeFilterDropdown.contains(e.target) &&
+      !histTreeFilterBtn.contains(e.target)) {
+    histTreeFilterDropdown.classList.add('hidden');
+  }
+});
+histTreeSelectAll.addEventListener('click', () => {
+  for (const key of _treeFilterState.keys()) _treeFilterState.set(key, true);
+  histTreeFilterList.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true);
+  updateTreeFilterLabel();
+  loadHistory();
+});
+histTreeClearAll.addEventListener('click', () => {
+  for (const key of _treeFilterState.keys()) _treeFilterState.set(key, false);
+  histTreeFilterList.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+  updateTreeFilterLabel();
+  loadHistory();
+});
 }
 
 function historyPercentile(arr, p) {
@@ -4667,9 +4860,6 @@ function removeGhostText() {
 historyMethodFilter.addEventListener('change', loadHistory);
 historyStatusFilter.addEventListener('change', loadHistory);
 historySourceFilter.addEventListener('change', loadHistory);
-historyFileFilter.addEventListener('change', loadHistory);
-historyGroupFilter.addEventListener('change', loadHistory);
-historyBlockFilter.addEventListener('change', loadHistory);
 historyGroupBySelect.addEventListener('change', () => renderHistoryLog(historyCache));
 let historySearchTimeout;
 historyUrlSearch.addEventListener('input', () => {

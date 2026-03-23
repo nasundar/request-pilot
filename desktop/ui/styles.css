@@ -2354,6 +2354,101 @@ input:focus, select:focus, textarea:focus { outline: none; }
   padding-left: 42px;
 }
 
+/* ── File → Group → Test tree indentation ── */
+/* Level 2 (group) header inside file body */
+.hist-domain-body > .hist-path-group > .hist-path-header {
+  padding-left: 28px;
+}
+/* Level 3 (test) header inside group body */
+.hist-path-body > .hist-group > .hist-group-header {
+  padding-left: 48px;
+}
+/* Level 3 entry rows (single test, no nested group) */
+.hist-path-body > .hist-entry-row {
+  padding-left: 48px;
+}
+/* Level 4 entry rows inside test group body */
+.hist-path-body > .hist-group > .hist-group-body > .hist-entry-row {
+  padding-left: 64px;
+}
+
+/* ── Hierarchical tree filter dropdown ── */
+.hist-tree-filter-wrapper {
+  position: relative;
+}
+.hist-tree-filter-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 200px;
+  max-width: 260px;
+  text-align: left;
+  cursor: pointer;
+}
+.hist-tree-filter-btn span:first-child {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hist-tree-filter-arrow { font-size: 10px; flex-shrink: 0; }
+.hist-tree-filter-dropdown {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  z-index: 1000;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  min-width: 300px;
+  max-height: 320px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  display: flex;
+  flex-direction: column;
+}
+.hist-tree-filter-actions {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.hist-tree-filter-list {
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.hist-tree-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.hist-tree-node:hover { background: var(--bg-tertiary); }
+.hist-tree-node input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.hist-tree-node-icon { flex-shrink: 0; }
+.hist-tree-node-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.hist-tree-node-count {
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.hist-tree-node.level-file { padding-left: 8px; font-weight: 600; }
+.hist-tree-node.level-group { padding-left: 26px; }
+.hist-tree-node.level-test { padding-left: 44px; font-size: 11px; }
+
 /* ---------- History Entry Rows ---------- */
 .hist-entry-row {
   display: flex;

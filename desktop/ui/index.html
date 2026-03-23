@@ -167,15 +167,19 @@
             <option value="manual">Manual</option>
             <option value="test-run">Test Run</option>
           </select>
-          <select id="historyFileFilter" class="history-filter-select">
-            <option value="">All Files</option>
-          </select>
-          <select id="historyGroupFilter" class="history-filter-select">
-            <option value="">All Groups</option>
-          </select>
-          <select id="historyBlockFilter" class="history-filter-select">
-            <option value="">All Tests</option>
-          </select>
+          <div class="hist-tree-filter-wrapper" id="histTreeFilterWrapper">
+            <button class="history-filter-select hist-tree-filter-btn" id="histTreeFilterBtn" type="button">
+              <span id="histTreeFilterLabel">All Files / Groups / Tests</span>
+              <span class="hist-tree-filter-arrow">▾</span>
+            </button>
+            <div class="hist-tree-filter-dropdown hidden" id="histTreeFilterDropdown">
+              <div class="hist-tree-filter-actions">
+                <button class="btn btn-ghost btn-xs" id="histTreeSelectAll">Select All</button>
+                <button class="btn btn-ghost btn-xs" id="histTreeClearAll">Clear All</button>
+              </div>
+              <div class="hist-tree-filter-list" id="histTreeFilterList"></div>
+            </div>
+          </div>
           <div class="history-search-wrapper">
             <input type="text" id="historyUrlSearch" class="history-url-search" placeholder="Search URL..." spellcheck="false" autocomplete="off">
             <div class="autocomplete-dropdown hidden" id="autocompleteDropdown"></div>
