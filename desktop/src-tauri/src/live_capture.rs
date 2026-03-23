@@ -42,6 +42,14 @@ pub struct HeaderPair {
 #[serde(rename_all = "snake_case")]
 enum IncomingMessage {
     Request { data: CapturedRequest },
+    /// Follow-up message with response body for a previously forwarded request.
+    ResponseBody {
+        url: String,
+        #[serde(default)]
+        response_body: Option<String>,
+        #[serde(default)]
+        status_code: Option<u16>,
+    },
     Pong,
     Connected,
 }
@@ -190,6 +198,13 @@ async fn handle_connection(
                         match serde_json::from_str::<IncomingMessage>(&text) {
                             Ok(IncomingMessage::Request { data }) => {
                                 let _ = app_handle.emit("live-request", &data);
+                            }
+                            Ok(IncomingMessage::ResponseBody { url, response_body, status_code }) => {
+                                let _ = app_handle.emit("live-response-body", serde_json::json!({
+                                    "url": url,
+                                    "response_body": response_body,
+                                    "status_code": status_code,
+                                }));
                             }
                             Ok(IncomingMessage::Pong) => {}
                             Ok(IncomingMessage::Connected) => {}
@@ -355,6 +370,42 @@ mod tests {
                 assert_eq!(data.status_code, Some(0));
             }
             _ => panic!("Expected Request variant"),
+        }
+    }
+
+    #[test]
+    fn parse_response_body_message() {
+        let json = r#"{"action":"response_body","url":"https://example.com/api","response_body":"<html>OK</html>","status_code":200}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            IncomingMessage::ResponseBody {
+                url,
+                response_body,
+                status_code,
+            } => {
+                assert_eq!(url, "https://example.com/api");
+                assert_eq!(response_body, Some("<html>OK</html>".to_string()));
+                assert_eq!(status_code, Some(200));
+            }
+            _ => panic!("Expected ResponseBody variant"),
+        }
+    }
+
+    #[test]
+    fn parse_response_body_minimal() {
+        let json = r#"{"action":"response_body","url":"https://x.com"}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            IncomingMessage::ResponseBody {
+                url,
+                response_body,
+                status_code,
+            } => {
+                assert_eq!(url, "https://x.com");
+                assert!(response_body.is_none());
+                assert!(status_code.is_none());
+            }
+            _ => panic!("Expected ResponseBody variant"),
         }
     }
 }

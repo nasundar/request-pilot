@@ -143,6 +143,8 @@ function formDataToBody(data) {
 
 function forwardToDesktop(entry) {
   if (!isLiveConnected() || liveMode === 'off') return;
+  // Track entry for later response body follow-up
+  entry._liveForwarded = true;
 
   let bodyStr = null;
   if (entry.requestBody) {
@@ -170,6 +172,22 @@ function forwardToDesktop(entry) {
     liveSocket.send(msg);
   } catch (e) {
     console.warn('[RequestPilot] Failed to forward request:', e);
+  }
+}
+
+/** Send a follow-up message with response body for a previously forwarded request. */
+function forwardResponseBody(entry) {
+  if (!isLiveConnected() || liveMode === 'off') return;
+  try {
+    const msg = JSON.stringify({
+      action: 'response_body',
+      url: entry.url,
+      response_body: entry.responseBody || null,
+      status_code: entry.statusCode || null,
+    });
+    liveSocket.send(msg);
+  } catch (e) {
+    console.warn('[RequestPilot] Failed to forward response body:', e);
   }
 }
 
@@ -437,6 +455,10 @@ async function handleMessage(msg) {
 
       if (matched) {
         matched.responseBody = msg.body;
+        // Forward response body to desktop if this request was live-forwarded
+        if (matched._liveForwarded) {
+          forwardResponseBody(matched);
+        }
       }
       return { success: true };
     }

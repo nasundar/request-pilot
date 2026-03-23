@@ -199,6 +199,48 @@ fn read_env_file(path: String) -> Result<std::collections::HashMap<String, Strin
     env_file::read_env_from_path(&path)
 }
 
+/// Write content to a file at the given path (used with native save dialog).
+#[tauri::command]
+fn write_file(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, &content).map_err(|e| format!("Failed to write {}: {}", path, e))
+}
+
+/// Open a native save-file dialog and return the chosen path (or null if cancelled).
+#[tauri::command]
+fn save_file_dialog(
+    default_name: String,
+    title: Option<String>,
+    filters: Option<Vec<(String, String)>>,
+) -> Result<Option<String>, String> {
+    let mut dialog = rfd::FileDialog::new().set_file_name(&default_name);
+    if let Some(t) = title {
+        dialog = dialog.set_title(t);
+    }
+    if let Some(ref f) = filters {
+        for (name, ext) in f {
+            dialog = dialog.add_filter(name, &[ext.as_str()]);
+        }
+    }
+    match dialog.save_file() {
+        Some(path) => Ok(Some(path.to_string_lossy().to_string())),
+        None => Ok(None),
+    }
+}
+
+/// Add a history entry directly (e.g. from live capture).
+#[tauri::command]
+fn add_history_entry(
+    entry: history::HistoryEntry,
+    store: State<'_, Mutex<HistoryStore>>,
+) -> Result<u64, String> {
+    let mut s = store.lock().map_err(|e| e.to_string())?;
+    let seq = s.next_seq();
+    let mut e = entry;
+    e.seq = seq;
+    s.add(e);
+    Ok(seq)
+}
+
 #[tauri::command]
 fn write_env_file(
     path: String,
@@ -340,6 +382,9 @@ pub fn run() {
             start_device_code,
             poll_device_code,
             check_variables,
+            write_file,
+            save_file_dialog,
+            add_history_entry,
             start_live_capture,
             stop_live_capture,
             set_live_capture_mode,

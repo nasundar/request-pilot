@@ -2716,15 +2716,23 @@ saveEnvBtn.addEventListener('click', async (e) => {
     }
   });
 
-  // Use a download approach since we can't write to arbitrary paths from webview
-  const blob = new Blob([content], { type: 'text/plain' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = (envFilePath && envFilePath.endsWith('.env')) ? envFilePath : '.env';
-  a.click();
-  URL.revokeObjectURL(url);
-  showToast('Env file downloaded', 'success');
+  // Save via native dialog
+  try {
+    const defaultName = (envFilePath && envFilePath.endsWith('.env'))
+      ? envFilePath.split(/[\\/]/).pop()
+      : '.env';
+    const path = await invoke('save_file_dialog', {
+      defaultName,
+      title: 'Save Environment File',
+      filters: [['Env Files', 'env']],
+    });
+    if (!path) return; // cancelled
+    await invoke('write_file', { path, content });
+    envFilePath = path;
+    showToast(`Saved to ${path.split(/[\\/]/).pop()}`, 'success');
+  } catch (err) {
+    showToast('Save failed: ' + err, 'error');
+  }
 });
 
 addEnvVarBtn.addEventListener('click', (e) => {
@@ -6047,9 +6055,36 @@ document.querySelectorAll('input[name="liveMode"]').forEach(radio => {
     const { error, preview } = event.payload;
     rpLog('error', `Live capture parse error: ${error}`, { preview });
   });
+
+  // Listen for response body follow-ups from extension
+  await listen('live-response-body', (event) => {
+    const { url, response_body, status_code } = event.payload;
+    // Find matching request in captured list (most recent first)
+    for (let i = liveCapturedRequests.length - 1; i >= 0; i--) {
+      const req = liveCapturedRequests[i];
+      if (req.url === url && !req.response_body) {
+        req.response_body = response_body;
+        if (status_code) req.status_code = status_code;
+        break;
+      }
+    }
+    // Update matching history entry
+    for (const entry of historyCache) {
+      if (entry.url === url && entry.source === 'extension-live' && !entry.response_body) {
+        entry.response_body = response_body || '';
+        if (status_code) entry.status = status_code;
+        entry.response_size_bytes = response_body ? response_body.length : 0;
+        // Persist the update to Rust history store
+        invoke('add_history_entry', { entry }).catch(() => {});
+        if (currentMode === 'history') loadHistory();
+        break;
+      }
+    }
+    rpLog('debug', `Live capture response body: ${url}`, { hasBody: !!response_body });
+  });
 })();
 
-// Add captured request to history (local-only, no re-execution)
+// Add captured request to history and persist to Rust HistoryStore
 function addLiveRequestToHistory(req) {
   let blockName;
   try {
@@ -6064,7 +6099,7 @@ function addLiveRequestToHistory(req) {
     : new Date().toLocaleTimeString('en-US', { hour12: false });
 
   const entry = {
-    seq: Date.now(),
+    seq: 0, // assigned by Rust
     id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2),
     run_id: String(liveCaptureSessionId),
     source: 'extension-live',
@@ -6074,14 +6109,21 @@ function addLiveRequestToHistory(req) {
     method: req.method || 'GET',
     url: req.url,
     request_headers: (req.request_headers || []).map(h => [h.name, h.value]),
-    request_body: req.request_body || '',
+    request_body: req.request_body || null,
     status: req.status_code || 0,
     response_headers: (req.response_headers || []).map(h => [h.name, h.value]),
-    response_body: req.response_body || '',
+    response_body: req.response_body || null,
     response_time_ms: req.duration || 0,
-    response_size: req.response_body ? req.response_body.length : 0,
+    response_size_bytes: req.response_body ? req.response_body.length : 0,
     timestamp: req.timestamp ? new Date(req.timestamp).toISOString() : new Date().toISOString(),
   };
+
+  // Persist to Rust HistoryStore
+  invoke('add_history_entry', { entry }).then(seq => {
+    entry.seq = seq;
+  }).catch(err => {
+    rpLog('warn', 'Failed to persist live capture to history', String(err));
+  });
 
   historyCache.unshift(entry);
 
@@ -6181,19 +6223,25 @@ function appendToLiveCaptureFile(req) {
   }).catch(() => {});
 }
 
-// Save captured .http file
-document.getElementById('liveSaveBtn').addEventListener('click', () => {
+// Save captured .http file via native save dialog
+document.getElementById('liveSaveBtn').addEventListener('click', async () => {
   if (liveCaptureFileIndex < 0 || liveCaptureFileIndex >= loadedFiles.length) return;
 
   const file = loadedFiles[liveCaptureFileIndex];
-  const blob = new Blob([file.content], { type: 'text/plain' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = file.name;
-  a.click();
-  URL.revokeObjectURL(url);
-  rpLog('info', `Live capture file saved: ${file.name}`);
+  try {
+    const path = await invoke('save_file_dialog', {
+      defaultName: file.name,
+      title: 'Save Live Capture',
+      filters: [['HTTP Files', 'http']],
+    });
+    if (!path) return; // cancelled
+    await invoke('write_file', { path, content: file.content });
+    showToast(`Saved to ${path.split(/[\\/]/).pop()}`, 'success');
+    rpLog('info', `Live capture file saved: ${path}`);
+  } catch (err) {
+    showToast('Save failed: ' + err, 'error');
+    rpLog('error', 'Live capture save failed', String(err));
+  }
 });
 
 // New capture session
