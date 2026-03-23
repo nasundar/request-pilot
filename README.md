@@ -1,4 +1,4 @@
-# Request Pilot ✈
+# <img src="assets/icon.svg" width="32" height="32" alt="Request Pilot" /> Request Pilot
 
 A developer toolkit for HTTP traffic — a **Tauri v2 desktop app** for authoring and running E2E integration test suites from `.http` files, a **browser extension** for header injection, request blocking, and traffic analysis, a **terminal UI** for headless testing, and a **shared Rust core** that powers them all.
 
