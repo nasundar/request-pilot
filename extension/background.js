@@ -130,16 +130,34 @@ function urlPatternToRegex(pattern) {
   return new RegExp(escaped, 'i');
 }
 
+/** Convert Chrome's formData object {key: [values]} to form-urlencoded string. */
+function formDataToBody(data) {
+  const parts = [];
+  for (const [key, values] of Object.entries(data)) {
+    for (const value of values) {
+      parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+    }
+  }
+  return parts.join('&');
+}
+
 function forwardToDesktop(entry) {
   if (!isLiveConnected() || liveMode === 'off') return;
+
+  let bodyStr = null;
+  if (entry.requestBody) {
+    if (entry.requestBody.type === 'formData') {
+      bodyStr = formDataToBody(entry.requestBody.data);
+    } else if (entry.requestBody.type === 'raw') {
+      bodyStr = entry.requestBody.data;
+    }
+  }
 
   const data = {
     url: entry.url,
     method: entry.method,
     request_headers: (entry.requestHeaders || []).map(h => ({ name: h.name, value: h.value || '' })),
-    request_body: entry.requestBody
-      ? (entry.requestBody.type === 'raw' ? entry.requestBody.data : JSON.stringify(entry.requestBody.data))
-      : null,
+    request_body: bodyStr,
     status_code: entry.statusCode || null,
     response_headers: (entry.responseHeaders || []).map(h => ({ name: h.name, value: h.value || '' })),
     response_body: entry.responseBody || null,
