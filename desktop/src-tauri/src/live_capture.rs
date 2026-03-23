@@ -31,6 +31,8 @@ pub struct CapturedRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeaderPair {
     pub name: String,
+    /// Value defaults to empty string if missing (e.g. binary-only headers).
+    #[serde(default)]
     pub value: String,
 }
 
@@ -50,6 +52,7 @@ enum IncomingMessage {
 #[serde(rename_all = "snake_case")]
 pub enum OutgoingMessage {
     SetMode { mode: String },
+    #[allow(dead_code)]
     Ping,
 }
 
@@ -176,11 +179,14 @@ async fn handle_connection(
     // Subscribe to commands
     let mut command_rx = state.command_tx.subscribe();
 
+    let mut msg_count: u64 = 0;
+
     loop {
         tokio::select! {
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        msg_count += 1;
                         match serde_json::from_str::<IncomingMessage>(&text) {
                             Ok(IncomingMessage::Request { data }) => {
                                 let _ = app_handle.emit("live-request", &data);
@@ -188,7 +194,15 @@ async fn handle_connection(
                             Ok(IncomingMessage::Pong) => {}
                             Ok(IncomingMessage::Connected) => {}
                             Err(e) => {
-                                eprintln!("WS parse error: {} — raw: {}", e, &text[..text.len().min(200)]);
+                                let preview = &text[..text.len().min(300)];
+                                eprintln!("WS parse error (msg #{}): {} — raw: {}", msg_count, e, preview);
+                                let _ = app_handle.emit(
+                                    "live-capture-error",
+                                    serde_json::json!({
+                                        "error": format!("{}", e),
+                                        "preview": preview,
+                                    }),
+                                );
                             }
                         }
                     }
@@ -227,5 +241,120 @@ pub async fn stop_server(state: &LiveCaptureState) {
     *state.connected.lock().await = false;
     if was_running {
         state.shutdown.notify_one();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_request_message_full() {
+        let json = r#"{"action":"request","data":{"url":"https://example.com/api","method":"GET","request_headers":[{"name":"Host","value":"example.com"},{"name":"Accept","value":"application/json"}],"request_body":null,"status_code":200,"response_headers":[{"name":"content-type","value":"text/html"}],"response_body":null,"duration":150,"timestamp":1234567890.123}}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            IncomingMessage::Request { data } => {
+                assert_eq!(data.url, "https://example.com/api");
+                assert_eq!(data.method, "GET");
+                assert_eq!(data.request_headers.len(), 2);
+                assert_eq!(data.request_headers[0].name, "Host");
+                assert_eq!(data.status_code, Some(200));
+                assert_eq!(data.duration, Some(150));
+            }
+            _ => panic!("Expected Request variant"),
+        }
+    }
+
+    #[test]
+    fn parse_request_message_minimal() {
+        // Extension may send minimal data for failed requests
+        let json = r#"{"action":"request","data":{"url":"https://api.test/health","method":"POST"}}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            IncomingMessage::Request { data } => {
+                assert_eq!(data.url, "https://api.test/health");
+                assert_eq!(data.method, "POST");
+                assert!(data.request_headers.is_empty());
+                assert!(data.request_body.is_none());
+                assert!(data.status_code.is_none());
+                assert!(data.duration.is_none());
+            }
+            _ => panic!("Expected Request variant"),
+        }
+    }
+
+    #[test]
+    fn parse_request_with_nulls() {
+        let json = r#"{"action":"request","data":{"url":"https://x.com","method":"DELETE","request_headers":[],"request_body":null,"status_code":null,"response_headers":[],"response_body":null,"duration":null,"timestamp":null}}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            IncomingMessage::Request { data } => {
+                assert_eq!(data.method, "DELETE");
+                assert!(data.status_code.is_none());
+                assert!(data.duration.is_none());
+                assert!(data.timestamp.is_none());
+            }
+            _ => panic!("Expected Request variant"),
+        }
+    }
+
+    #[test]
+    fn parse_header_missing_value() {
+        // Headers with binaryValue (no string value) should default to empty
+        let json = r#"{"name":"x-binary-header"}"#;
+        let hp: HeaderPair = serde_json::from_str(json).unwrap();
+        assert_eq!(hp.name, "x-binary-header");
+        assert_eq!(hp.value, "");
+    }
+
+    #[test]
+    fn parse_connected_message() {
+        let json = r#"{"action":"connected"}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(msg, IncomingMessage::Connected));
+    }
+
+    #[test]
+    fn parse_pong_message() {
+        let json = r#"{"action":"pong"}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(msg, IncomingMessage::Pong));
+    }
+
+    #[test]
+    fn serialize_set_mode() {
+        let msg = OutgoingMessage::SetMode {
+            mode: "all".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""action":"set_mode""#));
+        assert!(json.contains(r#""mode":"all""#));
+    }
+
+    #[test]
+    fn parse_request_with_body() {
+        let json = r#"{"action":"request","data":{"url":"https://api.test/users","method":"POST","request_headers":[{"name":"Content-Type","value":"application/json"}],"request_body":"{\"name\":\"test\"}","status_code":201,"response_headers":[],"response_body":"{\"id\":1}","duration":42,"timestamp":1700000000.0}}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            IncomingMessage::Request { data } => {
+                assert_eq!(data.request_body, Some(r#"{"name":"test"}"#.to_string()));
+                assert_eq!(data.response_body, Some(r#"{"id":1}"#.to_string()));
+                assert_eq!(data.status_code, Some(201));
+            }
+            _ => panic!("Expected Request variant"),
+        }
+    }
+
+    #[test]
+    fn parse_request_status_code_zero() {
+        // statusCode 0 means error/no response
+        let json = r#"{"action":"request","data":{"url":"https://dead.host","method":"GET","status_code":0}}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            IncomingMessage::Request { data } => {
+                assert_eq!(data.status_code, Some(0));
+            }
+            _ => panic!("Expected Request variant"),
+        }
     }
 }

@@ -136,19 +136,20 @@ function forwardToDesktop(entry) {
   const data = {
     url: entry.url,
     method: entry.method,
-    request_headers: (entry.requestHeaders || []).map(h => ({ name: h.name, value: h.value })),
+    request_headers: (entry.requestHeaders || []).map(h => ({ name: h.name, value: h.value || '' })),
     request_body: entry.requestBody
       ? (entry.requestBody.type === 'raw' ? entry.requestBody.data : JSON.stringify(entry.requestBody.data))
       : null,
     status_code: entry.statusCode || null,
-    response_headers: (entry.responseHeaders || []).map(h => ({ name: h.name, value: h.value })),
+    response_headers: (entry.responseHeaders || []).map(h => ({ name: h.name, value: h.value || '' })),
     response_body: entry.responseBody || null,
     duration: entry.duration || null,
     timestamp: entry.timestamp || null,
   };
 
   try {
-    liveSocket.send(JSON.stringify({ action: 'request', data }));
+    const msg = JSON.stringify({ action: 'request', data });
+    liveSocket.send(msg);
   } catch (e) {
     console.warn('[RequestPilot] Failed to forward request:', e);
   }

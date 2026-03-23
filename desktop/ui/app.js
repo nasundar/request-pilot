@@ -5984,55 +5984,63 @@ document.querySelectorAll('input[name="liveMode"]').forEach(radio => {
 });
 
 // Listen for live requests from extension
-listen('live-request', (event) => {
-  const req = event.payload;
-  liveCapturedRequests.push(req);
+(async () => {
+  await listen('live-request', (event) => {
+    const req = event.payload;
+    liveCapturedRequests.push(req);
 
-  document.getElementById('liveCaptureCount').textContent = liveCapturedRequests.length;
-  document.getElementById('liveSaveBtn').disabled = liveCapturedRequests.length === 0;
+    document.getElementById('liveCaptureCount').textContent = liveCapturedRequests.length;
+    document.getElementById('liveSaveBtn').disabled = liveCapturedRequests.length === 0;
 
-  addLiveRequestToHistory(req);
-  appendToLiveCaptureFile(req);
+    addLiveRequestToHistory(req);
+    appendToLiveCaptureFile(req);
 
-  rpLog('debug', `Live capture: ${req.method} ${req.url}`, { status: req.status_code, duration: req.duration });
-});
+    rpLog('debug', `Live capture: ${req.method} ${req.url}`, { status: req.status_code, duration: req.duration });
+  });
 
-// Listen for connection status changes
-listen('live-connection-status', (event) => {
-  const { status } = event.payload;
-  const dot = document.getElementById('liveDot');
-  const statusText = document.getElementById('liveStatusText');
+  // Listen for connection status changes
+  await listen('live-connection-status', (event) => {
+    const { status } = event.payload;
+    const dot = document.getElementById('liveDot');
+    const statusText = document.getElementById('liveStatusText');
 
-  dot.className = 'live-dot';
-  statusText.className = 'live-status';
+    dot.className = 'live-dot';
+    statusText.className = 'live-status';
 
-  switch (status) {
-    case 'listening':
-      dot.classList.add('listening');
-      statusText.classList.add('listening');
-      statusText.textContent = 'Waiting for extension…';
-      liveCaptureConnected = false;
-      break;
-    case 'connected':
-      dot.classList.add('connected');
-      statusText.classList.add('connected');
-      statusText.textContent = 'Connected';
-      liveCaptureConnected = true;
-      break;
-    case 'disconnected':
-      dot.classList.add('error');
-      statusText.classList.add('error');
-      statusText.textContent = 'Disconnected';
-      liveCaptureConnected = false;
-      break;
-    case 'stopped':
-      statusText.textContent = 'Off';
-      liveCaptureConnected = false;
-      break;
-  }
+    switch (status) {
+      case 'listening':
+        dot.classList.add('listening');
+        statusText.classList.add('listening');
+        statusText.textContent = 'Waiting for extension…';
+        liveCaptureConnected = false;
+        break;
+      case 'connected':
+        dot.classList.add('connected');
+        statusText.classList.add('connected');
+        statusText.textContent = 'Connected';
+        liveCaptureConnected = true;
+        break;
+      case 'disconnected':
+        dot.classList.add('error');
+        statusText.classList.add('error');
+        statusText.textContent = 'Disconnected';
+        liveCaptureConnected = false;
+        break;
+      case 'stopped':
+        statusText.textContent = 'Off';
+        liveCaptureConnected = false;
+        break;
+    }
 
-  rpLog('info', `Live capture status: ${status}`);
-});
+    rpLog('info', `Live capture status: ${status}`);
+  });
+
+  // Listen for parse errors from the WS server (diagnostic)
+  await listen('live-capture-error', (event) => {
+    const { error, preview } = event.payload;
+    rpLog('error', `Live capture parse error: ${error}`, { preview });
+  });
+})();
 
 // Add captured request to history (local-only, no re-execution)
 function addLiveRequestToHistory(req) {
