@@ -6094,7 +6094,13 @@ function startNewCaptureSession() {
       results: null,
     });
     liveCaptureFileIndex = loadedFiles.length - 1;
+    activeFileIndex = liveCaptureFileIndex;
+    activeBlockIndex = -1;
     renderFileTree();
+    // Switch to builder mode so user sees the file
+    if (currentMode !== 'builder' && currentMode !== 'code') {
+      switchMode('builder');
+    }
     rpLog('info', `Live capture session started: ${fileName}`);
   } catch (e) {
     rpLog('warn', 'Failed to create live capture file', String(e));
@@ -6129,11 +6135,19 @@ function appendToLiveCaptureFile(req) {
 
   file.content += block;
 
-  // Re-parse to update sidebar blocks
+  // Re-parse to update sidebar blocks and code editor
   invoke('parse_test_file', { content: file.content }).then(suite => {
     file.suite = suite;
     if (activeFileIndex === liveCaptureFileIndex) {
       renderFileTree();
+      // Update code editor if in code mode
+      if (currentMode === 'code') {
+        const editor = document.getElementById('codeEditor');
+        if (editor) {
+          editor.value = file.content;
+          codeEditorContent = file.content;
+        }
+      }
     }
   }).catch(() => {});
 }

@@ -2,7 +2,6 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::Emitter;
-use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -93,9 +92,17 @@ pub async fn start_server(
     }
 
     let addr = format!("127.0.0.1:{}", LIVE_CAPTURE_PORT);
-    let listener = TcpListener::bind(&addr)
-        .await
+    let socket = tokio::net::TcpSocket::new_v4()
+        .map_err(|e| format!("Failed to create socket: {}", e))?;
+    socket
+        .set_reuseaddr(true)
+        .map_err(|e| format!("Failed to set SO_REUSEADDR: {}", e))?;
+    socket
+        .bind(addr.parse().unwrap())
         .map_err(|e| format!("Failed to bind WS server on {}: {}", addr, e))?;
+    let listener = socket
+        .listen(8)
+        .map_err(|e| format!("Failed to listen on {}: {}", addr, e))?;
 
     let _ = app_handle.emit(
         "live-connection-status",
@@ -127,6 +134,9 @@ pub async fn start_server(
             }
         }
     }
+
+    // Reset running flag so the server can be restarted
+    *state.running.lock().await = false;
 
     let _ = app_handle.emit(
         "live-connection-status",
