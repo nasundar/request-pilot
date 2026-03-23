@@ -223,9 +223,8 @@ function tryForwardEntry(entry) {
   if (!isLiveConnected() || liveMode === 'off') return;
   shouldForwardEntry(entry).then(should => {
     if (!should) return;
-    // Delay 500ms so content script can capture response body before forwarding.
-    // The initial forward then includes the body in most cases.
-    setTimeout(() => forwardToDesktop(entry), 500);
+    // Forward immediately — response body arrives later via captureResponseBody follow-up
+    forwardToDesktop(entry);
   }).catch(err => {
     console.warn('[RequestPilot] Forward check failed:', err);
   });
@@ -412,6 +411,7 @@ async function handleMessage(msg) {
     case "captureResponseBody": {
       captureDebugCount++;
       const targetUrl = msg.url;
+      console.log('[RequestPilot] captureResponseBody received:', targetUrl, 'bodyLen:', (msg.body || '').length);
 
       // Strategy 1: exact URL match in networkLog
       let matched = networkLog.find(
@@ -462,7 +462,13 @@ async function handleMessage(msg) {
         // Forward response body to desktop if live capture is active
         if (isLiveConnected() && liveMode !== 'off') {
           forwardResponseBody(matched);
+        } else {
+          console.log('[RequestPilot] captureResponseBody: live not active, skipping forward',
+            'connected:', isLiveConnected(), 'mode:', liveMode);
         }
+      } else {
+        console.log('[RequestPilot] captureResponseBody: NO MATCH for', targetUrl,
+          'networkLog size:', networkLog.length, 'pending:', pendingRequests.size);
       }
       return { success: true };
     }
