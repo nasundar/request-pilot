@@ -188,6 +188,9 @@ const historyCountBadge   = $('#historyCountBadge');
 const historyMethodFilter = $('#historyMethodFilter');
 const historyStatusFilter = $('#historyStatusFilter');
 const historySourceFilter = $('#historySourceFilter');
+const historyFileFilter   = $('#historyFileFilter');
+const historyGroupFilter  = $('#historyGroupFilter');
+const historyBlockFilter  = $('#historyBlockFilter');
 const historyUrlSearch    = $('#historyUrlSearch');
 const historyGroupBySelect= $('#historyGroupBySelect');
 const historyDetailOverlay= $('#historyDetailOverlay');
@@ -1990,6 +1993,7 @@ async function runAllTests() {
           suite: suiteCopy,
           extraVariables: fileExtraVars,
           runMode,
+          fileName: file.name,
         });
 
         // Remap results to align with original block indices
@@ -2117,6 +2121,7 @@ async function runSingleBlock(fileIdx, blockIdx) {
       suite: singleSuite,
       extraVariables: extraVars,
       runMode: azureAuthState === 'authenticated' ? 'dev' : null,
+      fileName: file.name,
     });
 
     // Store result at the correct original block index
@@ -2705,7 +2710,7 @@ async function runGroup(fileIdx, groupName) {
       const tokenVars = fetchDevModeToken(file.suite, file.content);
       if (tokenVars.length > 0) extraVars = [...extraVars, ...tokenVars];
     }
-    const results = await invoke('run_test_suite', { suite, extraVariables: extraVars, runMode: azureAuthState === 'authenticated' ? 'dev' : null });
+    const results = await invoke('run_test_suite', { suite, extraVariables: extraVars, runMode: azureAuthState === 'authenticated' ? 'dev' : null, fileName: file.name });
 
     // Merge results into existing file results
     if (!file.results) {
@@ -2800,6 +2805,7 @@ async function runSingleFile(fileIdx) {
       suite,
       extraVariables: extraVars,
       runMode: azureAuthState === 'authenticated' ? 'dev' : null,
+      fileName: file.name,
     });
 
     // Remap results to align with original block indices
@@ -3692,6 +3698,12 @@ function buildHistoryFilter() {
   else if (status === '5xx') { filter.status_min = 500; filter.status_max = 599; }
   const source = historySourceFilter.value;
   if (source) filter.source = source;
+  const fileName = historyFileFilter.value;
+  if (fileName) filter.file_name = fileName;
+  const group = historyGroupFilter.value;
+  if (group) filter.group = group;
+  const blockName = historyBlockFilter.value;
+  if (blockName) filter.block_name = blockName;
   const urlSearch = historyUrlSearch.value.trim();
   if (urlSearch) filter.url_contains = urlSearch;
   return filter;
@@ -3711,12 +3723,51 @@ async function loadHistory() {
     renderHistoryLog(historyCache);
     historyCountBadge.textContent = historyCache.length;
     rpLog('debug', 'History loaded', { count: historyCache.length });
+    await refreshHistoryFilterOptions();
   } catch (err) {
     historyCache = [];
     renderHistoryStats([]);
     renderHistoryLog([]);
     historyCountBadge.textContent = '0';
     rpLog('error', 'Command failed: get_history', String(err));
+  }
+}
+
+async function refreshHistoryFilterOptions() {
+  try {
+    const vals = await invoke('get_history_distinct_values');
+    // File filter
+    const curFile = historyFileFilter.value;
+    historyFileFilter.innerHTML = '<option value="">All Files</option>';
+    vals.file_names.forEach(f => {
+      const opt = document.createElement('option');
+      opt.value = f;
+      opt.textContent = f;
+      if (f === curFile) opt.selected = true;
+      historyFileFilter.appendChild(opt);
+    });
+    // Group filter
+    const curGroup = historyGroupFilter.value;
+    historyGroupFilter.innerHTML = '<option value="">All Groups</option>';
+    vals.groups.forEach(g => {
+      const opt = document.createElement('option');
+      opt.value = g;
+      opt.textContent = g;
+      if (g === curGroup) opt.selected = true;
+      historyGroupFilter.appendChild(opt);
+    });
+    // Block/Test filter
+    const curBlock = historyBlockFilter.value;
+    historyBlockFilter.innerHTML = '<option value="">All Tests</option>';
+    vals.block_names.forEach(b => {
+      const opt = document.createElement('option');
+      opt.value = b;
+      opt.textContent = b;
+      if (b === curBlock) opt.selected = true;
+      historyBlockFilter.appendChild(opt);
+    });
+  } catch (err) {
+    rpLog('warn', 'Failed to refresh history filter options', String(err));
   }
 }
 
@@ -3819,6 +3870,7 @@ function renderHistoryLog(entries) {
     case 'url': renderGroupedByUrl(entries); break;
     case 'status': renderGroupedByStatus(entries); break;
     case 'source': renderGroupedBySource(entries); break;
+    case 'file-group-test': renderGroupedByFileGroupTest(entries); break;
     default: renderFlatList(entries); break;
   }
 }
@@ -4016,6 +4068,144 @@ function renderGroupedBySource(entries) {
   });
   for (const [name, groupEntries] of groups) {
     renderGenericGroup(name, groupEntries, `source:${name}`);
+  }
+}
+
+function renderGroupedByFileGroupTest(entries) {
+  // Build 3-level map: file -> group -> test -> entries[]
+  const fileMap = new Map();
+  entries.forEach(entry => {
+    const file = entry.file_name || '(No File)';
+    const group = entry.group || '(Ungrouped)';
+    const test = entry.block_name || '(Unnamed)';
+    if (!fileMap.has(file)) fileMap.set(file, new Map());
+    const groupMap = fileMap.get(file);
+    if (!groupMap.has(group)) groupMap.set(group, new Map());
+    const testMap = groupMap.get(group);
+    if (!testMap.has(test)) testMap.set(test, []);
+    testMap.get(test).push(entry);
+  });
+
+  // Sort files by entry count descending
+  const sortedFiles = [...fileMap.entries()].sort((a, b) => {
+    const countA = [...a[1].values()].reduce((s, gm) => s + [...gm.values()].reduce((s2, arr) => s2 + arr.length, 0), 0);
+    const countB = [...b[1].values()].reduce((s, gm) => s + [...gm.values()].reduce((s2, arr) => s2 + arr.length, 0), 0);
+    return countB - countA;
+  });
+
+  for (const [fileName, groupMap] of sortedFiles) {
+    const fileEntries = [...groupMap.values()].flatMap(gm => [...gm.values()].flat());
+    const fileKey = `fgt-file:${fileName}`;
+    const isFileExpanded = historyExpandedGroups.has(fileKey);
+    const fileSuccessCount = fileEntries.filter(e => e.status >= 200 && e.status < 400).length;
+    const fileFailCount = fileEntries.length - fileSuccessCount;
+    const fileAvgTime = Math.round(fileEntries.reduce((s, e) => s + e.response_time_ms, 0) / fileEntries.length);
+
+    const fileGroup = document.createElement('div');
+    fileGroup.className = 'hist-domain-group' + (isFileExpanded ? ' expanded' : '');
+    fileGroup.dataset.groupKey = fileKey;
+
+    const fileHeader = document.createElement('div');
+    fileHeader.className = 'hist-domain-header';
+    fileHeader.innerHTML = `
+      <span class="hist-group-arrow">${isFileExpanded ? '▾' : '▸'}</span>
+      <span class="hist-domain-name">📄 ${escapeHtml(fileName)}</span>
+      <span class="hist-group-count">${fileEntries.length}</span>
+      <span class="hist-group-time">${fileAvgTime}ms</span>
+      <span class="hist-group-success">✓${fileSuccessCount}</span>
+      ${fileFailCount > 0 ? `<span class="hist-group-fail">✗${fileFailCount}</span>` : ''}
+    `;
+    fileHeader.addEventListener('click', () => {
+      if (historyExpandedGroups.has(fileKey)) historyExpandedGroups.delete(fileKey);
+      else historyExpandedGroups.add(fileKey);
+      fileGroup.classList.toggle('expanded');
+      fileHeader.querySelector('.hist-group-arrow').textContent = fileGroup.classList.contains('expanded') ? '▾' : '▸';
+    });
+
+    const fileBody = document.createElement('div');
+    fileBody.className = 'hist-domain-body';
+
+    for (const [groupName, testMap] of groupMap) {
+      const groupEntries = [...testMap.values()].flat();
+      const groupKey = `fgt-group:${fileName}/${groupName}`;
+      const isGroupExpanded = historyExpandedGroups.has(groupKey);
+      const groupSuccessCount = groupEntries.filter(e => e.status >= 200 && e.status < 400).length;
+      const groupFailCount = groupEntries.length - groupSuccessCount;
+      const groupAvgTime = Math.round(groupEntries.reduce((s, e) => s + e.response_time_ms, 0) / groupEntries.length);
+
+      const grpDiv = document.createElement('div');
+      grpDiv.className = 'hist-path-group' + (isGroupExpanded ? ' expanded' : '');
+      grpDiv.dataset.groupKey = groupKey;
+
+      const grpHeader = document.createElement('div');
+      grpHeader.className = 'hist-path-header';
+      grpHeader.innerHTML = `
+        <span class="hist-group-arrow">${isGroupExpanded ? '▾' : '▸'}</span>
+        <span class="hist-path-name">📁 ${escapeHtml(groupName)}</span>
+        <span class="hist-group-count">${groupEntries.length}</span>
+        <span class="hist-group-time">${groupAvgTime}ms</span>
+        <span class="hist-group-success">✓${groupSuccessCount}</span>
+        ${groupFailCount > 0 ? `<span class="hist-group-fail">✗${groupFailCount}</span>` : ''}
+      `;
+      grpHeader.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (historyExpandedGroups.has(groupKey)) historyExpandedGroups.delete(groupKey);
+        else historyExpandedGroups.add(groupKey);
+        grpDiv.classList.toggle('expanded');
+        grpHeader.querySelector('.hist-group-arrow').textContent = grpDiv.classList.contains('expanded') ? '▾' : '▸';
+      });
+
+      const grpBody = document.createElement('div');
+      grpBody.className = 'hist-path-body';
+
+      for (const [testName, testEntries] of testMap) {
+        if (testEntries.length === 1) {
+          // Single entry — render directly without extra nesting
+          grpBody.appendChild(createHistoryEntryRow(testEntries[0]));
+        } else {
+          // Multiple entries for same test name — nest them
+          const testKey = `fgt-test:${fileName}/${groupName}/${testName}`;
+          const isTestExpanded = historyExpandedGroups.has(testKey);
+          const testGroup = document.createElement('div');
+          testGroup.className = 'hist-group' + (isTestExpanded ? ' expanded' : '');
+          testGroup.dataset.groupKey = testKey;
+          const testSuccessCount = testEntries.filter(e => e.status >= 200 && e.status < 400).length;
+          const testFailCount = testEntries.length - testSuccessCount;
+          const testAvgTime = Math.round(testEntries.reduce((s, e) => s + e.response_time_ms, 0) / testEntries.length);
+          const testHeader = document.createElement('div');
+          testHeader.className = 'hist-group-header';
+          testHeader.innerHTML = `
+            <span class="hist-group-arrow">${isTestExpanded ? '▾' : '▸'}</span>
+            <span class="hist-group-title">🧪 ${escapeHtml(testName)}</span>
+            <span class="hist-group-count">${testEntries.length}</span>
+            <span class="hist-group-time">${testAvgTime}ms</span>
+            <span class="hist-group-success">✓${testSuccessCount}</span>
+            ${testFailCount > 0 ? `<span class="hist-group-fail">✗${testFailCount}</span>` : ''}
+          `;
+          testHeader.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (historyExpandedGroups.has(testKey)) historyExpandedGroups.delete(testKey);
+            else historyExpandedGroups.add(testKey);
+            testGroup.classList.toggle('expanded');
+            testHeader.querySelector('.hist-group-arrow').textContent = testGroup.classList.contains('expanded') ? '▾' : '▸';
+          });
+          const testBody = document.createElement('div');
+          testBody.className = 'hist-group-body';
+          testEntries.forEach(entry => testBody.appendChild(createHistoryEntryRow(entry)));
+          testGroup.appendChild(testHeader);
+          testGroup.appendChild(testBody);
+          grpBody.appendChild(testGroup);
+        }
+      }
+
+      grpDiv.appendChild(grpHeader);
+      grpDiv.appendChild(grpBody);
+      fileBody.appendChild(grpDiv);
+    }
+
+    fileGroup.appendChild(fileHeader);
+    fileGroup.appendChild(fileBody);
+    historyLog.appendChild(fileGroup);
   }
 }
 
@@ -4414,6 +4604,9 @@ function removeGhostText() {
 historyMethodFilter.addEventListener('change', loadHistory);
 historyStatusFilter.addEventListener('change', loadHistory);
 historySourceFilter.addEventListener('change', loadHistory);
+historyFileFilter.addEventListener('change', loadHistory);
+historyGroupFilter.addEventListener('change', loadHistory);
+historyBlockFilter.addEventListener('change', loadHistory);
 historyGroupBySelect.addEventListener('change', () => renderHistoryLog(historyCache));
 let historySearchTimeout;
 historyUrlSearch.addEventListener('input', () => {

@@ -35,6 +35,8 @@ async fn send_request(
         id: request_pilot_core::uuid::Uuid::new_v4().to_string(),
         run_id: None,
         source: "manual".to_string(),
+        file_name: None,
+        group: None,
         block_name: None,
         method,
         url,
@@ -72,6 +74,7 @@ async fn run_test_suite(
     suite: http_parser::TestSuite,
     extra_variables: Vec<(String, String)>,
     run_mode: Option<String>,
+    file_name: Option<String>,
     store: State<'_, Mutex<HistoryStore>>,
     app: tauri::AppHandle,
 ) -> Result<test_runner::TestRunResults, String> {
@@ -95,6 +98,8 @@ async fn run_test_suite(
                 id: request_pilot_core::uuid::Uuid::new_v4().to_string(),
                 run_id: Some(run_id.clone()),
                 source: "test-run".to_string(),
+                file_name: file_name.clone(),
+                group: block_result.group.clone(),
                 block_name: Some(block_result.name.clone()),
                 method: block_result.request_method.clone(),
                 url: block_result.request_url.clone(),
@@ -142,6 +147,25 @@ fn get_filtered_history(
 fn clear_history(store: State<'_, Mutex<HistoryStore>>) -> Result<(), String> {
     store.lock().map_err(|e| e.to_string())?.clear();
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct HistoryDistinctValues {
+    file_names: Vec<String>,
+    groups: Vec<String>,
+    block_names: Vec<String>,
+}
+
+#[tauri::command]
+fn get_history_distinct_values(
+    store: State<'_, Mutex<HistoryStore>>,
+) -> Result<HistoryDistinctValues, String> {
+    let s = store.lock().map_err(|e| e.to_string())?;
+    Ok(HistoryDistinctValues {
+        file_names: s.distinct_file_names(),
+        groups: s.distinct_groups(),
+        block_names: s.distinct_block_names(),
+    })
 }
 
 #[tauri::command]
@@ -244,6 +268,7 @@ pub fn run() {
             resolve_variables,
             get_history,
             get_filtered_history,
+            get_history_distinct_values,
             clear_history,
             suggest_urls,
             suggest_domain_paths,

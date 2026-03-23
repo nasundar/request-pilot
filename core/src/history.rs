@@ -9,6 +9,9 @@ pub struct HistoryFilter {
     pub url_contains: Option<String>,
     pub source: Option<String>,
     pub run_id: Option<String>,
+    pub file_name: Option<String>,
+    pub group: Option<String>,
+    pub block_name: Option<String>,
     pub limit: Option<usize>,
 }
 
@@ -18,6 +21,8 @@ pub struct HistoryEntry {
     pub id: String,
     pub run_id: Option<String>,
     pub source: String,
+    pub file_name: Option<String>,
+    pub group: Option<String>,
     pub block_name: Option<String>,
     pub method: String,
     pub url: String,
@@ -103,10 +108,59 @@ impl HistoryStore {
                         _ => return false,
                     }
                 }
+                if let Some(ref fname) = f.file_name {
+                    match &e.file_name {
+                        Some(f) if f == fname => {}
+                        _ => return false,
+                    }
+                }
+                if let Some(ref grp) = f.group {
+                    match &e.group {
+                        Some(g) if g == grp => {}
+                        _ => return false,
+                    }
+                }
+                if let Some(ref bn) = f.block_name {
+                    match &e.block_name {
+                        Some(b) if b == bn => {}
+                        _ => return false,
+                    }
+                }
                 true
             })
             .take(f.limit.unwrap_or(usize::MAX))
             .collect()
+    }
+
+    /// Return distinct values for a field, useful for populating filter dropdowns.
+    pub fn distinct_file_names(&self) -> Vec<String> {
+        let mut seen = std::collections::BTreeSet::new();
+        for e in &self.entries {
+            if let Some(ref f) = e.file_name {
+                seen.insert(f.clone());
+            }
+        }
+        seen.into_iter().collect()
+    }
+
+    pub fn distinct_groups(&self) -> Vec<String> {
+        let mut seen = std::collections::BTreeSet::new();
+        for e in &self.entries {
+            if let Some(ref g) = e.group {
+                seen.insert(g.clone());
+            }
+        }
+        seen.into_iter().collect()
+    }
+
+    pub fn distinct_block_names(&self) -> Vec<String> {
+        let mut seen = std::collections::BTreeSet::new();
+        for e in &self.entries {
+            if let Some(ref b) = e.block_name {
+                seen.insert(b.clone());
+            }
+        }
+        seen.into_iter().collect()
     }
 }
 
@@ -120,6 +174,8 @@ mod tests {
             id: id.to_string(),
             run_id: None,
             source: "manual".to_string(),
+            file_name: None,
+            group: None,
             block_name: None,
             method: "GET".to_string(),
             url: "https://example.com".to_string(),
@@ -189,6 +245,8 @@ mod tests {
             id: "test-id".to_string(),
             run_id: Some("run-1".to_string()),
             source: "test-run".to_string(),
+            file_name: Some("api-tests.http".to_string()),
+            group: Some("auth".to_string()),
             block_name: Some("create user".to_string()),
             method: "POST".to_string(),
             url: "https://api.test.com/data".to_string(),
@@ -213,6 +271,8 @@ mod tests {
         assert_eq!(stored.response_size_bytes, 8);
         assert_eq!(stored.run_id.as_deref(), Some("run-1"));
         assert_eq!(stored.source, "test-run");
+        assert_eq!(stored.file_name.as_deref(), Some("api-tests.http"));
+        assert_eq!(stored.group.as_deref(), Some("auth"));
         assert_eq!(stored.block_name.as_deref(), Some("create user"));
     }
 
@@ -249,6 +309,8 @@ mod tests {
             id: format!("id-{}", seq),
             run_id: run_id.map(|s| s.to_string()),
             source: source.to_string(),
+            file_name: None,
+            group: None,
             block_name: None,
             method: method.to_string(),
             url: url.to_string(),
@@ -418,5 +480,115 @@ mod tests {
         };
         let results = store.filter(&f);
         assert!(results.is_empty());
+    }
+
+    fn make_entry_full(
+        seq: u64,
+        method: &str,
+        url: &str,
+        status: u16,
+        source: &str,
+        file_name: Option<&str>,
+        group: Option<&str>,
+        block_name: Option<&str>,
+    ) -> HistoryEntry {
+        HistoryEntry {
+            seq,
+            id: format!("id-{}", seq),
+            run_id: None,
+            source: source.to_string(),
+            file_name: file_name.map(|s| s.to_string()),
+            group: group.map(|s| s.to_string()),
+            block_name: block_name.map(|s| s.to_string()),
+            method: method.to_string(),
+            url: url.to_string(),
+            request_headers: Vec::new(),
+            request_body: None,
+            status,
+            response_headers: Vec::new(),
+            response_body: None,
+            response_time_ms: 50,
+            response_size_bytes: 100,
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    fn enriched_store() -> HistoryStore {
+        let mut store = HistoryStore::new();
+        store.add(make_entry_full(1, "GET", "https://api.test.com/a", 200, "test-run", Some("auth.http"), Some("login"), Some("Login Test")));
+        store.add(make_entry_full(2, "POST", "https://api.test.com/b", 201, "test-run", Some("auth.http"), Some("login"), Some("Create Token")));
+        store.add(make_entry_full(3, "GET", "https://api.test.com/c", 200, "test-run", Some("users.http"), None, Some("List Users")));
+        store.add(make_entry_full(4, "DELETE", "https://api.test.com/d", 204, "test-run", Some("users.http"), Some("cleanup"), Some("Delete User")));
+        store.add(make_entry_full(5, "GET", "https://api.test.com/e", 200, "manual", None, None, None));
+        store
+    }
+
+    #[test]
+    fn filter_by_file_name() {
+        let store = enriched_store();
+        let f = HistoryFilter { file_name: Some("auth.http".to_string()), ..Default::default() };
+        let results = store.filter(&f);
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|e| e.file_name.as_deref() == Some("auth.http")));
+    }
+
+    #[test]
+    fn filter_by_group() {
+        let store = enriched_store();
+        let f = HistoryFilter { group: Some("login".to_string()), ..Default::default() };
+        let results = store.filter(&f);
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|e| e.group.as_deref() == Some("login")));
+    }
+
+    #[test]
+    fn filter_by_block_name() {
+        let store = enriched_store();
+        let f = HistoryFilter { block_name: Some("List Users".to_string()), ..Default::default() };
+        let results = store.filter(&f);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].block_name.as_deref(), Some("List Users"));
+    }
+
+    #[test]
+    fn filter_by_file_and_group() {
+        let store = enriched_store();
+        let f = HistoryFilter {
+            file_name: Some("users.http".to_string()),
+            group: Some("cleanup".to_string()),
+            ..Default::default()
+        };
+        let results = store.filter(&f);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].block_name.as_deref(), Some("Delete User"));
+    }
+
+    #[test]
+    fn filter_no_file_name_excludes() {
+        let store = enriched_store();
+        let f = HistoryFilter { file_name: Some("nonexistent.http".to_string()), ..Default::default() };
+        let results = store.filter(&f);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn distinct_file_names() {
+        let store = enriched_store();
+        let names = store.distinct_file_names();
+        assert_eq!(names, vec!["auth.http", "users.http"]);
+    }
+
+    #[test]
+    fn distinct_groups() {
+        let store = enriched_store();
+        let groups = store.distinct_groups();
+        assert_eq!(groups, vec!["cleanup", "login"]);
+    }
+
+    #[test]
+    fn distinct_block_names() {
+        let store = enriched_store();
+        let names = store.distinct_block_names();
+        assert_eq!(names, vec!["Create Token", "Delete User", "List Users", "Login Test"]);
     }
 }

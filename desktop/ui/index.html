@@ -157,6 +157,15 @@
             <option value="manual">Manual</option>
             <option value="test-run">Test Run</option>
           </select>
+          <select id="historyFileFilter" class="history-filter-select">
+            <option value="">All Files</option>
+          </select>
+          <select id="historyGroupFilter" class="history-filter-select">
+            <option value="">All Groups</option>
+          </select>
+          <select id="historyBlockFilter" class="history-filter-select">
+            <option value="">All Tests</option>
+          </select>
           <div class="history-search-wrapper">
             <input type="text" id="historyUrlSearch" class="history-url-search" placeholder="Search URL..." spellcheck="false" autocomplete="off">
             <div class="autocomplete-dropdown hidden" id="autocompleteDropdown"></div>
@@ -167,6 +176,7 @@
             <option value="status">Status Code</option>
             <option value="source">Source</option>
             <option value="none">Flat List</option>
+            <option value="file-group-test">File → Group → Test</option>
           </select>
         </div>
         <div class="history-stats" id="historyStats"></div>
