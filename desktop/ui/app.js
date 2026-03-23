@@ -6068,19 +6068,27 @@ document.querySelectorAll('input[name="liveMode"]').forEach(radio => {
         break;
       }
     }
-    // Update matching history entry
-    for (const entry of historyCache) {
-      if (entry.url === url && entry.source === 'extension-live' && !entry.response_body) {
-        entry.response_body = response_body || '';
-        if (status_code) entry.status = status_code;
-        entry.response_size_bytes = response_body ? response_body.length : 0;
-        // Update existing entry in Rust history store (not add — avoid duplicates)
-        invoke('update_history_entry', { entry }).catch(() => {});
-        if (currentMode === 'history') loadHistory();
-        break;
-      }
+    // Update matching history entry — try exact URL, then pathname fallback
+    let matched = historyCache.find(
+      e => e.url === url && e.source === 'extension-live' && !e.response_body
+    );
+    if (!matched) {
+      try {
+        const targetPath = new URL(url).pathname;
+        matched = historyCache.find(e =>
+          e.source === 'extension-live' && !e.response_body &&
+          new URL(e.url).pathname === targetPath
+        );
+      } catch {}
     }
-    rpLog('debug', `Live capture response body: ${url}`, { hasBody: !!response_body });
+    if (matched) {
+      matched.response_body = response_body || '';
+      if (status_code) matched.status = status_code;
+      matched.response_size_bytes = response_body ? response_body.length : 0;
+      invoke('update_history_entry', { entry: matched }).catch(() => {});
+      if (currentMode === 'history') loadHistory();
+    }
+    rpLog('debug', `Live capture response body: ${url}`, { hasBody: !!response_body, matched: !!matched });
   });
 })();
 

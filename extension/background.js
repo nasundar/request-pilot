@@ -143,8 +143,6 @@ function formDataToBody(data) {
 
 function forwardToDesktop(entry) {
   if (!isLiveConnected() || liveMode === 'off') return;
-  // Track entry for later response body follow-up
-  entry._liveForwarded = true;
 
   let bodyStr = null;
   if (entry.requestBody) {
@@ -455,8 +453,8 @@ async function handleMessage(msg) {
 
       if (matched) {
         matched.responseBody = msg.body;
-        // Forward response body to desktop if this request was live-forwarded
-        if (matched._liveForwarded) {
+        // Forward response body to desktop if live capture is active
+        if (isLiveConnected() && liveMode !== 'off') {
           forwardResponseBody(matched);
         }
       }
