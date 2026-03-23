@@ -155,6 +155,11 @@ const loadingOverlay  = $('#loadingOverlay');
 const fileInput       = $('#fileInput');
 const openFileBtn     = $('#openFileBtn');
 const runAllBtn       = $('#runAllBtn');
+const extraHeadersBtn = $('#extraHeadersBtn');
+const extraHeadersPanel = $('#extraHeadersPanel');
+const extraHeadersList = $('#extraHeadersList');
+const extraHeadersAddBtn = $('#extraHeadersAddBtn');
+const extraHeadersCount = $('#extraHeadersCount');
 const fileTree        = $('#fileTree');
 const envList         = $('#envList');
 const loadEnvBtn      = $('#loadEnvBtn');
@@ -394,6 +399,61 @@ headersContainer.querySelector('.kv-remove')?.addEventListener('click', function
   this.closest('.kv-row').remove();
   if (headersContainer.children.length === 0) headersContainer.appendChild(createHeaderRow());
 });
+
+// --- Extra Headers (injected into all test runs) ---
+function createExtraHeaderRow(key = '', value = '', enabled = true) {
+  const row = document.createElement('div');
+  row.className = 'extra-header-row';
+  row.innerHTML = `
+    <input type="checkbox" ${enabled ? 'checked' : ''} title="Enable this header">
+    <input type="text" class="eh-key" placeholder="Header name" value="${escapeAttr(key)}" spellcheck="false">
+    <input type="text" class="eh-value" placeholder="Header value" value="${escapeAttr(value)}" spellcheck="false">
+    <button class="btn-icon" title="Remove">&times;</button>
+  `;
+  row.querySelector('.btn-icon').addEventListener('click', () => {
+    row.remove();
+    updateExtraHeadersCount();
+  });
+  row.querySelectorAll('input').forEach(inp => inp.addEventListener('change', updateExtraHeadersCount));
+  return row;
+}
+
+function getExtraHeaders() {
+  const headers = [];
+  extraHeadersList.querySelectorAll('.extra-header-row').forEach(row => {
+    const enabled = row.querySelector('input[type="checkbox"]').checked;
+    const key = row.querySelector('.eh-key').value.trim();
+    const val = row.querySelector('.eh-value').value.trim();
+    if (enabled && key) headers.push([key, val]);
+  });
+  return headers;
+}
+
+function updateExtraHeadersCount() {
+  const count = getExtraHeaders().length;
+  extraHeadersCount.textContent = count > 0 ? count : '';
+}
+
+extraHeadersBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  extraHeadersPanel.classList.toggle('hidden');
+});
+
+extraHeadersAddBtn.addEventListener('click', () => {
+  extraHeadersList.appendChild(createExtraHeaderRow());
+});
+
+// Close panel when clicking outside
+document.addEventListener('click', (e) => {
+  if (!extraHeadersPanel.classList.contains('hidden') &&
+      !extraHeadersPanel.contains(e.target) &&
+      !extraHeadersBtn.contains(e.target)) {
+    extraHeadersPanel.classList.add('hidden');
+  }
+});
+
+// Add one empty row initially
+extraHeadersList.appendChild(createExtraHeaderRow());
 
 // --- Body type toggle ---
 bodyType.addEventListener('change', () => {
@@ -1992,6 +2052,7 @@ async function runAllTests() {
         const results = await invoke('run_test_suite', {
           suite: suiteCopy,
           extraVariables: fileExtraVars,
+          extraHeaders: getExtraHeaders(),
           runMode,
           fileName: file.name,
         });
@@ -2120,6 +2181,7 @@ async function runSingleBlock(fileIdx, blockIdx) {
     const results = await invoke('run_test_suite', {
       suite: singleSuite,
       extraVariables: extraVars,
+      extraHeaders: getExtraHeaders(),
       runMode: azureAuthState === 'authenticated' ? 'dev' : null,
       fileName: file.name,
     });
@@ -2710,7 +2772,7 @@ async function runGroup(fileIdx, groupName) {
       const tokenVars = fetchDevModeToken(file.suite, file.content);
       if (tokenVars.length > 0) extraVars = [...extraVars, ...tokenVars];
     }
-    const results = await invoke('run_test_suite', { suite, extraVariables: extraVars, runMode: azureAuthState === 'authenticated' ? 'dev' : null, fileName: file.name });
+    const results = await invoke('run_test_suite', { suite, extraVariables: extraVars, extraHeaders: getExtraHeaders(), runMode: azureAuthState === 'authenticated' ? 'dev' : null, fileName: file.name });
 
     // Merge results into existing file results
     if (!file.results) {
@@ -2804,6 +2866,7 @@ async function runSingleFile(fileIdx) {
     const results = await invoke('run_test_suite', {
       suite,
       extraVariables: extraVars,
+      extraHeaders: getExtraHeaders(),
       runMode: azureAuthState === 'authenticated' ? 'dev' : null,
       fileName: file.name,
     });

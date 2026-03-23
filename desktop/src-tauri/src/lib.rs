@@ -73,6 +73,7 @@ fn generate_http(suite: http_parser::TestSuite) -> Result<String, String> {
 async fn run_test_suite(
     suite: http_parser::TestSuite,
     extra_variables: Vec<(String, String)>,
+    extra_headers: Option<Vec<(String, String)>>,
     run_mode: Option<String>,
     file_name: Option<String>,
     store: State<'_, Mutex<HistoryStore>>,
@@ -80,9 +81,11 @@ async fn run_test_suite(
 ) -> Result<test_runner::TestRunResults, String> {
     let run_id = request_pilot_core::uuid::Uuid::new_v4().to_string();
     let progress = Arc::new(TauriProgress(app.clone()));
-    let mut results = test_runner::run_suite(
+    let headers = extra_headers.unwrap_or_default();
+    let mut results = test_runner::run_suite_with_headers(
         &suite,
         &extra_variables,
+        &headers,
         Some(progress),
         run_mode.as_deref(),
     ).await;

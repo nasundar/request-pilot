@@ -23,6 +23,16 @@
       <button class="btn btn-primary btn-sm" id="runAllBtn" title="Run all tests (Ctrl+Shift+Enter)">
         <span class="btn-label">▶ Run All</span>
       </button>
+      <div class="extra-headers-wrapper">
+        <button class="btn btn-ghost btn-sm" id="extraHeadersBtn" title="Extra headers injected into all test requests">
+          <span id="extraHeadersIcon">📋</span> Headers <span class="extra-headers-count" id="extraHeadersCount"></span>
+        </button>
+        <div class="extra-headers-panel hidden" id="extraHeadersPanel">
+          <div class="extra-headers-title">Extra Headers <span class="extra-headers-subtitle">(injected into all test requests)</span></div>
+          <div class="extra-headers-list" id="extraHeadersList"></div>
+          <button class="btn btn-ghost btn-xs" id="extraHeadersAddBtn">+ Add Header</button>
+        </div>
+      </div>
     </div>
     <div class="toolbar-right">
       <button class="telemetry-btn" id="telemetryBtn" title="OTEL Telemetry">

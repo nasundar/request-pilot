@@ -158,14 +158,18 @@ fn make_skipped_result(block: &TestBlock, reason: &str) -> BlockResult {
 }
 
 /// Execute a single block with owned values (suitable for tokio::spawn).
-async fn execute_block(block: TestBlock, var_store: VariableStore) -> BlockResult {
+async fn execute_block(block: TestBlock, var_store: VariableStore, extra_headers: Vec<(String, String)>) -> BlockResult {
     let url = var_store.interpolate(&block.request.url);
-    let headers: Vec<(String, String)> = block
+    let mut headers: Vec<(String, String)> = block
         .request
         .headers
         .iter()
         .map(|(k, v)| (k.clone(), var_store.interpolate(v)))
         .collect();
+    // Append extra headers (they can override block headers if same name)
+    for (k, v) in &extra_headers {
+        headers.push((k.clone(), var_store.interpolate(v)));
+    }
     let body = block
         .request
         .body
@@ -306,6 +310,7 @@ async fn run_tests_with_groups(
     tests: &[&TestBlock],
     var_store: &mut VariableStore,
     handler: &Option<Arc<dyn ProgressHandler>>,
+    extra_headers: &[(String, String)],
 ) -> Vec<BlockResult> {
     // Assign each block to a group (blocks without @group get unique pseudo-groups)
     let mut group_blocks: HashMap<String, Vec<(usize, TestBlock)>> = HashMap::new();
@@ -387,9 +392,10 @@ async fn run_tests_with_groups(
                 for (idx, block) in blocks {
                     let vs = var_snapshot.clone();
                     let h = handler.clone();
+                    let eh = extra_headers.to_vec();
                     join_set.spawn(async move {
                         emit_start(&h, &block.name, &block.block_type);
-                        let result = execute_block(block, vs).await;
+                        let result = execute_block(block, vs, eh).await;
                         emit_completed(&h, &result);
                         (idx, result)
                     });
@@ -434,13 +440,25 @@ pub async fn run_suite(
     progress: Option<Arc<dyn ProgressHandler>>,
     run_mode: Option<&str>,
 ) -> TestRunResults {
-    run_suite_inner(suite, extra_variables, progress, run_mode).await
+    run_suite_inner(suite, extra_variables, &[], progress, run_mode).await
+}
+
+/// Run a suite with additional headers injected into every request.
+pub async fn run_suite_with_headers(
+    suite: &TestSuite,
+    extra_variables: &[(String, String)],
+    extra_headers: &[(String, String)],
+    progress: Option<Arc<dyn ProgressHandler>>,
+    run_mode: Option<&str>,
+) -> TestRunResults {
+    run_suite_inner(suite, extra_variables, extra_headers, progress, run_mode).await
 }
 
 /// Inner implementation — emits block-progress events when handler is available.
 async fn run_suite_inner(
     suite: &TestSuite,
     extra_variables: &[(String, String)],
+    extra_headers: &[(String, String)],
     handler: Option<Arc<dyn ProgressHandler>>,
     run_mode: Option<&str>,
 ) -> TestRunResults {
@@ -554,7 +572,7 @@ async fn run_suite_inner(
     // ── Phase 1: Setup — sequential ──
     for block in &setups {
         emit_start(&handler, &block.name, &block.block_type);
-        let result = execute_block((*block).clone(), var_store.clone()).await;
+        let result = execute_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await;
         // Merge extracts into var_store
         for er in &result.extract_results {
             if er.success {
@@ -576,7 +594,7 @@ async fn run_suite_inner(
 
     // ── Phase 2: Tests — parallel with dependency graph ──
     if !setup_failed {
-        let test_results = run_tests_with_groups(&tests, &mut var_store, &handler).await;
+        let test_results = run_tests_with_groups(&tests, &mut var_store, &handler, extra_headers).await;
         for (result, block) in test_results.iter().zip(tests.iter()) {
             record_block_telemetry(&mut telemetry, result, block.group.as_deref());
         }
@@ -599,7 +617,7 @@ async fn run_suite_inner(
     // ── Phase 3: Teardown — sequential (always runs) ──
     for block in &teardowns {
         emit_start(&handler, &block.name, &block.block_type);
-        let result = execute_block((*block).clone(), var_store.clone()).await;
+        let result = execute_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await;
         for er in &result.extract_results {
             if er.success {
                 if let Some(ref v) = er.value {
@@ -926,7 +944,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None).await;
         assert_eq!(results.block_results.len(), 3);
         for r in &results.block_results {
             assert_ne!(r.status, "skipped");
@@ -950,7 +968,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None).await;
         assert_eq!(results.block_results.len(), 2);
         for r in &results.block_results {
             assert_ne!(r.status, "skipped");
@@ -969,7 +987,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None).await;
         assert_eq!(results.block_results.len(), 3);
     }
 
@@ -985,7 +1003,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None).await;
         // Setup fails (unreachable addr) → tests skipped, but teardown always runs
         assert_eq!(results.block_results.len(), 4);
     }
@@ -1013,7 +1031,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None).await;
         assert_eq!(results.block_results.len(), 2);
         for r in &results.block_results {
             assert_eq!(r.status, "skipped");
@@ -1031,7 +1049,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None).await;
         assert_eq!(results.block_results.len(), 3);
         // Setup errors (connection refused)
         assert_eq!(results.block_results[0].status, "error");
@@ -1052,7 +1070,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None).await;
         assert_eq!(results.block_results[0].name, "First");
         assert_eq!(results.block_results[1].name, "Second");
         assert_eq!(results.block_results[2].name, "Third");
