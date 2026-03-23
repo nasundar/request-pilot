@@ -4025,7 +4025,6 @@ histTreeClearAll.addEventListener('click', () => {
   updateTreeFilterLabel();
   loadHistory();
 });
-}
 
 function historyPercentile(arr, p) {
   if (arr.length === 0) return 0;
