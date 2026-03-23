@@ -241,6 +241,16 @@ fn add_history_entry(
     Ok(seq)
 }
 
+/// Update an existing history entry by id (e.g. response body follow-up).
+#[tauri::command]
+fn update_history_entry(
+    entry: history::HistoryEntry,
+    store: State<'_, Mutex<HistoryStore>>,
+) -> Result<bool, String> {
+    let mut s = store.lock().map_err(|e| e.to_string())?;
+    Ok(s.update(entry))
+}
+
 #[tauri::command]
 fn write_env_file(
     path: String,
@@ -385,6 +395,7 @@ pub fn run() {
             write_file,
             save_file_dialog,
             add_history_entry,
+            update_history_entry,
             start_live_capture,
             stop_live_capture,
             set_live_capture_mode,

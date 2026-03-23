@@ -70,6 +70,18 @@ impl HistoryStore {
         }
     }
 
+    /// Update an existing entry by id, replacing its fields.
+    pub fn update(&mut self, entry: HistoryEntry) -> bool {
+        if let Some(existing) = self.entries.iter_mut().find(|e| e.id == entry.id) {
+            let seq = existing.seq; // preserve original seq
+            *existing = entry;
+            existing.seq = seq;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
         self.url_trie.clear();

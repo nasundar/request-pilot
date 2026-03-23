@@ -6074,8 +6074,8 @@ document.querySelectorAll('input[name="liveMode"]').forEach(radio => {
         entry.response_body = response_body || '';
         if (status_code) entry.status = status_code;
         entry.response_size_bytes = response_body ? response_body.length : 0;
-        // Persist the update to Rust history store
-        invoke('add_history_entry', { entry }).catch(() => {});
+        // Update existing entry in Rust history store (not add — avoid duplicates)
+        invoke('update_history_entry', { entry }).catch(() => {});
         if (currentMode === 'history') loadHistory();
         break;
       }
