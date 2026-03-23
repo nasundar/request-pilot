@@ -6190,10 +6190,20 @@ document.getElementById('liveNewSessionBtn').addEventListener('click', () => {
 function updateLiveCaptureUI() {
   const dot = document.getElementById('liveDot');
   const statusText = document.getElementById('liveStatusText');
+
+  dot.className = 'live-dot';
+  statusText.className = 'live-status';
+
   if (liveCaptureMode === 'off') {
-    dot.className = 'live-dot';
-    statusText.className = 'live-status';
     statusText.textContent = 'Off';
+  } else if (liveCaptureConnected) {
+    dot.classList.add('connected');
+    statusText.classList.add('connected');
+    statusText.textContent = 'Connected';
+  } else {
+    dot.classList.add('listening');
+    statusText.classList.add('listening');
+    statusText.textContent = 'Waiting for extension…';
   }
 }
 

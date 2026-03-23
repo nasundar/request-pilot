@@ -126,7 +126,7 @@ function isLiveConnected() {
  * ========================================================== */
 
 function urlPatternToRegex(pattern) {
-  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
   return new RegExp(escaped, 'i');
 }
 
@@ -160,8 +160,11 @@ async function shouldForwardEntry(entry) {
   if (liveMode === 'filtered') {
     const rules = await getStoredRules();
     const activeRules = rules.filter(r => r.enabled);
-    if (activeRules.length === 0) return false;
-    return activeRules.some(rule => {
+    if (activeRules.length === 0) {
+      console.log('[RequestPilot] Filtered: no enabled rules, skipping');
+      return false;
+    }
+    const matched = activeRules.some(rule => {
       try {
         const regex = urlPatternToRegex(rule.urlPattern);
         return regex.test(entry.url);
@@ -169,18 +172,23 @@ async function shouldForwardEntry(entry) {
         return false;
       }
     });
+    if (!matched) {
+      console.log('[RequestPilot] Filtered: no rule matched', entry.url,
+        'patterns:', activeRules.map(r => r.urlPattern));
+    }
+    return matched;
   }
+  console.log('[RequestPilot] shouldForward: unexpected mode', liveMode);
   return false;
 }
 
 function tryForwardEntry(entry) {
-  if (isLiveConnected() && liveMode !== 'off') {
-    shouldForwardEntry(entry).then(should => {
-      if (should) forwardToDesktop(entry);
-    }).catch(err => {
-      console.warn('[RequestPilot] Forward check failed:', err);
-    });
-  }
+  if (!isLiveConnected() || liveMode === 'off') return;
+  shouldForwardEntry(entry).then(should => {
+    if (should) forwardToDesktop(entry);
+  }).catch(err => {
+    console.warn('[RequestPilot] Forward check failed:', err);
+  });
 }
 
 /* ============================================================
