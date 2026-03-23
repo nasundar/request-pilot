@@ -18,6 +18,7 @@ request-pilot/
 │       ├── env_file.rs    # .env file parser/writer
 │       ├── azure_auth.rs  # Azure CLI + device code auth
 │       ├── telemetry.rs   # OTEL telemetry (OTLP export)
+│       ├── env_file.rs    # .env file parser/writer
 │       └── otlp_proto.rs  # OTLP protobuf encoding (internal)
 │
 ├── extension/             # Browser extension (Edge / Chrome)
@@ -34,6 +35,7 @@ request-pilot/
 │   ├── README.md          # Desktop features & usage
 │   ├── src-tauri/src/     # Rust backend (thin wrapper over core)
 │   │   ├── lib.rs         # Tauri command registry + AppState
+│   │   ├── live_capture.rs# WebSocket server for browser extension live capture
 │   │   └── main.rs        # Entry point
 │   └── ui/                # Frontend (vanilla HTML/CSS/JS)
 │       ├── index.html     # Single page — sidebar + main area
@@ -126,12 +128,18 @@ Response display
 | `check_azure_cli` | azure_auth | Check if `az` CLI is available |
 | `start_device_code` | azure_auth | Start OAuth device code flow |
 | `poll_device_code` | azure_auth | Poll for device code token completion |
+| `start_live_capture` | live_capture | Start WebSocket server on port 9718 for browser extension |
+| `stop_live_capture` | live_capture | Stop the live capture WebSocket server |
+| `set_live_capture_mode` | live_capture | Set capture mode: `off`, `all`, or `filtered` |
+| `get_live_capture_status` | live_capture | Query current mode, running, and connected status |
 
 ### IPC Events (Rust → JS)
 
 | Event | Payload | Purpose |
 |-------|---------|---------|
 | `block-progress` | BlockProgress | Per-block status during test run |
+| `live-request` | CapturedRequest | Forwarded HTTP request from browser extension |
+| `live-connection-status` | String (`listening`, `connected`, `disconnected`, `stopped`) | WebSocket connection state changes |
 
 ## Browser Extension — How It Works
 
@@ -149,6 +157,10 @@ Response display
 - **Network log** captured via `webRequest` API listeners
 - **Response bodies** intercepted by patching `fetch`/`XHR` in MAIN world content script
 - **No backend server** — everything runs in the browser
+
+## Live Capture — Extension ↔ Desktop Bridge
+
+The desktop app runs a WebSocket server on `127.0.0.1:9718` (module: `live_capture.rs`). The browser extension connects as a client and forwards intercepted HTTP requests as JSON messages (`{ "action": "request", "data": CapturedRequest }`). The desktop app can push mode changes (`SetMode`) back to the extension. Three capture modes are supported: `off`, `all` (every request), and `filtered` (only requests matching extension rules). Captured requests are emitted to the frontend via Tauri events, auto-appended to a virtual `.http` file, and recorded in history with the `extension-live` source tag.
 
 ## For AI Agents: Common Tasks
 

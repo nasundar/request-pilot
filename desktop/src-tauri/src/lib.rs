@@ -1,3 +1,5 @@
+mod live_capture;
+
 use request_pilot_core::{
     azure_auth, env_file, history, http_client, http_parser, test_runner, url_trie, variables,
 };
@@ -262,9 +264,62 @@ fn check_variables(
     Ok(store.find_unresolved(&all_text))
 }
 
+/// Start the live capture WebSocket server.
+#[tauri::command]
+async fn start_live_capture(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, Arc<live_capture::LiveCaptureState>>,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    tokio::spawn(async move {
+        if let Err(e) = live_capture::start_server(state, app_handle).await {
+            eprintln!("Live capture server error: {}", e);
+        }
+    });
+    Ok(())
+}
+
+/// Stop the live capture WebSocket server.
+#[tauri::command]
+async fn stop_live_capture(
+    state: tauri::State<'_, Arc<live_capture::LiveCaptureState>>,
+) -> Result<(), String> {
+    live_capture::stop_server(&state).await;
+    Ok(())
+}
+
+/// Set the live capture mode (off, all, filtered) and notify connected extension.
+#[tauri::command]
+async fn set_live_capture_mode(
+    mode: String,
+    state: tauri::State<'_, Arc<live_capture::LiveCaptureState>>,
+) -> Result<(), String> {
+    *state.mode.lock().await = mode.clone();
+    let msg = serde_json::to_string(&live_capture::OutgoingMessage::SetMode { mode })
+        .map_err(|e| e.to_string())?;
+    let _ = state.command_tx.send(msg);
+    Ok(())
+}
+
+/// Get the current live capture status.
+#[tauri::command]
+async fn get_live_capture_status(
+    state: tauri::State<'_, Arc<live_capture::LiveCaptureState>>,
+) -> Result<serde_json::Value, String> {
+    let mode = state.mode.lock().await.clone();
+    let running = *state.running.lock().await;
+    let connected = *state.connected.lock().await;
+    Ok(serde_json::json!({
+        "mode": mode,
+        "running": running,
+        "connected": connected,
+    }))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(HistoryStore::new()))
+        .manage(Arc::new(live_capture::LiveCaptureState::new()))
         .invoke_handler(tauri::generate_handler![
             send_request,
             parse_http_file,
@@ -285,6 +340,10 @@ pub fn run() {
             start_device_code,
             poll_device_code,
             check_variables,
+            start_live_capture,
+            stop_live_capture,
+            set_live_capture_mode,
+            get_live_capture_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

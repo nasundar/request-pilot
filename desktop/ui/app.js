@@ -60,6 +60,13 @@ let telemetryState = 'off';
 let telemetryStats = []; // [{file, endpoint, traces, metrics, logs, errors, time_ms}]
 let telemetryEnabled = true; // user toggle — when false, skip OTEL export even if configured
 
+// --- Live Capture ---
+let liveCaptureMode = 'off';
+let liveCaptureConnected = false;
+let liveCapturedRequests = [];       // accumulated for current session
+let liveCaptureFileIndex = -1;       // index in loadedFiles for the virtual .http file
+let liveCaptureSessionId = null;
+
 // --- Zoom ---
 let zoomLevel = parseInt(localStorage.getItem('rp-zoom') || '100', 10);
 const ZOOM_MIN = 50, ZOOM_MAX = 200, ZOOM_STEP = 10;
@@ -4351,7 +4358,7 @@ function renderGroupedByStatus(entries) {
 function renderGroupedBySource(entries) {
   const groups = new Map();
   entries.forEach(entry => {
-    const key = entry.source === 'test-run' ? 'Test Run' : 'Manual';
+    const key = entry.source === 'test-run' ? 'Test Run' : entry.source === 'extension-live' ? 'Live Capture' : 'Manual';
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(entry);
   });
@@ -4549,6 +4556,8 @@ function createHistoryEntryRow(entry) {
   const statusClass = getHistoryStatusClass(entry.status);
   const sourceBadge = entry.source === 'test-run'
     ? '<span class="hist-source-badge test-run">Test Run</span>'
+    : entry.source === 'extension-live'
+    ? '<span class="hist-source-badge extension-live">📡 Live</span>'
     : '<span class="hist-source-badge manual">Manual</span>';
   const blockName = entry.block_name ? `<span class="hist-block-name">${escapeHtml(entry.block_name)}</span>` : '';
   const timeColor = entry.response_time_ms < 200 ? 'var(--green)' : entry.response_time_ms < 500 ? 'var(--orange)' : 'var(--red)';
@@ -4644,7 +4653,7 @@ function showHistoryDetail(entry) {
     </div>
     <div class="hist-detail-meta">
       <span class="hist-entry-seq">#${entry.seq}</span>
-      <span class="hist-source-badge ${entry.source === 'test-run' ? 'test-run' : 'manual'}">${entry.source === 'test-run' ? 'Test Run' : 'Manual'}</span>
+      <span class="hist-source-badge ${entry.source === 'test-run' ? 'test-run' : entry.source === 'extension-live' ? 'extension-live' : 'manual'}">${entry.source === 'test-run' ? 'Test Run' : entry.source === 'extension-live' ? '📡 Live' : 'Manual'}</span>
       ${entry.block_name ? `<span class="hist-block-name">${escapeHtml(entry.block_name)}</span>` : ''}
       <span class="hist-entry-timestamp">${formatHistoryTime(entry.timestamp)}</span>
       ${entry.run_id ? `<span class="hist-run-id" title="Run ID: ${escapeAttr(entry.run_id)}">🔗 Run</span>` : ''}
@@ -5930,3 +5939,257 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e)
     updateThemeIcon();
   }
 });
+
+// --- Live Capture ---
+
+// Toggle dropdown
+document.getElementById('liveCaptureToggle').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const dd = document.getElementById('liveCaptureDropdown');
+  dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
+});
+// Close on outside click
+document.addEventListener('click', (e) => {
+  const wrapper = document.querySelector('.live-capture-wrapper');
+  if (wrapper && !wrapper.contains(e.target)) {
+    document.getElementById('liveCaptureDropdown').style.display = 'none';
+  }
+});
+
+// Mode switching
+document.querySelectorAll('input[name="liveMode"]').forEach(radio => {
+  radio.addEventListener('change', async (e) => {
+    const mode = e.target.value;
+    liveCaptureMode = mode;
+
+    try {
+      if (mode === 'off') {
+        await invoke('set_live_capture_mode', { mode: 'off' });
+        await invoke('stop_live_capture');
+        document.getElementById('liveNewSessionBtn').disabled = true;
+      } else {
+        await invoke('start_live_capture');
+        await invoke('set_live_capture_mode', { mode });
+        if (!liveCaptureSessionId) {
+          startNewCaptureSession();
+        }
+        document.getElementById('liveNewSessionBtn').disabled = false;
+      }
+    } catch (err) {
+      rpLog('error', 'Live capture mode switch failed', String(err));
+    }
+
+    updateLiveCaptureUI();
+  });
+});
+
+// Listen for live requests from extension
+listen('live-request', (event) => {
+  const req = event.payload;
+  liveCapturedRequests.push(req);
+
+  document.getElementById('liveCaptureCount').textContent = liveCapturedRequests.length;
+  document.getElementById('liveSaveBtn').disabled = liveCapturedRequests.length === 0;
+
+  addLiveRequestToHistory(req);
+  appendToLiveCaptureFile(req);
+
+  rpLog('debug', `Live capture: ${req.method} ${req.url}`, { status: req.status_code, duration: req.duration });
+});
+
+// Listen for connection status changes
+listen('live-connection-status', (event) => {
+  const { status } = event.payload;
+  const dot = document.getElementById('liveDot');
+  const statusText = document.getElementById('liveStatusText');
+
+  dot.className = 'live-dot';
+  statusText.className = 'live-status';
+
+  switch (status) {
+    case 'listening':
+      dot.classList.add('listening');
+      statusText.classList.add('listening');
+      statusText.textContent = 'Waiting for extension…';
+      liveCaptureConnected = false;
+      break;
+    case 'connected':
+      dot.classList.add('connected');
+      statusText.classList.add('connected');
+      statusText.textContent = 'Connected';
+      liveCaptureConnected = true;
+      break;
+    case 'disconnected':
+      dot.classList.add('error');
+      statusText.classList.add('error');
+      statusText.textContent = 'Disconnected';
+      liveCaptureConnected = false;
+      break;
+    case 'stopped':
+      statusText.textContent = 'Off';
+      liveCaptureConnected = false;
+      break;
+  }
+
+  rpLog('info', `Live capture status: ${status}`);
+});
+
+// Add captured request to history (local-only, no re-execution)
+function addLiveRequestToHistory(req) {
+  let blockName;
+  try {
+    blockName = `${req.method} ${new URL(req.url).pathname}`;
+  } catch {
+    blockName = `${req.method} request`;
+  }
+
+  const sessionTime = liveCaptureSessionId
+    ? new Date(liveCaptureSessionId).toLocaleTimeString('en-US', { hour12: false })
+    : new Date().toLocaleTimeString('en-US', { hour12: false });
+
+  const entry = {
+    seq: Date.now(),
+    id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2),
+    run_id: String(liveCaptureSessionId),
+    source: 'extension-live',
+    file_name: `Live Capture - ${sessionTime}`,
+    group: null,
+    block_name: blockName,
+    method: req.method || 'GET',
+    url: req.url,
+    request_headers: (req.request_headers || []).map(h => [h.name, h.value]),
+    request_body: req.request_body || '',
+    status: req.status_code || 0,
+    response_headers: (req.response_headers || []).map(h => [h.name, h.value]),
+    response_body: req.response_body || '',
+    response_time_ms: req.duration || 0,
+    response_size: req.response_body ? req.response_body.length : 0,
+    timestamp: req.timestamp ? new Date(req.timestamp).toISOString() : new Date().toISOString(),
+  };
+
+  historyCache.unshift(entry);
+
+  if (currentMode === 'history') {
+    loadHistory();
+  }
+}
+
+// Virtual .http file session management
+function startNewCaptureSession() {
+  liveCaptureSessionId = Date.now();
+  liveCapturedRequests = [];
+  document.getElementById('liveCaptureCount').textContent = '0';
+  document.getElementById('liveSaveBtn').disabled = true;
+
+  const sessionTime = new Date().toLocaleTimeString('en-US', { hour12: false });
+  const fileName = `Live Capture - ${sessionTime}.http`;
+  const initialContent = `# Live Capture Session\n# Started: ${new Date().toISOString()}\n# Source: Request Pilot Extension\n\n`;
+
+  try {
+    const suite = { variables: [], blocks: [] };
+    loadedFiles.push({
+      name: fileName,
+      content: initialContent,
+      suite,
+      results: null,
+    });
+    liveCaptureFileIndex = loadedFiles.length - 1;
+    renderFileTree();
+    rpLog('info', `Live capture session started: ${fileName}`);
+  } catch (e) {
+    rpLog('warn', 'Failed to create live capture file', String(e));
+  }
+}
+
+function appendToLiveCaptureFile(req) {
+  if (liveCaptureFileIndex < 0 || liveCaptureFileIndex >= loadedFiles.length) return;
+
+  const file = loadedFiles[liveCaptureFileIndex];
+
+  let block = '###';
+  try {
+    const pathname = new URL(req.url).pathname;
+    block += ` ${req.method} ${pathname}\n`;
+  } catch {
+    block += ` ${req.method} request\n`;
+  }
+  block += `${req.method} ${req.url}\n`;
+
+  for (const h of (req.request_headers || [])) {
+    const lower = h.name.toLowerCase();
+    if (lower.startsWith(':') || lower === 'host') continue;
+    block += `${h.name}: ${h.value}\n`;
+  }
+
+  if (req.request_body) {
+    block += `\n${req.request_body}\n`;
+  }
+
+  block += '\n';
+
+  file.content += block;
+
+  // Re-parse to update sidebar blocks
+  invoke('parse_test_file', { content: file.content }).then(suite => {
+    file.suite = suite;
+    if (activeFileIndex === liveCaptureFileIndex) {
+      renderFileTree();
+    }
+  }).catch(() => {});
+}
+
+// Save captured .http file
+document.getElementById('liveSaveBtn').addEventListener('click', () => {
+  if (liveCaptureFileIndex < 0 || liveCaptureFileIndex >= loadedFiles.length) return;
+
+  const file = loadedFiles[liveCaptureFileIndex];
+  const blob = new Blob([file.content], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = file.name;
+  a.click();
+  URL.revokeObjectURL(url);
+  rpLog('info', `Live capture file saved: ${file.name}`);
+});
+
+// New capture session
+document.getElementById('liveNewSessionBtn').addEventListener('click', () => {
+  startNewCaptureSession();
+});
+
+function updateLiveCaptureUI() {
+  const dot = document.getElementById('liveDot');
+  const statusText = document.getElementById('liveStatusText');
+  if (liveCaptureMode === 'off') {
+    dot.className = 'live-dot';
+    statusText.className = 'live-status';
+    statusText.textContent = 'Off';
+  }
+}
+
+// Restore live capture status on startup
+(async function initLiveCapture() {
+  try {
+    const status = await invoke('get_live_capture_status');
+    if (status && status.mode && status.mode !== 'off') {
+      liveCaptureMode = status.mode;
+      const radio = document.querySelector(`input[name="liveMode"][value="${status.mode}"]`);
+      if (radio) radio.checked = true;
+      if (!liveCaptureSessionId) startNewCaptureSession();
+      document.getElementById('liveNewSessionBtn').disabled = false;
+    }
+    if (status && status.connected) {
+      liveCaptureConnected = true;
+      document.getElementById('liveDot').className = 'live-dot connected';
+      document.getElementById('liveStatusText').textContent = 'Connected';
+      document.getElementById('liveStatusText').className = 'live-status connected';
+    } else if (status && status.running) {
+      document.getElementById('liveDot').className = 'live-dot listening';
+      document.getElementById('liveStatusText').textContent = 'Waiting for extension…';
+      document.getElementById('liveStatusText').className = 'live-status listening';
+    }
+  } catch {
+    // Backend may not support live capture yet — silently ignore
+  }
+})();

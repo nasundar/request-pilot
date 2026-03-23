@@ -114,6 +114,7 @@ Multi-scope Azure auth for developers — skip client-credentials setup blocks a
 
 | Feature | Description |
 |---|---|
+| **Live Capture** | Connect desktop app to browser extension via WebSocket — forward live HTTP traffic in real-time with 3 modes: Off, All Requests, or Filtered (using extension rules). Captured requests auto-generate `.http` files and appear in history |
 | **Extra Headers Injection** | Inject custom headers (auth tokens, trace IDs, API keys) into all test requests globally via a toolbar button; headers support `{{variable}}` interpolation |
 | **Hierarchical Tree Filter** | Single multi-select dropdown with cascading checkboxes to filter history by file → group → test; replaces separate filter dropdowns for streamlined analysis |
 | **Rocket Pilot Icon** | Rocket-pilot-in-cosmos SVG icon used across all platforms — desktop toolbar, taskbar, extension popup, and extension icons |
@@ -127,6 +128,10 @@ Multi-scope Azure auth for developers — skip client-credentials setup blocks a
 | **Step Toggle** | Enable/disable blocks via sidebar checkbox or `# @disabled` directive |
 | **Guided Tour** | Two-part onboarding tour covering all features; re-open via ❓ button |
 | **Cross-Platform** | Windows, macOS, Linux via Tauri v2 |
+
+### Live Capture
+
+The desktop app can connect to the Request Pilot browser extension via a local WebSocket server (port `9718`). When active, HTTP requests intercepted by the extension are forwarded in real-time and automatically converted into `.http` file blocks. Three capture modes are available — **Off**, **All Requests**, and **Filtered** (only requests matching extension rules). Each capture session creates a virtual `.http` file in the sidebar that can be saved to disk, and every captured request is recorded in the History panel with the `extension-live` source tag.
 
 ### E2E Observability (OTEL Telemetry)
 

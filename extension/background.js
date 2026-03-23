@@ -15,6 +15,13 @@ let loggingPaused = false;
 // ── Debug counter for response body captures ─────────────────
 let captureDebugCount = 0;
 
+// ── Live Capture (Desktop Connection) ────────────────────────
+let liveSocket = null;
+let liveMode = 'off'; // 'off' | 'all' | 'filtered'
+let liveReconnectTimer = null;
+const LIVE_WS_URL = 'ws://127.0.0.1:9718';
+const LIVE_RECONNECT_DELAY = 3000;
+
 // ── Full resource-type list used in every DNR condition ──────
 const ALL_RESOURCE_TYPES = [
   "main_frame",
@@ -39,6 +46,138 @@ let _mutationQueue = Promise.resolve();
 function withMutationLock(fn) {
   _mutationQueue = _mutationQueue.then(fn, fn);
   return _mutationQueue;
+}
+
+/* ============================================================
+ * WebSocket connection to desktop app (live capture)
+ * ========================================================== */
+
+function connectToDesktop() {
+  if (liveSocket && liveSocket.readyState <= WebSocket.OPEN) return;
+
+  try {
+    liveSocket = new WebSocket(LIVE_WS_URL);
+
+    liveSocket.onopen = () => {
+      console.log('[RequestPilot] Connected to desktop app');
+      clearReconnectTimer();
+      liveSocket.send(JSON.stringify({ action: 'connected' }));
+    };
+
+    liveSocket.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.action === 'set_mode') {
+          liveMode = msg.mode || 'off';
+          console.log('[RequestPilot] Live capture mode:', liveMode);
+        } else if (msg.action === 'ping') {
+          liveSocket.send(JSON.stringify({ action: 'pong' }));
+        }
+      } catch (e) {
+        console.warn('[RequestPilot] WS message parse error:', e);
+      }
+    };
+
+    liveSocket.onclose = () => {
+      console.log('[RequestPilot] Disconnected from desktop app');
+      liveSocket = null;
+      liveMode = 'off';
+      scheduleReconnect();
+    };
+
+    liveSocket.onerror = () => {
+      // onclose will fire after onerror
+    };
+  } catch (e) {
+    console.warn('[RequestPilot] WS connection failed:', e);
+    scheduleReconnect();
+  }
+}
+
+function disconnectFromDesktop() {
+  clearReconnectTimer();
+  liveMode = 'off';
+  if (liveSocket) {
+    liveSocket.close();
+    liveSocket = null;
+  }
+}
+
+function scheduleReconnect() {
+  clearReconnectTimer();
+  liveReconnectTimer = setTimeout(() => {
+    connectToDesktop();
+  }, LIVE_RECONNECT_DELAY);
+}
+
+function clearReconnectTimer() {
+  if (liveReconnectTimer) {
+    clearTimeout(liveReconnectTimer);
+    liveReconnectTimer = null;
+  }
+}
+
+function isLiveConnected() {
+  return liveSocket && liveSocket.readyState === WebSocket.OPEN;
+}
+
+/* ============================================================
+ * Live-capture forwarding helpers
+ * ========================================================== */
+
+function urlPatternToRegex(pattern) {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(escaped, 'i');
+}
+
+function forwardToDesktop(entry) {
+  if (!isLiveConnected() || liveMode === 'off') return;
+
+  const data = {
+    url: entry.url,
+    method: entry.method,
+    request_headers: (entry.requestHeaders || []).map(h => ({ name: h.name, value: h.value })),
+    request_body: entry.requestBody
+      ? (entry.requestBody.type === 'raw' ? entry.requestBody.data : JSON.stringify(entry.requestBody.data))
+      : null,
+    status_code: entry.statusCode || null,
+    response_headers: (entry.responseHeaders || []).map(h => ({ name: h.name, value: h.value })),
+    response_body: entry.responseBody || null,
+    duration: entry.duration || null,
+    timestamp: entry.timestamp || null,
+  };
+
+  try {
+    liveSocket.send(JSON.stringify({ action: 'request', data }));
+  } catch (e) {
+    console.warn('[RequestPilot] Failed to forward request:', e);
+  }
+}
+
+async function shouldForwardEntry(entry) {
+  if (liveMode === 'all') return true;
+  if (liveMode === 'filtered') {
+    const rules = await getStoredRules();
+    const activeRules = rules.filter(r => r.enabled);
+    if (activeRules.length === 0) return false;
+    return activeRules.some(rule => {
+      try {
+        const regex = urlPatternToRegex(rule.urlPattern);
+        return regex.test(entry.url);
+      } catch {
+        return false;
+      }
+    });
+  }
+  return false;
+}
+
+function tryForwardEntry(entry) {
+  if (isLiveConnected() && liveMode !== 'off') {
+    shouldForwardEntry(entry).then(should => {
+      if (should) forwardToDesktop(entry);
+    });
+  }
 }
 
 /* ============================================================
@@ -323,6 +462,21 @@ async function handleMessage(msg) {
       };
     }
 
+    // ── Live capture control ─────────────────────────────────
+    case "startLiveCapture":
+      connectToDesktop();
+      return { success: true };
+
+    case "stopLiveCapture":
+      disconnectFromDesktop();
+      return { success: true };
+
+    case "getLiveCaptureStatus":
+      return {
+        connected: isLiveConnected(),
+        mode: liveMode,
+      };
+
     default:
       return { error: "Unknown action" };
   }
@@ -523,6 +677,7 @@ chrome.webRequest.onCompleted.addListener(
         networkLog.length = MAX_NETWORK_ENTRIES;
       }
       pendingRequests.delete(details.requestId);
+      tryForwardEntry(entry);
     }
   },
   { urls: ["<all_urls>"] },
@@ -542,6 +697,7 @@ chrome.webRequest.onErrorOccurred.addListener(
         networkLog.length = MAX_NETWORK_ENTRIES;
       }
       pendingRequests.delete(details.requestId);
+      tryForwardEntry(entry);
     }
   },
   { urls: ["<all_urls>"] }
@@ -566,3 +722,6 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(() => {
   syncAllRules();
 });
+
+// Attempt to connect to desktop app on startup (will silently retry if not running)
+connectToDesktop();

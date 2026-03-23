@@ -370,3 +370,283 @@ describe('getExtraHeaders', () => {
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 5. Live capture .http file generation
+// ---------------------------------------------------------------------------
+describe('live capture .http file generation', () => {
+  /**
+   * Mirrors the block-building logic in app.js appendToLiveCaptureFile().
+   * Extracted here to test formatting without DOM/Tauri dependencies.
+   */
+  function buildHttpBlock(req) {
+    let block = '###';
+    try {
+      const url = new URL(req.url);
+      block += ` ${req.method} ${url.pathname}\n`;
+    } catch {
+      block += ` ${req.method} request\n`;
+    }
+    block += `${req.method} ${req.url}\n`;
+    for (const h of (req.request_headers || [])) {
+      const lower = h.name.toLowerCase();
+      if (lower.startsWith(':') || lower === 'host') continue;
+      block += `${h.name}: ${h.value}\n`;
+    }
+    if (req.request_body) {
+      block += `\n${req.request_body}\n`;
+    }
+    block += '\n';
+    return block;
+  }
+
+  test('generates correct block for GET request', () => {
+    const block = buildHttpBlock({
+      method: 'GET',
+      url: 'https://api.example.com/users?page=1',
+      request_headers: [
+        { name: 'Authorization', value: 'Bearer tok123' },
+        { name: 'Accept', value: 'application/json' },
+      ],
+    });
+    expect(block).toContain('### GET /users');
+    expect(block).toContain('GET https://api.example.com/users?page=1');
+    expect(block).toContain('Authorization: Bearer tok123');
+    expect(block).toContain('Accept: application/json');
+    expect(block).not.toContain('request_body');
+  });
+
+  test('generates correct block for POST with body', () => {
+    const body = JSON.stringify({ name: 'Alice', role: 'admin' });
+    const block = buildHttpBlock({
+      method: 'POST',
+      url: 'https://api.example.com/users',
+      request_headers: [
+        { name: 'Content-Type', value: 'application/json' },
+      ],
+      request_body: body,
+    });
+    expect(block).toContain('### POST /users');
+    expect(block).toContain('POST https://api.example.com/users');
+    expect(block).toContain('Content-Type: application/json');
+    expect(block).toContain(body);
+  });
+
+  test('skips pseudo-headers and host header', () => {
+    const block = buildHttpBlock({
+      method: 'GET',
+      url: 'https://example.com/path',
+      request_headers: [
+        { name: ':method', value: 'GET' },
+        { name: ':authority', value: 'example.com' },
+        { name: ':path', value: '/path' },
+        { name: ':scheme', value: 'https' },
+        { name: 'host', value: 'example.com' },
+        { name: 'Host', value: 'example.com' },
+        { name: 'Accept', value: '*/*' },
+      ],
+    });
+    expect(block).not.toMatch(/:method/);
+    expect(block).not.toMatch(/:authority/);
+    expect(block).not.toMatch(/:path/);
+    expect(block).not.toMatch(/:scheme/);
+    // host / Host should be filtered out
+    expect(block).not.toMatch(/^host:/im);
+    expect(block).toContain('Accept: */*');
+  });
+
+  test('handles URL without pathname gracefully', () => {
+    const block = buildHttpBlock({
+      method: 'GET',
+      url: 'https://example.com',
+      request_headers: [],
+    });
+    // URL without explicit path yields "/"
+    expect(block).toContain('### GET /');
+    expect(block).toContain('GET https://example.com');
+  });
+
+  test('handles request with no headers', () => {
+    const block = buildHttpBlock({
+      method: 'DELETE',
+      url: 'https://api.example.com/items/42',
+      request_headers: [],
+    });
+    expect(block).toContain('### DELETE /items/42');
+    expect(block).toContain('DELETE https://api.example.com/items/42');
+    // No header lines between request line and trailing newline
+    const lines = block.split('\n');
+    expect(lines[0]).toBe('### DELETE /items/42');
+    expect(lines[1]).toBe('DELETE https://api.example.com/items/42');
+  });
+
+  test('handles request with null/undefined headers', () => {
+    const block = buildHttpBlock({
+      method: 'GET',
+      url: 'https://example.com/test',
+    });
+    expect(block).toContain('### GET /test');
+    expect(block).toContain('GET https://example.com/test');
+  });
+
+  test('handles request with no body', () => {
+    const block = buildHttpBlock({
+      method: 'GET',
+      url: 'https://example.com/health',
+      request_headers: [{ name: 'X-Req-Id', value: '123' }],
+    });
+    // Should NOT contain a double newline before the trailing newline
+    // (no body separator)
+    expect(block).not.toMatch(/\n\n.*\S.*\n\n$/);
+    expect(block).toContain('X-Req-Id: 123');
+  });
+
+  test('handles malformed URL by falling back to "request"', () => {
+    const block = buildHttpBlock({
+      method: 'PATCH',
+      url: 'not-a-valid-url',
+      request_headers: [],
+    });
+    expect(block).toContain('### PATCH request');
+    expect(block).toContain('PATCH not-a-valid-url');
+  });
+
+  test('preserves full query string in request line', () => {
+    const block = buildHttpBlock({
+      method: 'GET',
+      url: 'https://api.example.com/search?q=hello&limit=10&offset=0',
+      request_headers: [],
+    });
+    expect(block).toContain('GET https://api.example.com/search?q=hello&limit=10&offset=0');
+    // Block name should only show pathname
+    expect(block).toContain('### GET /search');
+  });
+
+  test('handles PUT with large body', () => {
+    const largeBody = JSON.stringify({ data: 'x'.repeat(500) });
+    const block = buildHttpBlock({
+      method: 'PUT',
+      url: 'https://api.example.com/upload',
+      request_headers: [
+        { name: 'Content-Type', value: 'application/json' },
+        { name: 'Content-Length', value: String(largeBody.length) },
+      ],
+      request_body: largeBody,
+    });
+    expect(block).toContain('### PUT /upload');
+    expect(block).toContain(largeBody);
+    expect(block).toContain(`Content-Length: ${largeBody.length}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. Live capture history entry
+// ---------------------------------------------------------------------------
+describe('live capture history entry', () => {
+  /**
+   * Mirrors the history-entry construction in app.js addLiveRequestToHistory().
+   */
+  function buildHistoryEntry(req, sessionTimestamp) {
+    let blockName;
+    try {
+      const url = new URL(req.url);
+      blockName = `${req.method} ${url.pathname}`;
+    } catch {
+      blockName = `${req.method} request`;
+    }
+
+    const sessionTime = new Date(sessionTimestamp || Date.now())
+      .toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+    return {
+      method: req.method || 'GET',
+      url: req.url || '',
+      status: req.status_code || 0,
+      duration_ms: req.duration || null,
+      request_headers: (req.request_headers || []).map(h => [h.name, h.value]),
+      response_headers: (req.response_headers || []).map(h => [h.name, h.value]),
+      request_body: req.request_body || null,
+      response_body: req.response_body || null,
+      source: 'extension-live',
+      file_name: `Live Capture - ${sessionTime}`,
+      block_name: blockName,
+    };
+  }
+
+  test('creates proper history entry from captured request', () => {
+    const req = {
+      method: 'POST',
+      url: 'https://api.example.com/users',
+      status_code: 201,
+      duration: 150,
+      request_headers: [
+        { name: 'Content-Type', value: 'application/json' },
+      ],
+      response_headers: [
+        { name: 'Location', value: '/users/42' },
+      ],
+      request_body: '{"name":"Bob"}',
+      response_body: '{"id":42}',
+    };
+    const entry = buildHistoryEntry(req, 1700000000000);
+    expect(entry.method).toBe('POST');
+    expect(entry.url).toBe('https://api.example.com/users');
+    expect(entry.status).toBe(201);
+    expect(entry.duration_ms).toBe(150);
+    expect(entry.source).toBe('extension-live');
+    expect(entry.block_name).toBe('POST /users');
+    expect(entry.file_name).toMatch(/^Live Capture - \d{2}:\d{2}:\d{2}$/);
+    expect(entry.request_headers).toEqual([['Content-Type', 'application/json']]);
+    expect(entry.response_headers).toEqual([['Location', '/users/42']]);
+    expect(entry.request_body).toBe('{"name":"Bob"}');
+    expect(entry.response_body).toBe('{"id":42}');
+  });
+
+  test('handles missing fields gracefully', () => {
+    const entry = buildHistoryEntry({
+      method: 'GET',
+      url: 'https://example.com/',
+    }, 1700000000000);
+    expect(entry.method).toBe('GET');
+    expect(entry.status).toBe(0);
+    expect(entry.duration_ms).toBeNull();
+    expect(entry.request_headers).toEqual([]);
+    expect(entry.response_headers).toEqual([]);
+    expect(entry.request_body).toBeNull();
+    expect(entry.response_body).toBeNull();
+    expect(entry.source).toBe('extension-live');
+    expect(entry.block_name).toBe('GET /');
+  });
+
+  test('uses pathname in block name, not full URL', () => {
+    const entry = buildHistoryEntry({
+      method: 'GET',
+      url: 'https://api.example.com/v2/items?page=3&sort=asc',
+    });
+    expect(entry.block_name).toBe('GET /v2/items');
+  });
+
+  test('falls back to "request" for invalid URLs', () => {
+    const entry = buildHistoryEntry({
+      method: 'OPTIONS',
+      url: 'invalid-url',
+    });
+    expect(entry.block_name).toBe('OPTIONS request');
+  });
+
+  test('maps header pairs from {name, value} to [name, value] arrays', () => {
+    const entry = buildHistoryEntry({
+      method: 'GET',
+      url: 'https://example.com',
+      request_headers: [
+        { name: 'X-A', value: '1' },
+        { name: 'X-B', value: '2' },
+      ],
+      response_headers: [
+        { name: 'X-R', value: '3' },
+      ],
+    });
+    expect(entry.request_headers).toEqual([['X-A', '1'], ['X-B', '2']]);
+    expect(entry.response_headers).toEqual([['X-R', '3']]);
+  });
+});

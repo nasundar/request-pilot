@@ -35,6 +35,36 @@
           <button class="btn btn-ghost btn-xs" id="extraHeadersAddBtn">+ Add Header</button>
         </div>
       </div>
+      <div class="live-capture-wrapper">
+        <button class="icon-btn live-capture-btn" id="liveCaptureToggle" title="Live Capture from Extension">
+          <span class="live-dot" id="liveDot"></span>
+          📡
+        </button>
+        <div class="live-capture-dropdown" id="liveCaptureDropdown" style="display:none">
+          <div class="live-capture-header">
+            <span>Live Capture</span>
+            <span class="live-status" id="liveStatusText">Off</span>
+          </div>
+          <div class="live-capture-modes">
+            <label class="live-mode-option">
+              <input type="radio" name="liveMode" value="off" checked> Off
+            </label>
+            <label class="live-mode-option">
+              <input type="radio" name="liveMode" value="all"> All Requests
+            </label>
+            <label class="live-mode-option">
+              <input type="radio" name="liveMode" value="filtered"> Filtered (Extension Rules)
+            </label>
+          </div>
+          <div class="live-capture-stats" id="liveCaptureStats">
+            Captured: <span id="liveCaptureCount">0</span> requests
+          </div>
+          <div class="live-capture-actions">
+            <button class="btn-sm" id="liveSaveBtn" disabled>💾 Save .http</button>
+            <button class="btn-sm" id="liveNewSessionBtn" disabled>🔄 New Session</button>
+          </div>
+        </div>
+      </div>
       <button class="telemetry-btn" id="telemetryBtn" title="OTEL Telemetry">
         <span class="telemetry-icon" id="telemetryIcon">📡</span>
         <span class="telemetry-label" id="telemetryLabel">OTEL</span>
@@ -169,6 +199,7 @@
             <option value="">All Sources</option>
             <option value="manual">Manual</option>
             <option value="test-run">Test Run</option>
+            <option value="extension-live">Live Capture</option>
           </select>
           <div class="hist-tree-filter-wrapper" id="histTreeFilterWrapper">
             <button class="history-filter-select hist-tree-filter-btn" id="histTreeFilterBtn" type="button">

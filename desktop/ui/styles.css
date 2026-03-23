@@ -2704,6 +2704,7 @@ input:focus, select:focus, textarea:focus { outline: none; }
 }
 .hist-source-badge.manual { background: var(--bg-elevated); color: var(--text-muted); }
 .hist-source-badge.test-run { background: var(--accent-dim); color: var(--accent); }
+.hist-source-badge.extension-live { background: var(--green-dim); color: var(--green); }
 
 .hist-block-name {
   font-size: 11px;
@@ -4076,3 +4077,85 @@ input:focus, select:focus, textarea:focus { outline: none; }
 .theme-toggle-btn:active {
   transform: scale(0.95);
 }
+
+/* ---------- Live Capture ---------- */
+.live-capture-wrapper { position: relative; }
+.live-capture-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  font-size: 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.live-capture-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.live-dot {
+  position: absolute; top: 2px; right: 2px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-muted);
+  transition: background var(--transition);
+}
+.live-dot.listening { background: var(--orange); }
+.live-dot.connected { background: var(--green); animation: pulse-dot 1.5s infinite; }
+.live-dot.error { background: var(--red); animation: blink-dot 1s infinite; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+@keyframes blink-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.2; }
+}
+
+.live-capture-dropdown {
+  position: absolute; top: 100%; right: 0; z-index: 100;
+  width: 260px; background: var(--bg-secondary);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 8px 24px var(--shadow-heavy);
+  padding: 12px;
+  margin-top: 4px;
+}
+.live-capture-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 8px; font-weight: 600; font-size: 12px;
+  color: var(--text-primary);
+}
+.live-status { font-weight: normal; font-size: 11px; color: var(--text-muted); }
+.live-status.connected { color: var(--green); }
+.live-status.listening { color: var(--orange); }
+.live-status.error { color: var(--red); }
+.live-capture-modes { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.live-mode-option {
+  display: flex; align-items: center; gap: 6px; padding: 4px 6px;
+  border-radius: var(--radius-xs); font-size: 12px; color: var(--text-secondary);
+  cursor: pointer; transition: background var(--transition);
+}
+.live-mode-option:hover { background: var(--bg-tertiary); }
+.live-mode-option input { margin: 0; }
+.live-capture-stats {
+  font-size: 11px; color: var(--text-muted);
+  padding: 6px 0; border-top: 1px solid var(--border);
+  margin-bottom: 6px;
+}
+.live-capture-actions { display: flex; gap: 6px; }
+.live-capture-actions .btn-sm {
+  flex: 1; padding: 4px 8px; font-size: 11px; cursor: pointer;
+  background: var(--bg-elevated); color: var(--text-secondary);
+  border: 1px solid var(--border); border-radius: var(--radius-xs);
+  transition: all var(--transition);
+}
+.live-capture-actions .btn-sm:hover:not(:disabled) {
+  background: var(--accent-dim); color: var(--accent);
+}
+.live-capture-actions .btn-sm:disabled { opacity: 0.4; cursor: default; }
