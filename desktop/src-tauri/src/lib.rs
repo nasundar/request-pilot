@@ -17,6 +17,7 @@ impl test_runner::ProgressHandler for TauriProgress {
     }
 }
 
+/// Execute a single HTTP request and record it in history.
 #[tauri::command]
 async fn send_request(
     method: String,
@@ -69,6 +70,7 @@ fn generate_http(suite: http_parser::TestSuite) -> Result<String, String> {
     Ok(http_parser::generate_http_content(&suite))
 }
 
+/// Execute a test suite from an .http file, streaming progress via events.
 #[tauri::command]
 async fn run_test_suite(
     suite: http_parser::TestSuite,
@@ -159,6 +161,7 @@ struct HistoryDistinctValues {
     block_names: Vec<String>,
 }
 
+/// Return distinct file names, groups, and block names from history.
 #[tauri::command]
 fn get_history_distinct_values(
     store: State<'_, Mutex<HistoryStore>>,

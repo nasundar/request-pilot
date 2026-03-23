@@ -44,6 +44,7 @@ pub struct TestRunResults {
     pub telemetry: Option<TelemetryStats>,
 }
 
+/// Result of executing a single test block.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BlockResult {
     pub seq: Option<u64>,
@@ -331,7 +332,7 @@ async fn run_tests_with_groups(
     // Build dependency graph: group → set of group names it depends on
     let mut group_deps: HashMap<String, HashSet<String>> = HashMap::new();
     for (i, block) in tests.iter().enumerate() {
-        let group_name = block_group.get(&i).unwrap().clone();
+        let group_name = block_group.get(&i).expect("block index must exist in group map").clone();
         for dep in &block.depends {
             group_deps
                 .entry(group_name.clone())
@@ -443,7 +444,7 @@ pub async fn run_suite(
     run_suite_inner(suite, extra_variables, &[], progress, run_mode).await
 }
 
-/// Run a suite with additional headers injected into every request.
+/// Run a test suite with additional headers injected into every request.
 pub async fn run_suite_with_headers(
     suite: &TestSuite,
     extra_variables: &[(String, String)],

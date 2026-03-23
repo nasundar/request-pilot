@@ -1,6 +1,7 @@
 use crate::url_trie::UrlTrie;
 use serde::{Deserialize, Serialize};
 
+/// Filter criteria for querying history entries.
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct HistoryFilter {
     pub method: Option<String>,
@@ -15,6 +16,7 @@ pub struct HistoryFilter {
     pub limit: Option<usize>,
 }
 
+/// A single recorded HTTP request/response with metadata.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HistoryEntry {
     pub seq: u64,
@@ -36,6 +38,7 @@ pub struct HistoryEntry {
     pub timestamp: String,
 }
 
+/// In-memory store of HTTP request history entries.
 pub struct HistoryStore {
     pub entries: Vec<HistoryEntry>,
     max_entries: usize,
@@ -134,33 +137,30 @@ impl HistoryStore {
 
     /// Return distinct values for a field, useful for populating filter dropdowns.
     pub fn distinct_file_names(&self) -> Vec<String> {
-        let mut seen = std::collections::BTreeSet::new();
-        for e in &self.entries {
-            if let Some(ref f) = e.file_name {
-                seen.insert(f.clone());
-            }
-        }
-        seen.into_iter().collect()
+        self.entries.iter()
+            .filter_map(|e| e.file_name.as_deref())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(String::from)
+            .collect()
     }
 
     pub fn distinct_groups(&self) -> Vec<String> {
-        let mut seen = std::collections::BTreeSet::new();
-        for e in &self.entries {
-            if let Some(ref g) = e.group {
-                seen.insert(g.clone());
-            }
-        }
-        seen.into_iter().collect()
+        self.entries.iter()
+            .filter_map(|e| e.group.as_deref())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(String::from)
+            .collect()
     }
 
     pub fn distinct_block_names(&self) -> Vec<String> {
-        let mut seen = std::collections::BTreeSet::new();
-        for e in &self.entries {
-            if let Some(ref b) = e.block_name {
-                seen.insert(b.clone());
-            }
-        }
-        seen.into_iter().collect()
+        self.entries.iter()
+            .filter_map(|e| e.block_name.as_deref())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(String::from)
+            .collect()
     }
 }
 

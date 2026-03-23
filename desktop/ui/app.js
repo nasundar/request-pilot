@@ -627,7 +627,7 @@ function detectContentType(body, headers) {
 
   if ((trimmed.startsWith('{') && trimmed.endsWith('}')) ||
       (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
-    try { JSON.parse(trimmed); return 'json'; } catch {}
+    try { JSON.parse(trimmed); return 'json'; } catch { /* non-critical: JSON probe */ }
   }
 
   if (trimmed.startsWith('<?xml') || (trimmed.startsWith('<') && trimmed.includes('</'))) return 'xml';
@@ -1950,7 +1950,7 @@ async function runAllTests() {
         envVars: collectVariablesArray()
       });
       allUnresolved.push(...unresolved);
-    } catch {}
+    } catch (e) { console.warn('check_variables failed:', e); }
   }
   allUnresolved = [...new Set(allUnresolved)];
   if (allUnresolved.length > 0) {
@@ -2742,7 +2742,7 @@ async function runGroup(fileIdx, groupName) {
       promptForVariables(unresolved);
       return;
     }
-  } catch {}
+  } catch (e) { console.warn('check_variables failed:', e); }
 
   setRunning(true);
 
@@ -2836,7 +2836,7 @@ async function runSingleFile(fileIdx) {
       promptForVariables(unresolved);
       return;
     }
-  } catch {}
+  } catch (e) { console.warn('check_variables failed:', e); }
 
   setRunning(true);
 
@@ -3040,7 +3040,7 @@ function detectValueType(name, value) {
       if (decoded.length > 0 && /^[\x20-\x7E\s]+$/.test(decoded)) {
         return { type: 'base64', decoded };
       }
-    } catch {}
+    } catch { /* non-critical: base64 decode probe */ }
   }
 
   if (value.startsWith('http://') || value.startsWith('https://')) {
@@ -3160,7 +3160,7 @@ function buildVarTooltipHtml(name, value) {
           <div class="var-claim"><span class="var-claim-key">Path:</span> ${escapeHtml(url.pathname)}</div>
           ${url.search ? `<div class="var-claim"><span class="var-claim-key">Query:</span> ${escapeHtml(url.search)}</div>` : ''}
         </div>`;
-      } catch {}
+      } catch { /* non-critical: URL parse */ }
       break;
 
     case 'uuid':
@@ -3821,8 +3821,8 @@ let _treeFilterState = new Map(); // key -> checked boolean
 
 function _treeKey(type, file, group, test) {
   if (type === 'file') return `f:${file}`;
-  if (type === 'group') return `f:${file}/g:${group}`;
-  return `f:${file}/g:${group}/t:${test}`;
+  if (type === 'group') return `f:${file}\x1Fg:${group}`;
+  return `f:${file}\x1Fg:${group}\x1Ft:${test}`;
 }
 
 function rebuildTreeFilter(entries) {
@@ -3891,9 +3891,9 @@ function _createTreeNode(level, label, count, checked, key, icon) {
     _treeFilterState.set(key, cb.checked);
     // Cascade: if file/group toggled, toggle all children
     if (level === 'file') {
-      _cascadeCheck(key + '/', cb.checked);
+      _cascadeCheck(key + '\x1F', cb.checked);
     } else if (level === 'group') {
-      _cascadeCheck(key + '/', cb.checked);
+      _cascadeCheck(key + '\x1F', cb.checked);
     }
     // Also update parent state
     _syncParentChecks();
@@ -3926,7 +3926,7 @@ function _syncParentChecks() {
   // For each file node, check if all children are checked
   histTreeFilterList.querySelectorAll('.hist-tree-node[data-level="file"]').forEach(fileNode => {
     const fileKey = fileNode.dataset.key;
-    const children = [..._treeFilterState.entries()].filter(([k]) => k.startsWith(fileKey + '/'));
+    const children = [..._treeFilterState.entries()].filter(([k]) => k.startsWith(fileKey + '\x1F'));
     if (children.length > 0) {
       const allChecked = children.every(([, v]) => v);
       fileNode.querySelector('input').checked = allChecked;
@@ -3935,7 +3935,7 @@ function _syncParentChecks() {
   });
   histTreeFilterList.querySelectorAll('.hist-tree-node[data-level="group"]').forEach(groupNode => {
     const groupKey = groupNode.dataset.key;
-    const children = [..._treeFilterState.entries()].filter(([k]) => k.startsWith(groupKey + '/'));
+    const children = [..._treeFilterState.entries()].filter(([k]) => k.startsWith(groupKey + '\x1F'));
     if (children.length > 0) {
       const allChecked = children.every(([, v]) => v);
       groupNode.querySelector('input').checked = allChecked;
@@ -3953,7 +3953,7 @@ function getTreeFilterSelections() {
   const selections = [];
   for (const [key, checked] of _treeFilterState) {
     if (!checked) continue;
-    const parts = key.split('/');
+    const parts = key.split('\x1F');
     if (parts.length === 1) {
       // File level: f:filename
       const file = parts[0].slice(2);
@@ -4602,7 +4602,7 @@ function showHistoryDetail(entry) {
     `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`
   ).join('');
   let reqBody = entry.request_body || '(no body)';
-  try { if (entry.request_body) reqBody = JSON.stringify(JSON.parse(entry.request_body), null, 2); } catch {}
+  try { if (entry.request_body) reqBody = JSON.stringify(JSON.parse(entry.request_body), null, 2); } catch { /* non-critical: JSON format */ }
   historyDetailBody.innerHTML = `
     <div class="hist-detail-url">
       <span class="hist-entry-method method-${entry.method}">${entry.method}</span>
@@ -5520,7 +5520,7 @@ async function popOutPanel(panelId, title) {
       const { WebviewWindow } = window.__TAURI__.webviewWindow;
       const existing = await WebviewWindow.getByLabel(`popout-${panelId}`);
       if (existing) await existing.setFocus();
-    } catch {}
+    } catch (e) { console.warn('popout focus failed:', e); }
     return;
   }
 
@@ -5598,7 +5598,7 @@ async function popInPanel(panelId) {
     const { WebviewWindow } = window.__TAURI__.webviewWindow;
     const win = await WebviewWindow.getByLabel(`popout-${panelId}`);
     if (win) await win.close();
-  } catch {}
+  } catch (e) { console.warn('popout close failed:', e); }
   restorePanel(panelId);
 }
 

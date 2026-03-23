@@ -25,16 +25,12 @@ mod theme {
     pub const BLUE: Color = Color::Rgb(137, 180, 250);
     pub const LAVENDER: Color = Color::Rgb(180, 190, 254);
     pub const SAPPHIRE: Color = Color::Rgb(116, 199, 236);
-    pub const TEAL: Color = Color::Rgb(148, 226, 213);
     pub const GREEN: Color = Color::Rgb(166, 227, 161);
     pub const YELLOW: Color = Color::Rgb(249, 226, 175);
     pub const PEACH: Color = Color::Rgb(250, 179, 135);
-    pub const MAROON: Color = Color::Rgb(235, 160, 172);
     pub const RED: Color = Color::Rgb(243, 139, 168);
     pub const PINK: Color = Color::Rgb(245, 194, 231);
     pub const MAUVE: Color = Color::Rgb(203, 166, 247);
-    pub const FLAMINGO: Color = Color::Rgb(242, 205, 205);
-    pub const ROSEWATER: Color = Color::Rgb(245, 224, 220);
     pub const SKY: Color = Color::Rgb(137, 220, 235);
 }
 

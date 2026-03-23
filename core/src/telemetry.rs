@@ -413,8 +413,8 @@ pub fn build_exp_buckets(values: &[f64]) -> (i32, OtlpExpHistogramBuckets, u64) 
         );
     }
 
-    let min_idx = *index_counts.keys().next().unwrap();
-    let max_idx = *index_counts.keys().next_back().unwrap();
+    let min_idx = *index_counts.keys().next().expect("histogram bucket indices should not be empty");
+    let max_idx = *index_counts.keys().next_back().expect("histogram bucket indices should not be empty");
     let mut bucket_counts = Vec::with_capacity((max_idx - min_idx + 1) as usize);
     for i in min_idx..=max_idx {
         bucket_counts.push(*index_counts.get(&i).unwrap_or(&0));

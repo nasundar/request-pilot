@@ -6,6 +6,20 @@ This document is for **developers and AI agents** working on the codebase. It ma
 
 ```
 request-pilot/
+├── core/                  # Shared Rust core library (223 tests)
+│   └── src/
+│       ├── http_parser.rs # .http file parser (TestSuite, TestBlock)
+│       ├── http_client.rs # reqwest-based HTTP execution
+│       ├── test_runner.rs # 3-phase test engine (setup→parallel tests→teardown)
+│       ├── assertions.rs  # Assertion evaluation (==, contains, exists, etc.)
+│       ├── variables.rs   # VariableStore with {{interpolation}}
+│       ├── history.rs     # Request history storage & search
+│       ├── url_trie.rs    # Segment-aware URL autocomplete trie
+│       ├── env_file.rs    # .env file parser/writer
+│       ├── azure_auth.rs  # Azure CLI + device code auth
+│       ├── telemetry.rs   # OTEL telemetry (OTLP export)
+│       └── otlp_proto.rs  # OTLP protobuf encoding (internal)
+│
 ├── extension/             # Browser extension (Edge / Chrome)
 │   ├── ARCHITECTURE.md    # Extension internals
 │   ├── README.md          # Extension features & usage
@@ -18,44 +32,46 @@ request-pilot/
 ├── desktop/               # Tauri v2 desktop app
 │   ├── ARCHITECTURE.md    # Detailed module-by-module guide
 │   ├── README.md          # Desktop features & usage
-│   ├── src-tauri/src/     # Rust backend
+│   ├── src-tauri/src/     # Rust backend (thin wrapper over core)
 │   │   ├── lib.rs         # Tauri command registry + AppState
-│   │   ├── http_parser.rs # .http file parser (TestSuite, TestBlock)
-│   │   ├── http_client.rs # reqwest-based HTTP execution
-│   │   ├── test_runner.rs # 3-phase test engine (setup→parallel tests→teardown)
-│   │   ├── assertions.rs  # Assertion evaluation (==, contains, exists, etc.)
-│   │   ├── variables.rs   # VariableStore with {{interpolation}}
-│   │   ├── history.rs     # Request history storage & search
-│   │   ├── url_trie.rs    # Segment-aware URL autocomplete trie
-│   │   └── env_file.rs    # .env file parser
+│   │   └── main.rs        # Entry point
 │   └── ui/                # Frontend (vanilla HTML/CSS/JS)
 │       ├── index.html     # Single page — sidebar + main area
-│       ├── app.js         # All application logic (~3500+ lines)
-│       └── styles.css     # All styles (~2500+ lines, dark IDE theme)
+│       ├── app.js         # All application logic (~5200+ lines)
+│       └── styles.css     # All styles (~3600+ lines, dark IDE theme)
+│
+├── tui/                   # Terminal UI (ratatui + crossterm)
+│   └── src/
+│       ├── main.rs, app.rs    # App state & event loop
+│       ├── events.rs          # Keyboard/terminal events
+│       └── ui.rs              # TUI rendering
 │
 ├── docs/                  # Documentation & samples
 │   ├── http-file-format.md    # .http format reference
 │   └── samples/               # Example .http files (Azure, Prometheus)
 │
-├── tests/                 # Extension unit tests (Jest, 94 tests)
+├── tests/                 # Extension unit tests (Jest, 97 tests)
 │   ├── __tests__/
 │   └── jest.config.js
 │
 ├── .github/skills/        # Copilot skills
 │   └── e2e-http-test-generator/SKILL.md
 │
+├── Cargo.toml             # Workspace root (members: core, desktop, tui)
 ├── README.md              # Project overview & features
 └── ARCHITECTURE.md        # ← You are here
 ```
 
-## Two Products, One Repo
+## Three Products, One Core
 
 | Component | Tech | Purpose |
 |-----------|------|---------|
+| **Shared Core** | Rust (`request-pilot-core`) | HTTP parsing, execution, test runner, assertions, variables, history, telemetry |
+| **Desktop App** | Tauri v2 (core + HTML/JS) | GUI HTTP client + E2E test framework for `.http` files |
+| **Terminal UI** | ratatui (core + crossterm) | Headless terminal interface for `.http` testing |
 | **Browser Extension** | Manifest V3, vanilla JS | Intercept/modify HTTP traffic in the browser — header injection, blocking, redirects, traffic analysis |
-| **Desktop App** | Rust (Tauri v2) + HTML/JS | Standalone HTTP client + E2E test framework for `.http` files |
 
-They share the `.http` file format concept and the Request Pilot brand, but are **independent codebases** with no shared code.
+The desktop app and TUI share the `request-pilot-core` Rust crate, which contains all HTTP parsing, execution, and test logic. The browser extension is an independent codebase with no Rust dependency.
 
 ## Desktop App — How It Works
 
@@ -72,8 +88,8 @@ User loads .http file
   → JS: stores in loadedFiles[], renders sidebar tree
 
 User clicks Run All
-  → JS: runAllTests() → for each file: invoke('run_test_suite', { suite, extraVariables })
-  → Rust: test_runner::run_suite_inner()
+  → JS: runAllTests() → for each file: invoke('run_test_suite', { suite, extraVariables, extraHeaders, runMode, fileName })
+  → Rust: test_runner::run_suite_with_headers()
     Phase 1: Setup blocks (sequential)
     Phase 2: Test blocks (parallel via JoinSet, topological wave scheduling)
     Phase 3: Teardown blocks (sequential, always runs)
@@ -91,13 +107,25 @@ Response display
 
 | Command | Module | Purpose |
 |---------|--------|---------|
+| `send_request` | http_client | Single HTTP request + history recording |
+| `parse_http_file` | http_parser | Parse .http content → ParsedRequest list |
 | `parse_test_file` | http_parser | Parse .http content → TestSuite |
-| `run_test_suite` | test_runner | Execute suite, stream progress |
-| `send_request` | http_client | Single HTTP request |
-| `check_variables` | variables | Find unresolved {{vars}} |
-| `search_history` | history | Query request history |
-| `suggest_completions` | url_trie | URL prefix autocomplete |
+| `generate_http` | http_parser | Generate .http content from TestSuite |
+| `run_test_suite` | test_runner | Execute suite, stream progress, record history |
+| `resolve_variables` | test_runner | Resolve all variables without running requests |
+| `check_variables` | variables | Find unresolved {{vars}} in a suite |
+| `get_history` | history | Get all history entries |
+| `get_filtered_history` | history | Query history with filters |
+| `clear_history` | history | Clear all history |
+| `get_history_distinct_values` | history | Distinct file names, groups, and block names |
+| `suggest_urls` | url_trie | URL prefix autocomplete |
 | `suggest_domain_paths` | url_trie | Domain→path top-N suggestions |
+| `read_env_file` | env_file | Read .env file into key-value map |
+| `write_env_file` | env_file | Write key-value map to .env file |
+| `fetch_azure_token` | azure_auth | Fetch Azure token via CLI |
+| `check_azure_cli` | azure_auth | Check if `az` CLI is available |
+| `start_device_code` | azure_auth | Start OAuth device code flow |
+| `poll_device_code` | azure_auth | Poll for device code token completion |
 
 ### IPC Events (Rust → JS)
 
@@ -131,16 +159,16 @@ Response display
 4. Call from JS: `await invoke('command_name', { param1, param2 })`
 
 ### Adding a New .http Directive
-1. `http_parser.rs` — parse the `# @directive` line, add field to `TestBlock`
-2. `test_runner.rs` — handle the directive during execution
-3. `app.js` — display in sidebar tooltip (`showBlockTooltip`)
+1. `core/src/http_parser.rs` — parse the `# @directive` line, add field to `TestBlock`
+2. `core/src/test_runner.rs` — handle the directive during execution
+3. `desktop/ui/app.js` — display in sidebar tooltip (`showBlockTooltip`)
 4. `docs/http-file-format.md` — document the directive
 5. `SKILL.md` — update the generation skill if applicable
 
 ### Modifying Test Execution
-- `test_runner.rs::run_suite_inner()` — 3-phase orchestration
-- `test_runner.rs::run_tests_with_groups()` — parallel wave scheduling
-- `test_runner.rs::execute_block()` — single block execution
+- `core/src/test_runner.rs::run_suite_inner()` — 3-phase orchestration
+- `core/src/test_runner.rs::run_tests_with_groups()` — parallel wave scheduling
+- `core/src/test_runner.rs::execute_block()` — single block execution
 
 ### UI Changes (Desktop)
 - All frontend code in `desktop/ui/app.js` (no framework, vanilla JS)
@@ -157,8 +185,8 @@ Response display
 
 | Component | Framework | Count | Command |
 |-----------|-----------|-------|---------|
-| Desktop (Rust) | `cargo test` | 156+ | `cd desktop/src-tauri && cargo test` |
-| Extension (JS) | Jest | 94 | `cd tests && npm test` |
+| Core (Rust) | `cargo test` | 223 | `cargo test -p request-pilot-core` (from workspace root) |
+| Extension (JS) | Jest | 97 | `cd tests && npm test` |
 
 ## Platform Notes
 

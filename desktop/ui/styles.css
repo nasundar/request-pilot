@@ -589,8 +589,8 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--orange);
 }
-.block-item .block-depends { color: var(--orange); }
 
 .block-item .block-play {
   display: none;
@@ -1960,12 +1960,12 @@ input:focus, select:focus, textarea:focus { outline: none; }
   transition: background var(--transition);
 }
 
-.autocomplete-item:hover,
-.autocomplete-item.active {
+.autocomplete-item:hover {
   background: var(--accent-dim);
 }
 
 .autocomplete-item.active {
+  background: var(--accent-dim);
   border-left: 2px solid var(--accent);
 }
 

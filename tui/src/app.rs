@@ -21,8 +21,6 @@ pub enum InputMode {
 pub enum InputPurpose {
     OpenFile,
     LoadEnv,
-    SaveEnvAs,
-    NewFileName,
     AddVarName,
     AddVarValue { name: String },
     EditVarValue { name: String },
@@ -156,7 +154,6 @@ pub struct App {
 
     // History mode state
     pub history_cursor: usize,
-    pub history_scroll: u16,
     pub filter_text: String,
     pub filtered_history_len: usize,
 
@@ -198,7 +195,6 @@ impl App {
             progress_total: 0,
             spinner_tick: 0,
             history_cursor: 0,
-            history_scroll: 0,
             filter_text: String::new(),
             filtered_history_len: 0,
             runner_rx: Some(rx),
@@ -425,28 +421,6 @@ impl App {
         }
     }
 
-    pub fn reload_current_file(&mut self) {
-        if let Some(fi) = self.active_file_idx {
-            let path = self.loaded_files.get(fi).and_then(|f| f.path.clone());
-            if let Some(path) = path {
-                match std::fs::read_to_string(&path) {
-                    Ok(content) => {
-                        let suite = parse_test_suite(&content);
-                        let file = &mut self.loaded_files[fi];
-                        file.content = content;
-                        file.suite = suite;
-                        file.results = None;
-                        self.rebuild_tree();
-                        self.set_status(format!("Reloaded: {}", path.display()));
-                    }
-                    Err(e) => self.set_status(format!("Reload failed: {}", e)),
-                }
-            } else {
-                self.set_status("No file path to reload".to_string());
-            }
-        }
-    }
-
     pub fn toggle_block_disabled(&mut self) {
         if let (Some(fi), Some(bi)) = (self.active_file_idx, self.active_block_idx) {
             if let Some(file) = self.loaded_files.get_mut(fi) {
@@ -457,18 +431,6 @@ impl App {
                     self.set_status(format!("{}: {}", name, state));
                 }
             }
-        }
-    }
-
-    pub fn save_env(&mut self) {
-        if let Some(ref path) = self.env_path {
-            let path_str = path.to_string_lossy().to_string();
-            match request_pilot_core::env_file::write_env_to_path(&path_str, &self.env_vars) {
-                Ok(_) => self.set_status(format!("Saved env: {}", path.display())),
-                Err(e) => self.set_status(format!("Save env failed: {}", e)),
-            }
-        } else {
-            self.set_status("No .env path set".to_string());
         }
     }
 
@@ -526,13 +488,6 @@ impl App {
                 if let Err(e) = self.load_env(&path) {
                     self.set_status(format!("Failed to load env: {}", e));
                 }
-            }
-            InputPurpose::SaveEnvAs => {
-                self.env_path = Some(PathBuf::from(&value));
-                self.save_env();
-            }
-            InputPurpose::NewFileName => {
-                self.new_file();
             }
             InputPurpose::AddVarName => {
                 if !value.is_empty() {

@@ -6,7 +6,7 @@ A developer toolkit for HTTP traffic — a **Tauri v2 desktop app** for authorin
 
 ```
 request-pilot/
-├── core/              # Shared Rust core library (196 tests)
+├── core/              # Shared Rust core library (223 tests)
 │   └── src/
 │       ├── http_parser.rs     # .http file parser & generator
 │       ├── http_client.rs     # reqwest-based HTTP client
@@ -20,7 +20,7 @@ request-pilot/
 │       └── env_file.rs        # .env file reader/writer
 ├── desktop/           # Desktop GUI app (Tauri v2)
 │   ├── ui/            # HTML/CSS/JS frontend (vanilla, no framework)
-│   │   ├── app.js             # ~5000 lines — full app logic
+│   │   ├── app.js             # ~5200+ lines — full app logic
 │   │   ├── index.html         # Main window layout
 │   │   ├── popout.html        # Pop-out window template
 │   │   └── styles.css         # Dark IDE theme
@@ -37,7 +37,7 @@ request-pilot/
 │       ├── events.rs          # Keyboard/terminal events
 │       └── ui.rs              # TUI rendering
 ├── docs/              # Documentation & sample .http files
-├── tests/             # Jest unit tests for browser extension (94 tests)
+├── tests/             # Jest unit tests for browser extension (97 tests)
 ├── .github/skills/    # AI skill for generating .http test files
 ├── Cargo.toml         # Workspace root (members: core, tui)
 └── README.md
@@ -65,7 +65,7 @@ A cross-platform HTTP client and **E2E integration test framework** — author r
 |---|---|
 | **🔧 Builder** | Form-based editor — method picker, URL bar, header rows, body type selector, response viewer with tabs |
 | **📝 Code** | Full syntax-highlighted `.http` editor with line numbers; auto-scrolls to selected block with jump-back indicator |
-| **📊 History** | Request history with domain→path grouping, method/status/source filters, URL autocomplete, request comparison, statistics |
+| **📊 History** | Request history with multiple grouping modes (URL, domain→path, status, source, file→group→test hierarchy), hierarchical tree filter, URL autocomplete, request comparison, statistics |
 | **📋 Logs** | Application log viewer with level filters (info/warn/error/debug), auto-scroll, live streaming |
 
 ### Response Viewer
@@ -110,6 +110,9 @@ Multi-scope Azure auth for developers — skip client-credentials setup blocks a
 
 | Feature | Description |
 |---|---|
+| **Extra Headers Injection** | Inject custom headers (auth tokens, trace IDs, API keys) into all test requests globally via a toolbar button; headers support `{{variable}}` interpolation |
+| **Hierarchical Tree Filter** | Single multi-select dropdown with cascading checkboxes to filter history by file → group → test; replaces separate filter dropdowns for streamlined analysis |
+| **Rocket Pilot Icon** | Rocket-pilot-in-cosmos SVG icon used across all platforms — desktop toolbar, taskbar, extension popup, and extension icons |
 | **Pop-out Panels** | Detach History or Logs into separate native OS windows (Tauri WebviewWindow) for dual-monitor workflows |
 | **Zoom Controls** | `Ctrl+Scroll` / `Ctrl++` / `Ctrl+-` / `Ctrl+0` with persistent level (50%–200%) |
 | **URL Autocomplete** | Rust-backed trie with segment-aware fuzzy matching, Google-style ghost text, Tab completion |
@@ -288,7 +291,7 @@ cargo run -p request-pilot-tui -- api.http --run
 
 ## Shared Core (`request-pilot-core`)
 
-The Rust library powering all three frontends — **196 unit tests**, zero warnings.
+The Rust library powering all three frontends — **223 unit tests**, zero warnings.
 
 | Module | Description |
 |---|---|
@@ -306,7 +309,7 @@ The Rust library powering all three frontends — **196 unit tests**, zero warni
 ### Running Tests
 
 ```bash
-# Core library tests (215 tests — parser, assertions, variables, runner, history, url_trie, http_client, telemetry)
+# Core library tests (223 tests — parser, assertions, variables, runner, history, url_trie, http_client, telemetry)
 cd request-pilot
 cargo test -p request-pilot-core
 
@@ -314,7 +317,7 @@ cargo test -p request-pilot-core
 cd request-pilot/desktop/src-tauri
 cargo check
 
-# Browser extension tests (94 tests)
+# Browser extension tests (97 tests)
 cd request-pilot/tests
 npm install && npm test
 ```
@@ -351,4 +354,4 @@ The `.github/skills/e2e-http-test-generator/` directory contains a Copilot skill
 | **Desktop App** | Tauri v2, HTML/CSS/JS (vanilla), Rust backend |
 | **Browser Extension** | Manifest V3, declarativeNetRequest, webRequest, content scripts, chrome.storage |
 | **Terminal UI** | ratatui 0.29, crossterm 0.28, clap 4, tokio |
-| **Tests** | Rust `#[test]` (196 core), Jest (94 extension) |
+| **Tests** | Rust `#[test]` (223 core), Jest (97 extension) |

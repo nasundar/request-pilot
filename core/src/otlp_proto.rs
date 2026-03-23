@@ -98,6 +98,8 @@ impl ProtobufWriter {
     }
 
     /// Field: double (wire type 1).
+    /// Reserved for future protobuf field types.
+    #[allow(dead_code)]
     pub fn write_double(&mut self, field: u32, val: f64) {
         if val == 0.0 {
             return;
@@ -107,6 +109,8 @@ impl ProtobufWriter {
     }
 
     /// Field: sfixed64 (wire type 1).
+    /// Reserved for future protobuf field types.
+    #[allow(dead_code)]
     pub fn write_sfixed64(&mut self, field: u32, val: i64) {
         if val == 0 {
             return;
