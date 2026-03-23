@@ -6053,7 +6053,8 @@ document.querySelectorAll('input[name="liveMode"]').forEach(radio => {
 function addLiveRequestToHistory(req) {
   let blockName;
   try {
-    blockName = `${req.method} ${new URL(req.url).pathname}`;
+    const u = new URL(req.url);
+    blockName = `${req.method} ${u.origin}${u.pathname}`;
   } catch {
     blockName = `${req.method} request`;
   }
@@ -6127,18 +6128,28 @@ function appendToLiveCaptureFile(req) {
 
   const file = loadedFiles[liveCaptureFileIndex];
 
+  // Block name uses full URL for clarity
   let block = '###';
   try {
-    const pathname = new URL(req.url).pathname;
-    block += ` ${req.method} ${pathname}\n`;
+    const u = new URL(req.url);
+    block += ` ${req.method} ${u.origin}${u.pathname}\n`;
   } catch {
     block += ` ${req.method} request\n`;
   }
   block += `${req.method} ${req.url}\n`;
 
+  // Only include meaningful headers, skip browser-internal ones
+  const skipPrefixes = [':', 'sec-ch-', 'sec-fetch-'];
+  const skipNames = new Set([
+    'host', 'connection', 'accept-encoding', 'accept-language',
+    'upgrade-insecure-requests', 'priority', 'pragma', 'cache-control',
+    'user-agent', 'dnt', 'origin', 'referer',
+  ]);
+
   for (const h of (req.request_headers || [])) {
     const lower = h.name.toLowerCase();
-    if (lower.startsWith(':') || lower === 'host') continue;
+    if (skipNames.has(lower)) continue;
+    if (skipPrefixes.some(p => lower.startsWith(p))) continue;
     block += `${h.name}: ${h.value}\n`;
   }
 
