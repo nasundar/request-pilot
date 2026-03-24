@@ -5710,19 +5710,6 @@ async function openHistoryComparison() {
       return;
     }
 
-    // Large body guard — defer response body rendering
-    const sizeA = fullA.response_body ? fullA.response_body.length : 0;
-    const sizeB = fullB.response_body ? fullB.response_body.length : 0;
-    const totalSize = sizeA + sizeB;
-
-    if (totalSize > BODY_RENDER_THRESHOLD) {
-      const storedBodies = { a: fullA.response_body, b: fullB.response_body };
-      fullA.response_body = null;
-      fullB.response_body = null;
-      fullA._large_body_info = { size: sizeA, stored: storedBodies };
-      fullB._large_body_info = { size: sizeB, stored: storedBodies };
-    }
-
     openComparisonOverlay(fullA, fullB);
   } catch (err) {
     showToast(`Failed to load entries: ${err}`, 'error');
@@ -6351,64 +6338,29 @@ async function openDiffViewer(fileIdx, blockIdx) {
   minimap.innerHTML = '';
   minimap.onclick = null;
 
-  // Large body guard for diff viewer
-  const totalDiffSize = (bodyA ? bodyA.length : 0) + (bodyB ? bodyB.length : 0);
-  const DIFF_BODY_THRESHOLD = 262144; // 256 KiB
-  if (totalDiffSize > DIFF_BODY_THRESHOLD) {
-    leftCode.innerHTML = '';
-    rightCode.innerHTML = '';
+  // Show overlay + loading spinner immediately
+  leftCode.innerHTML = '<div class="body-loading"><span class="spinner-sm"></span> Computing diff…</div>';
+  rightCode.innerHTML = '';
+  $('#diffViewerOverlay').classList.remove('hidden');
 
-    const warningHtml = `
-      <div class="body-truncated-info" style="padding:24px; text-align:center;">
-        <div style="margin-bottom:12px;">
-          <span style="font-size:24px;">📊</span>
-        </div>
-        <div style="margin-bottom:8px; color:var(--text-primary); font-weight:600;">
-          Large Response Diff
-        </div>
-        <div style="margin-bottom:16px; color:var(--text-muted); font-size:12px;">
-          Combined size: ${formatBytes(totalDiffSize)} (${formatBytes(bodyA ? bodyA.length : 0)} + ${formatBytes(bodyB ? bodyB.length : 0)})
-        </div>
-        <button class="btn btn-primary btn-sm diff-load-btn">🔍 Compute & Render Diff</button>
-        <div style="margin-top:8px; color:var(--text-muted); font-size:11px;">
-          This may take a moment for large responses
-        </div>
-      </div>`;
-
-    leftCode.innerHTML = warningHtml;
-    rightCode.innerHTML = '<div style="padding:24px; text-align:center; color:var(--text-muted);">Waiting for diff computation…</div>';
-
-    // Show the overlay immediately so user sees the warning
-    $('#diffViewerOverlay').classList.remove('hidden');
-
-    const loadBtn = leftCode.querySelector('.diff-load-btn');
-    await new Promise(resolve => {
-      loadBtn.addEventListener('click', () => {
-        leftCode.innerHTML = '<div class="body-loading"><span class="spinner-sm"></span> Computing diff…</div>';
-        rightCode.innerHTML = '<div class="body-loading"><span class="spinner-sm"></span> Computing diff…</div>';
-        resolve();
-      });
-    });
-  }
-
-  // Use Rust compute_diff — no JS line/byte limit needed since Rust is fast
+  // Always compute diff in Rust (fast even for large inputs)
   const contentType = lang === 'json' ? 'json' : 'text';
   let diffOps = null;
   try {
     const rustDiff = await invoke('compute_diff', { textA: formattedA, textB: formattedB, contentType });
     diffOps = rustDiff.ops;
   } catch {
-    // Fallback to JS diff with original performance guard
+    // Fallback to JS diff with performance guard
     const linesA = formattedA.split('\n');
     const linesB = formattedB.split('\n');
     const DIFF_LINE_LIMIT = 1500;
     const DIFF_BYTE_LIMIT = 131072;
     if (linesA.length > DIFF_LINE_LIMIT || linesB.length > DIFF_LINE_LIMIT ||
         formattedA.length > DIFF_BYTE_LIMIT || formattedB.length > DIFF_BYTE_LIMIT) {
-      const warnMsg = `Response too large for line diff (${linesA.length}/${linesB.length} lines, ${formatBytes(formattedA.length)}/${formatBytes(formattedB.length)}). Showing raw text.`;
+      const warnMsg = `Response too large for JS fallback diff (${linesA.length}/${linesB.length} lines). Showing raw text.`;
       leftCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">${warnMsg}</span></div>` + `<div class="diff-line diff-same"><span class="diff-text">${highlightFn(escapeHtml(formattedA))}</span></div>`;
       rightCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">...</span></div>` + `<div class="diff-line diff-same"><span class="diff-text">${highlightFn(escapeHtml(formattedB))}</span></div>`;
-      diffOps = null; // signal: already rendered fallback
+      diffOps = null;
     } else {
       diffOps = computeLineDiff(formattedA, formattedB);
     }
@@ -6416,8 +6368,6 @@ async function openDiffViewer(fileIdx, blockIdx) {
 
   if (diffOps) {
     const hunks = buildDiffHunks(diffOps);
-    let leftHtml = '';
-    let rightHtml = '';
     let leftLineNum = 0, rightLineNum = 0;
 
     // Pre-count line numbers per op for collapsed sections
@@ -6474,76 +6424,134 @@ async function openDiffViewer(fileIdx, blockIdx) {
       return { leftLine, rightLine };
     };
 
-    hunks.forEach(hunk => {
-      if (hunk.type === 'collapse') {
-        // Collapsed unchanged region
-        const collapseId = `diff-collapse-${hunk.startIdx}`;
-        const divider = `<div class="diff-line diff-collapse" data-collapse-id="${collapseId}">▸ ${hunk.count} unchanged lines</div>`;
-        leftHtml += divider;
-        rightHtml += divider;
-        // Advance line numbers through the collapsed section
-        for (let i = hunk.startIdx; i <= hunk.endIdx; i++) {
-          const op = diffOps[i];
-          if (op.type === 'same') { leftLineNum++; rightLineNum++; }
-          else if (op.type === 'remove') { leftLineNum++; }
-          else if (op.type === 'add') { rightLineNum++; }
-          else if (op.type === 'change') { leftLineNum++; rightLineNum++; }
-        }
-      } else {
-        for (let i = hunk.startIdx; i <= hunk.endIdx; i++) {
-          const { leftLine, rightLine } = renderOp(diffOps[i]);
-          leftHtml += leftLine;
-          rightHtml += rightLine;
+    const HUNKS_PER_PAGE = 20;
+    let renderedHunkIdx = 0;
+
+    // Renders a batch of hunks, returns {leftHtml, rightHtml}
+    const renderHunkBatch = (startIdx, count) => {
+      let batchLeft = '', batchRight = '';
+      const end = Math.min(startIdx + count, hunks.length);
+      for (let hi = startIdx; hi < end; hi++) {
+        const hunk = hunks[hi];
+        if (hunk.type === 'collapse') {
+          const collapseId = `diff-collapse-${hunk.startIdx}`;
+          const divider = `<div class="diff-line diff-collapse" data-collapse-id="${collapseId}">▸ ${hunk.count} unchanged lines</div>`;
+          batchLeft += divider;
+          batchRight += divider;
+          for (let i = hunk.startIdx; i <= hunk.endIdx; i++) {
+            const op = diffOps[i];
+            if (op.type === 'same') { leftLineNum++; rightLineNum++; }
+            else if (op.type === 'remove') { leftLineNum++; }
+            else if (op.type === 'add') { rightLineNum++; }
+            else if (op.type === 'change') { leftLineNum++; rightLineNum++; }
+          }
+        } else {
+          for (let i = hunk.startIdx; i <= hunk.endIdx; i++) {
+            const { leftLine, rightLine } = renderOp(diffOps[i]);
+            batchLeft += leftLine;
+            batchRight += rightLine;
+          }
         }
       }
-    });
+      return { leftHtml: batchLeft, rightHtml: batchRight };
+    };
 
-    leftCode.innerHTML = leftHtml;
-    rightCode.innerHTML = rightHtml;
+    // Wire collapse expand handlers on newly added elements
+    const wireCollapseHandlers = () => {
+      leftCode.querySelectorAll('.diff-collapse:not([data-wired])').forEach(el => {
+        el.dataset.wired = '1';
+        el.addEventListener('click', () => {
+          const cid = el.dataset.collapseId;
+          const hunk = hunks.find(h => h.type === 'collapse' && `diff-collapse-${h.startIdx}` === cid);
+          if (!hunk) return;
+          let expandLeftHtml = '';
+          let expandRightHtml = '';
+          let eL = hunk.startIdx > 0 ? lineNums[hunk.startIdx - 1].left : 0;
+          let eR = hunk.startIdx > 0 ? lineNums[hunk.startIdx - 1].right : 0;
+          for (let i = hunk.startIdx; i <= hunk.endIdx; i++) {
+            const op = diffOps[i];
+            if (op.type === 'same') { eL++; eR++; }
+            else if (op.type === 'remove') { eL++; }
+            else if (op.type === 'add') { eR++; }
+            else if (op.type === 'change') { eL++; eR++; }
+            const sameLine = highlightFn(escapeHtml(op.line || op.left || ''));
+            expandLeftHtml += `<div class="diff-line diff-same"><span class="diff-ln">${eL}</span><span class="diff-text">${sameLine}</span></div>`;
+            expandRightHtml += `<div class="diff-line diff-same"><span class="diff-ln">${eR}</span><span class="diff-text">${sameLine}</span></div>`;
+          }
+          const tmpL = document.createElement('div');
+          tmpL.innerHTML = expandLeftHtml;
+          el.replaceWith(...tmpL.children);
+          const rightEl = rightCode.querySelector(`[data-collapse-id="${cid}"]`);
+          if (rightEl) {
+            const tmpR = document.createElement('div');
+            tmpR.innerHTML = expandRightHtml;
+            rightEl.replaceWith(...tmpR.children);
+          }
+        });
+      });
+      rightCode.querySelectorAll('.diff-collapse:not([data-wired])').forEach(el => {
+        el.dataset.wired = '1';
+        el.addEventListener('click', () => {
+          const cid = el.dataset.collapseId;
+          const leftEl = leftCode.querySelector(`[data-collapse-id="${cid}"]`);
+          if (leftEl) leftEl.click();
+        });
+      });
+    };
 
-    // Wire up collapse/expand click handlers
-    leftCode.querySelectorAll('.diff-collapse').forEach(el => {
-      el.addEventListener('click', () => {
-        const cid = el.dataset.collapseId;
-        const hunk = hunks.find(h => h.type === 'collapse' && `diff-collapse-${h.startIdx}` === cid);
-        if (!hunk) return;
-        // Expand: replace the divider with actual lines
-        let expandLeftHtml = '';
-        let expandRightHtml = '';
-        // Recalculate line numbers from the stored pre-counted values
-        let eL = hunk.startIdx > 0 ? lineNums[hunk.startIdx - 1].left : 0;
-        let eR = hunk.startIdx > 0 ? lineNums[hunk.startIdx - 1].right : 0;
-        for (let i = hunk.startIdx; i <= hunk.endIdx; i++) {
-          const op = diffOps[i];
-          if (op.type === 'same') { eL++; eR++; }
-          else if (op.type === 'remove') { eL++; }
-          else if (op.type === 'add') { eR++; }
-          else if (op.type === 'change') { eL++; eR++; }
-          const sameLine = highlightFn(escapeHtml(op.line || op.left || ''));
-          expandLeftHtml += `<div class="diff-line diff-same"><span class="diff-ln">${eL}</span><span class="diff-text">${sameLine}</span></div>`;
-          expandRightHtml += `<div class="diff-line diff-same"><span class="diff-ln">${eR}</span><span class="diff-text">${sameLine}</span></div>`;
-        }
-        // Replace left divider
-        const tmpL = document.createElement('div');
-        tmpL.innerHTML = expandLeftHtml;
-        el.replaceWith(...tmpL.children);
-        // Replace matching right divider
-        const rightEl = rightCode.querySelector(`[data-collapse-id="${cid}"]`);
-        if (rightEl) {
-          const tmpR = document.createElement('div');
-          tmpR.innerHTML = expandRightHtml;
-          rightEl.replaceWith(...tmpR.children);
-        }
-      });
-    });
-    rightCode.querySelectorAll('.diff-collapse').forEach(el => {
-      el.addEventListener('click', () => {
-        // Delegate to the left side's handler by simulating click on matching left divider
-        const cid = el.dataset.collapseId;
-        const leftEl = leftCode.querySelector(`[data-collapse-id="${cid}"]`);
-        if (leftEl) leftEl.click();
-      });
-    });
+    // Adds or updates the "Load more" bar with next-page + load-all options
+    const updateLoadMore = () => {
+      leftCode.querySelector('.diff-load-more-row')?.remove();
+      rightCode.querySelector('.diff-load-more-row')?.remove();
+      if (renderedHunkIdx < hunks.length) {
+        const remaining = hunks.length - renderedHunkIdx;
+        const remainingChanges = hunks.slice(renderedHunkIdx).filter(h => h.type === 'hunk').length;
+        const nextBatch = Math.min(HUNKS_PER_PAGE, remaining);
+        const loadMoreHtml = `<div class="diff-line diff-load-more-row">
+          <div class="diff-text diff-load-more-bar">
+            <button class="btn btn-primary btn-xs diff-load-next-btn">▾ Load next ${nextBatch} hunks</button>
+            <button class="btn btn-ghost btn-xs diff-load-all-btn">Load all (${remaining} remaining)</button>
+            <span class="diff-load-more-info">${remainingChanges} change regions left</span>
+          </div>
+          ${remaining > 50 ? '<div class="diff-text diff-load-warn">⚠ Loading all may be slow due to DOM rendering</div>' : ''}
+        </div>`;
+        leftCode.insertAdjacentHTML('beforeend', loadMoreHtml);
+        rightCode.insertAdjacentHTML('beforeend', '<div class="diff-line diff-load-more-row"><span class="diff-text"></span></div>');
+        leftCode.querySelector('.diff-load-next-btn').addEventListener('click', loadNextPage);
+        leftCode.querySelector('.diff-load-all-btn').addEventListener('click', loadAllRemaining);
+      }
+    };
+
+    const loadNextPage = () => {
+      leftCode.querySelector('.diff-load-more-row')?.remove();
+      rightCode.querySelector('.diff-load-more-row')?.remove();
+      const batch = renderHunkBatch(renderedHunkIdx, HUNKS_PER_PAGE);
+      renderedHunkIdx = Math.min(renderedHunkIdx + HUNKS_PER_PAGE, hunks.length);
+      leftCode.insertAdjacentHTML('beforeend', batch.leftHtml);
+      rightCode.insertAdjacentHTML('beforeend', batch.rightHtml);
+      wireCollapseHandlers();
+      updateLoadMore();
+    };
+
+    const loadAllRemaining = () => {
+      leftCode.querySelector('.diff-load-more-row')?.remove();
+      rightCode.querySelector('.diff-load-more-row')?.remove();
+      const batch = renderHunkBatch(renderedHunkIdx, hunks.length - renderedHunkIdx);
+      renderedHunkIdx = hunks.length;
+      leftCode.insertAdjacentHTML('beforeend', batch.leftHtml);
+      rightCode.insertAdjacentHTML('beforeend', batch.rightHtml);
+      wireCollapseHandlers();
+    };
+
+    // Initial render — first page of hunks
+    leftCode.innerHTML = '';
+    rightCode.innerHTML = '';
+    const initial = renderHunkBatch(0, HUNKS_PER_PAGE);
+    renderedHunkIdx = Math.min(HUNKS_PER_PAGE, hunks.length);
+    leftCode.innerHTML = initial.leftHtml;
+    rightCode.innerHTML = initial.rightHtml;
+    wireCollapseHandlers();
+    updateLoadMore();
 
     // Minimap
     const totalLines = diffOps.length || 1;

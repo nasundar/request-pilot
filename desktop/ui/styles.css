@@ -5018,3 +5018,24 @@ input:focus, select:focus, textarea:focus { outline: none; }
   background: var(--bg-elevated) !important;
   color: var(--accent);
 }
+
+/* Diff load more bar */
+.diff-load-more-row { background: var(--bg-tertiary) !important; }
+.diff-load-more-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  justify-content: center;
+}
+.diff-load-more-info {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+.diff-load-warn {
+  font-size: 10px;
+  color: var(--orange);
+  text-align: center;
+  padding: 2px 0 4px;
+}
