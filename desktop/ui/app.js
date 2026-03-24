@@ -6165,8 +6165,8 @@ $('#clearAllAction').addEventListener('click', async () => {
 
     // Reset response panel
     lastResponse = null;
-    responseBodyEl.innerHTML = '';
-    responseHeadersEl.innerHTML = '';
+    responseBody.innerHTML = '';
+    responseHeadersBody.innerHTML = '';
     responseEmpty.classList.remove('hidden');
     responseContent.classList.add('hidden');
 
