@@ -1036,6 +1036,76 @@ html, body {
   margin-top: 2px;
 }
 
+/* Compare tooltip styles */
+.btt-compare-step {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.btt-compare-step:last-child { border-bottom: none; }
+.btt-step-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.btt-step-name {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--text-primary);
+}
+.btt-step-url {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  word-break: break-all;
+  line-height: 1.3;
+}
+.btt-step-asserts {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.btt-diff-item {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  padding: 1px 0;
+}
+.btt-diff-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+}
+.btt-diff-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.btt-match { background: color-mix(in srgb, var(--green) 20%, transparent); color: var(--green); }
+.btt-mismatch { background: color-mix(in srgb, var(--orange) 20%, transparent); color: var(--orange); }
+.btt-diff-type { font-size: 10px; color: var(--text-muted); }
+.btt-diff-counts {
+  display: flex;
+  gap: 8px;
+  margin: 2px 0;
+  font-size: 11px;
+}
+.btt-diff-added { color: var(--green); }
+.btt-diff-removed { color: var(--red); }
+.btt-diff-changed { color: var(--orange); }
+.btt-diff-paths {
+  margin-top: 4px;
+}
+.btt-diff-path {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- Variables List ---------- */
 .var-row {
   display: flex;

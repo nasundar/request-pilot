@@ -1220,14 +1220,14 @@ let showTooltipTimer = null;
 let hideTooltipTimer = null;
 const blockTooltip = $('#blockTooltip');
 
-function showBlockTooltip(block, anchorEl) {
+function showBlockTooltip(block, anchorEl, fileIdx, blockIdx) {
   try {
     if (!block || !anchorEl || !blockTooltip) {
       console.warn('[Tooltip] showBlockTooltip: missing', { block: !!block, anchorEl: !!anchorEl, blockTooltip: !!blockTooltip });
       return;
     }
-    const typeIcon = getBlockIcon(block.block_type);
-    const typeLabel = (block.block_type || 'request').charAt(0).toUpperCase() + (block.block_type || 'request').slice(1);
+    const typeIcon = block.compare ? '\u21C4' : getBlockIcon(block.block_type);
+    const typeLabel = block.compare ? 'Compare' : (block.block_type || 'request').charAt(0).toUpperCase() + (block.block_type || 'request').slice(1);
 
   let html = `<div class="btt-header">
     <span class="btt-type-icon">${typeIcon}</span>
@@ -1263,6 +1263,90 @@ function showBlockTooltip(block, anchorEl) {
         <div class="btt-section-title">Body</div>
         <pre class="btt-body">${escapeHtml(bodyPreview)}</pre>
       </div>`;
+    }
+  }
+
+  // Compare block: show steps side-by-side and diff results
+  if (block.compare && block.steps && block.steps.length > 0) {
+    html += `<div class="btt-section"><div class="btt-section-title">\u21C4 Steps <span class="btt-count">${block.steps.length}</span></div>`;
+    block.steps.forEach((step, si) => {
+      const methodClass = step.request ? `method-${step.request.method.toLowerCase()}` : '';
+      html += `<div class="btt-compare-step">
+        <div class="btt-step-header">
+          <span class="btt-step-name">${escapeHtml(step.name)}</span>
+          ${step.request ? `<span class="btt-method ${methodClass}">${escapeHtml(step.request.method)}</span>` : ''}
+        </div>
+        ${step.request ? `<div class="btt-step-url">${escapeHtml(step.request.url)}</div>` : ''}`;
+      if (step.assertions && step.assertions.length > 0) {
+        html += `<div class="btt-step-asserts">${step.assertions.length} assertion${step.assertions.length > 1 ? 's' : ''}</div>`;
+      }
+      html += `</div>`;
+    });
+    html += `</div>`;
+
+    // Show request differences between steps
+    if (block.steps.length >= 2) {
+      const diffs = [];
+      const s0 = block.steps[0];
+      const s1 = block.steps[1];
+      if (s0.request && s1.request) {
+        if (s0.request.method !== s1.request.method) diffs.push(`Method: ${s0.request.method} \u2192 ${s1.request.method}`);
+        if (s0.request.url !== s1.request.url) diffs.push(`URL: ${escapeHtml(s0.request.url)} \u2192 ${escapeHtml(s1.request.url)}`);
+        const h0 = (s0.request.headers || []).map(([k,v]) => `${k}: ${v}`).sort();
+        const h1 = (s1.request.headers || []).map(([k,v]) => `${k}: ${v}`).sort();
+        const addedH = h1.filter(h => !h0.includes(h));
+        const removedH = h0.filter(h => !h1.includes(h));
+        if (addedH.length > 0) diffs.push(`Headers added: ${addedH.join(', ')}`);
+        if (removedH.length > 0) diffs.push(`Headers removed: ${removedH.join(', ')}`);
+        const hasBodyA = !!s0.request.body;
+        const hasBodyB = !!s1.request.body;
+        if (hasBodyA !== hasBodyB) diffs.push(`Body: ${hasBodyA ? 'present' : 'none'} \u2192 ${hasBodyB ? 'present' : 'none'}`);
+        else if (hasBodyA && hasBodyB && s0.request.body !== s1.request.body) diffs.push('Body: different content');
+      }
+      if (diffs.length > 0) {
+        html += `<div class="btt-section"><div class="btt-section-title">Request Differences</div>`;
+        diffs.forEach(d => { html += `<div class="btt-diff-item">\u0394 ${d}</div>`; });
+        html += `</div>`;
+      } else {
+        html += `<div class="btt-section"><div class="btt-section-title">Request Differences</div><div class="btt-diff-item" style="opacity:0.6">Identical requests (comparing response differences)</div></div>`;
+      }
+    }
+
+    // Diff directive info
+    if (block.diff) {
+      html += `<div class="btt-section"><div class="btt-section-title">Diff</div>
+        <div class="btt-diff-item">\u21C4 Compare: <strong>${escapeHtml(block.diff.step_a)}</strong> vs <strong>${escapeHtml(block.diff.step_b)}</strong></div>
+      </div>`;
+    }
+
+    // Show diff results if block has been run
+    const file = fileIdx !== undefined ? loadedFiles[fileIdx] : null;
+    const br = file?.results?.block_results?.[blockIdx];
+    if (br?.diff_result) {
+      const diff = br.diff_result;
+      html += `<div class="btt-section"><div class="btt-section-title">Comparison Result</div>
+        <div class="btt-diff-result">
+          <span class="btt-diff-badge ${diff.match_exact ? 'btt-match' : 'btt-mismatch'}">${diff.match_exact ? '\u2713 Exact Match' : `${(diff.similarity * 100).toFixed(1)}% Similar`}</span>
+          <span class="btt-diff-type">${diff.is_json ? 'JSON' : 'Text'}</span>
+        </div>`;
+      if (!diff.match_exact) {
+        const parts = [];
+        if (diff.added_count) parts.push(`<span class="btt-diff-added">+${diff.added_count} added</span>`);
+        if (diff.removed_count) parts.push(`<span class="btt-diff-removed">-${diff.removed_count} removed</span>`);
+        if (diff.changed_count) parts.push(`<span class="btt-diff-changed">\u0394${diff.changed_count} changed</span>`);
+        if (parts.length > 0) html += `<div class="btt-diff-counts">${parts.join(' ')}</div>`;
+        // Show first few changed paths
+        if (diff.changed_paths && diff.changed_paths.length > 0) {
+          const preview = diff.changed_paths.slice(0, 5);
+          html += `<div class="btt-diff-paths">`;
+          preview.forEach(cp => {
+            html += `<div class="btt-diff-path">${escapeHtml(cp.path)}: ${escapeHtml(String(cp.left ?? ''))} \u2192 ${escapeHtml(String(cp.right ?? ''))}</div>`;
+          });
+          if (diff.changed_paths.length > 5) html += `<div class="btt-diff-path" style="opacity:0.6">...and ${diff.changed_paths.length - 5} more</div>`;
+          html += `</div>`;
+        }
+      }
+      html += `</div>`;
     }
   }
 
@@ -1884,7 +1968,7 @@ function createBlockItem(file, fileIdx, block, blockIdx) {
   item.addEventListener('mouseenter', () => {
     clearTimeout(showTooltipTimer);
     clearTimeout(hideTooltipTimer);
-    showTooltipTimer = setTimeout(() => showBlockTooltip(block, item), 300);
+    showTooltipTimer = setTimeout(() => showBlockTooltip(block, item, fileIdx, blockIdx), 300);
   });
   item.addEventListener('mouseleave', () => {
     hideBlockTooltip();
