@@ -193,12 +193,90 @@ The desktop app runs a WebSocket server on `127.0.0.1:9718` (module: `live_captu
 - `content-script-main.js` for response body interception
 - No build step — edit and reload extension
 
+## Performance Architecture
+
+### Why Rust Backend Computation + Virtual Scroll (Not Dioxus/WASM)
+
+Large HTTP responses (2MB+ JSON) froze the UI for 5–10+ seconds during JSON tree rendering, syntax highlighting, and diff computation. We evaluated a Dioxus Desktop rewrite but rejected it:
+
+- Dioxus Desktop and Tauri v2 both want window ownership — they conflict in the same process
+- Rayon in WASM requires `SharedArrayBuffer` + COOP/COEP headers, which Tauri's webview doesn't enable
+- Full UI rewrite: 12,273 LOC, 3–5 weeks, critical regression risk
+- No mature Dioxus testing framework
+
+Instead, we added a **three-layer performance architecture** that keeps the existing JS frontend and offloads heavy work:
+
+### Three-Layer Approach
+
+```
+Layer 1: Rust Rayon Commands (perf.rs)
+  Heavy computation runs natively with Rayon parallel iterators
+  ↓ returns structured data via Tauri IPC
+
+Layer 2: Virtual Scroll (JS)
+  Only renders ~50 visible rows regardless of data size (100K+ rows)
+  Collapsed diff hunks show only change regions + 3 lines context
+
+Layer 3: Web Workers (JS)
+  Pool of 2 workers handles escapeHtml, JSON operations, text search off-thread
+```
+
+### Data Flow
+
+```
+JS requests computation
+  → Tauri IPC invoke()
+  → Rust: tokio::spawn_blocking → Rayon parallel processing
+  → Returns structured data (HighlightedLine[], JsonTreeNode, DiffResult)
+  → JS renders minimal DOM via virtual scroll (only visible rows)
+```
+
+### New Tauri Commands (`desktop/src-tauri/src/perf.rs`)
+
+| Command | Parameters | Description |
+|---------|-----------|-------------|
+| `format_body` | `body`, `content_type` | Pretty-print + syntax highlight (JSON/XML/YAML/CSV). Rayon parallel highlighting for 1000+ lines |
+| `build_json_tree` | `json`, `max_depth?`, `max_children?` | Build depth-limited tree (default depth=3, max_children=100). Rayon at depth ≤ 1 for wide objects |
+| `expand_json_node` | `json`, `path`, `max_depth?`, `max_children?` | On-demand expansion of a single node by JSON path. Enables lazy loading |
+| `compute_diff` | `text_a`, `text_b`, `content_type` | Myers O(ND) diff with JSON/XML normalization. Rayon parallel char-level highlighting. Capped at 10,000 edit distance |
+| `sort_and_normalize` | `body`, `content_type` | Sort JSON keys lexicographically at all levels; sort XML attributes alphabetically. Used before diff for semantic comparison |
+
+All commands use `tokio::spawn_blocking` for Tauri async compatibility.
+
+### Virtual Scrolling
+
+The JS frontend renders only the visible viewport (~50 rows) regardless of total data size. Scroll events dynamically swap content, keeping DOM node count constant. This applies to:
+
+- **Response body viewer** — 100K+ highlighted lines rendered as ~50 DOM nodes
+- **Diff viewer** — 10,000+ line diffs rendered as ~50 visible rows
+- **History list** — 1,000+ entries rendered as ~15 visible rows
+
+### Collapsed Diff Hunks
+
+Diffs display only change regions with 3 lines of surrounding context (configurable). Unchanged sections appear as expandable "N lines hidden" separators. For a 10,000-line file with 10 changes, this reduces rendered lines from 10,000 to ~70.
+
+### Lazy JSON Tree
+
+The JSON tree viewer is depth-limited (default: 3 levels). Nodes beyond the limit show child counts but no children. Clicking expands a node via `expand_json_node`, which navigates to the node's path in the original JSON and builds a subtree. Arrays with >100 items show a "... N more items" truncation sentinel.
+
+### Web Worker Pool
+
+A pool of 2 Web Workers handles off-thread text processing:
+- `escapeHtml` — HTML entity escaping for safe DOM insertion
+- JSON operations — parse/stringify for large payloads
+- Text search — regex matching across large response bodies
+
+This keeps the main thread responsive during rendering.
+
 ## Testing
 
 | Component | Framework | Count | Command |
 |-----------|-----------|-------|---------|
 | Core (Rust) | `cargo test` | 223 | `cargo test -p request-pilot-core` (from workspace root) |
+| Perf (Rust unit) | `cargo test` | 62 | `cargo test -p request-pilot-desktop` (unit tests in perf.rs) |
+| Perf (Rust E2E) | `cargo test` | 22 | `cargo test -p request-pilot-desktop --test perf_e2e` |
 | Extension (JS) | Jest | 97 | `cd tests && npm test` |
+| Perf Features (JS) | Jest | 42 | `cd tests && npm test -- perf-features` |
 
 ## Platform Notes
 

@@ -127,6 +127,7 @@ Multi-scope Azure auth for developers — skip client-credentials setup blocks a
 | **Block Progress Streaming** | Live pass/fail/skip updates during test execution |
 | **Step Toggle** | Enable/disable blocks via sidebar checkbox or `# @disabled` directive |
 | **Guided Tour** | Two-part onboarding tour covering all features; re-open via ❓ button |
+| **Performance Engine** | Heavy computation (JSON formatting, tree building, diffing) offloaded to Rust with Rayon parallelism; virtual scrolling renders only visible rows (~50 DOM nodes for 100K+ lines); collapsed diff hunks show only changes + context; lazy JSON tree with on-demand expansion; Web Worker pool for off-thread text processing. See [Performance Migration Report](docs/PERFORMANCE_MIGRATION.md) |
 | **Cross-Platform** | Windows, macOS, Linux via Tauri v2 |
 
 ### Live Capture
@@ -399,9 +400,10 @@ The [`docs/`](docs/) folder contains:
 ### Architecture Guides
 
 For developers and AI agents working on the codebase:
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** — High-level overview, repo layout, data flows, common modification patterns
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — High-level overview, repo layout, data flows, performance architecture, common modification patterns
 - **[desktop/ARCHITECTURE.md](desktop/ARCHITECTURE.md)** — Rust module-by-module guide, frontend structure, IPC commands
 - **[extension/ARCHITECTURE.md](extension/ARCHITECTURE.md)** — Extension internals, message passing, rule system, content scripts
+- **[Performance Migration Report](docs/PERFORMANCE_MIGRATION.md)** — Why Rust+Rayon over Dioxus, benchmarks, virtual scroll impact, test coverage
 
 ### AI Skill
 
@@ -413,8 +415,8 @@ The `.github/skills/e2e-http-test-generator/` directory contains a Copilot skill
 
 | Layer | Technologies |
 |---|---|
-| **Shared Core** | Rust, reqwest, tokio, serde, chrono |
-| **Desktop App** | Tauri v2, HTML/CSS/JS (vanilla), Rust backend |
+| **Shared Core** | Rust, reqwest, tokio, serde, chrono, rayon |
+| **Desktop App** | Tauri v2, HTML/CSS/JS (vanilla), Rust backend, Web Workers |
 | **Browser Extension** | Manifest V3, declarativeNetRequest, webRequest, content scripts, chrome.storage |
 | **Terminal UI** | ratatui 0.29, crossterm 0.28, clap 4, tokio |
-| **Tests** | Rust `#[test]` (223 core), Jest (97 extension) |
+| **Tests** | Rust `#[test]` (223 core + 62 perf unit + 22 perf E2E), Jest (97 extension + 42 perf features) |
