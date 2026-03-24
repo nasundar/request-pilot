@@ -5928,15 +5928,15 @@ function estimateMemoryUsage() {
 function updateMemIndicator() {
   const bytes = estimateMemoryUsage();
   const el = $('#memValue');
-  const indicator = $('#memIndicator');
-  if (!el || !indicator) return;
-  el.textContent = `(${formatBytes(bytes)})`;
+  const pill = $('#memPill');
+  if (!el || !pill) return;
+  el.textContent = formatBytes(bytes);
   if (bytes > MEM_WARN_THRESHOLD) {
-    indicator.classList.add('mem-warn');
-    indicator.title = `UI memory high (${formatBytes(bytes)}) — click Free to release`;
+    pill.classList.add('mem-warn');
+    pill.title = `UI memory high (${formatBytes(bytes)}) — click to free`;
   } else {
-    indicator.classList.remove('mem-warn');
-    indicator.title = `Estimated UI memory usage (${formatBytes(bytes)})`;
+    pill.classList.remove('mem-warn');
+    pill.title = `UI memory (${formatBytes(bytes)}) — click to free`;
   }
 }
 
@@ -5964,7 +5964,7 @@ function freeMemory() {
   rpLog('info', 'Memory freed', { files: freed });
 }
 
-$('#memFreeBtn').addEventListener('click', freeMemory);
+$('#memPill').addEventListener('click', freeMemory);
 
 // Update memory indicator periodically and on key actions
 setInterval(updateMemIndicator, 10000); // every 10s

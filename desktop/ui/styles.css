@@ -340,21 +340,28 @@ html, body {
   -webkit-app-region: no-drag;
 }
 
-/* Memory indicator */
-.mem-indicator {
-  display: flex;
+/* Memory pill */
+.mem-pill {
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 8px;
-  border-radius: var(--radius-xs);
-  font-size: 11px;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-family: var(--font-mono);
   color: var(--text-muted);
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  cursor: default;
+  cursor: pointer;
   transition: all 0.3s;
+  white-space: nowrap;
 }
-.mem-indicator.mem-warn {
+.mem-pill:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+.mem-pill.mem-warn {
   border-color: var(--orange);
   color: var(--orange);
   background: var(--orange-dim, rgba(210,153,34,0.1));
@@ -363,26 +370,6 @@ html, body {
 @keyframes mem-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.7; }
-}
-.mem-icon { font-size: 12px; }
-.mem-value {
-  font-family: var(--font-mono);
-  font-size: 10px;
-}
-.mem-free-btn {
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xs);
-  color: var(--text-secondary);
-  font-size: 10px;
-  padding: 1px 6px;
-  cursor: pointer;
-  transition: all var(--transition);
-}
-.mem-free-btn:hover {
-  background: var(--accent-dim);
-  color: var(--accent);
-  border-color: var(--accent);
 }
 
 /* ---------- Buttons ---------- */
