@@ -37,6 +37,26 @@ let runHistory = new Map(); // Map<fileName, [{timestamp, passed, failed, skippe
 const diffCache = new Map();
 let diffCacheBytes = 0; // rough byte estimate for memory tracking
 
+/** Invalidate all assertion diff cache entries for a file (all blocks). */
+function invalidateDiffCacheForFile(fileIdx) {
+  const prefix = `assert:${fileIdx}-`;
+  for (const key of [...diffCache.keys()]) {
+    if (key.startsWith(prefix)) {
+      diffCacheBytes -= JSON.stringify(diffCache.get(key)).length * 2;
+      diffCache.delete(key);
+    }
+  }
+}
+
+/** Invalidate a single assertion diff cache entry. */
+function invalidateDiffCacheEntry(fileIdx, blockIdx) {
+  const key = `assert:${fileIdx}-${blockIdx}`;
+  if (diffCache.has(key)) {
+    diffCacheBytes -= JSON.stringify(diffCache.get(key)).length * 2;
+    diffCache.delete(key);
+  }
+}
+
 // --- Logging ---
 const rpLogs = [];
 const MAX_LOGS = 2000;
@@ -2757,6 +2777,7 @@ async function runAllTests() {
 
         // Remap results to align with original block indices
         file.results = remapResults(fi, results);
+        invalidateDiffCacheForFile(fi);
         pushRunHistory(file.name, results);
         processTelemetryResult(file.name, results);
         totalPassed += results.passed;
@@ -2895,6 +2916,7 @@ async function runSingleBlock(fileIdx, blockIdx) {
     const br = results.block_results?.[0];
     if (br) {
       file.results.block_results[blockIdx] = br;
+      invalidateDiffCacheEntry(fileIdx, blockIdx);
       // Carry extracted variables to env
       if (results.final_variables) {
         Object.entries(results.final_variables).forEach(([name, value]) => {
@@ -3018,6 +3040,7 @@ async function runCompareStep(fileIdx, blockIdx, stepIdx) {
           envVars[name] = value;
         });
       }
+      invalidateDiffCacheEntry(fileIdx, blockIdx);
     }
 
     updateBlockStatuses();
@@ -3717,12 +3740,7 @@ async function runGroup(fileIdx, groupName) {
         const origIdx = unmatchedGroupIndices[matchPos];
         file.results.block_results[origIdx] = br;
         unmatchedGroupIndices.splice(matchPos, 1);
-        // Invalidate cached diff for this block (results changed)
-        const dck = `assert:${fileIdx}-${origIdx}`;
-        if (diffCache.has(dck)) {
-          diffCacheBytes -= JSON.stringify(diffCache.get(dck)).length * 2;
-          diffCache.delete(dck);
-        }
+        invalidateDiffCacheEntry(fileIdx, origIdx);
       }
     });
 
@@ -3774,6 +3792,7 @@ async function runSingleFile(fileIdx) {
   setRunning(true);
 
   file.results = null;
+  invalidateDiffCacheForFile(fileIdx);
   updateBlockStatuses();
 
   // Show all enabled blocks as pending
@@ -6121,42 +6140,55 @@ function estimateMemoryUsage() {
   }
 }
 
-$('#clearHistoryAction').addEventListener('click', async () => {
-  if (historyCache.length === 0) {
-    showToast('No history to clear', 'info');
-    return;
-  }
+$('#clearAllAction').addEventListener('click', async () => {
   try {
+    // Clear Rust-side history store
     await invoke('clear_history');
+
+    // Clear all JS state — reset as if nothing was ever run
     historyCache = [];
     historyExpandedGroups.clear();
+    historySelectedIds.clear();
+    _selectedHistoryHeaders = new Set();
+    viewedResults.clear();
+    viewedHistoryEntries.clear();
     diffCache.clear();
     diffCacheBytes = 0;
-    renderHistoryStats([]);
-    renderHistoryLog([]);
-    historyCountBadge.textContent = '0';
-    loadedFiles.forEach(f => { if (f.results) f.results = null; });
+    runHistory.clear();
+    liveCapturedRequests = [];
+
+    // Clear all test results and block statuses
+    loadedFiles.forEach(f => { f.results = null; });
+    updateBlockStatuses();
+
+    // Reset response panel
     lastResponse = null;
     responseBodyEl.innerHTML = '';
     responseHeadersEl.innerHTML = '';
     responseEmpty.classList.remove('hidden');
     responseContent.classList.add('hidden');
-    showToast('History and test results cleared', 'success');
-    rpLog('info', 'History and test results cleared');
+
+    // Reset history UI
+    renderHistoryStats([]);
+    renderHistoryLog([]);
+    historyCountBadge.textContent = '0';
+
+    // Reset test results bar
+    testResultsBar.classList.add('hidden');
+    testResultsDetails.innerHTML = '';
+
+    // Clear viewed indicators in DOM
+    document.querySelectorAll('.result-detail-row').forEach(r => {
+      r.classList.remove('seen', 'seen-mutated');
+      const v = r.querySelector('.detail-viewed');
+      if (v) v.remove();
+    });
+
+    showToast('All data cleared', 'success');
+    rpLog('info', 'Clear All: history, test results, caches, viewed state reset');
   } catch (err) {
     showToast(`Failed to clear: ${err}`, 'error');
   }
-  $('#clearDropdown').style.display = 'none';
-});
-
-$('#clearViewedAction').addEventListener('click', () => {
-  viewedResults.clear();
-  document.querySelectorAll('.result-detail-row').forEach(r => {
-    r.classList.remove('seen', 'seen-mutated');
-    const v = r.querySelector('.detail-viewed');
-    if (v) v.remove();
-  });
-  showToast('Viewed state cleared', 'success');
   $('#clearDropdown').style.display = 'none';
 });
 
