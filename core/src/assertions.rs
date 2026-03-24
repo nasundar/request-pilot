@@ -303,10 +303,14 @@ fn compute_json_diff(va: &serde_json::Value, vb: &serde_json::Value) -> DiffResu
     let mut added: Vec<String> = Vec::new();
     let mut removed: Vec<String> = Vec::new();
     let mut changed: Vec<ChangedField> = Vec::new();
+    let mut total_added = 0usize;
+    let mut total_removed = 0usize;
+    let mut total_changed = 0usize;
 
     for (path, val_a) in &map_a {
         match map_b.get(path) {
             Some(val_b) if val_a != val_b => {
+                total_changed += 1;
                 if changed.len() < MAX_DIFF_PATHS {
                     changed.push(ChangedField {
                         path: path.to_string(),
@@ -316,6 +320,7 @@ fn compute_json_diff(va: &serde_json::Value, vb: &serde_json::Value) -> DiffResu
                 }
             }
             None => {
+                total_removed += 1;
                 if removed.len() < MAX_DIFF_PATHS {
                     removed.push(path.to_string());
                 }
@@ -325,8 +330,11 @@ fn compute_json_diff(va: &serde_json::Value, vb: &serde_json::Value) -> DiffResu
     }
 
     for path in map_b.keys() {
-        if !map_a.contains_key(path) && added.len() < MAX_DIFF_PATHS {
-            added.push(path.to_string());
+        if !map_a.contains_key(path) {
+            total_added += 1;
+            if added.len() < MAX_DIFF_PATHS {
+                added.push(path.to_string());
+            }
         }
     }
 
@@ -334,9 +342,9 @@ fn compute_json_diff(va: &serde_json::Value, vb: &serde_json::Value) -> DiffResu
     removed.sort();
     changed.sort_by(|a, b| a.path.cmp(&b.path));
 
-    let added_count = added.len();
-    let removed_count = removed.len();
-    let changed_count = changed.len();
+    let added_count = total_added;
+    let removed_count = total_removed;
+    let changed_count = total_changed;
 
     let total_max = paths_a.len().max(paths_b.len()).max(1) as f64;
     let diff_count = (changed_count + added_count + removed_count) as f64;
@@ -778,6 +786,53 @@ mod tests {
         let result = compute_diff("", "");
         assert!(result.match_exact);
         assert_eq!(result.similarity, 1.0);
+    }
+
+    #[test]
+    fn diff_counts_accurate_beyond_max_diff_paths() {
+        // Build two JSON objects where every key has a different value,
+        // plus object B has extra keys — totals exceed MAX_DIFF_PATHS.
+        let n = MAX_DIFF_PATHS + 500; // changed paths
+        let extra = 200; // added paths (only in B)
+
+        let mut obj_a = serde_json::Map::new();
+        let mut obj_b = serde_json::Map::new();
+
+        for i in 0..n {
+            let key = format!("key_{i}");
+            obj_a.insert(key.clone(), serde_json::Value::String(format!("a_{i}")));
+            obj_b.insert(key, serde_json::Value::String(format!("b_{i}")));
+        }
+        for i in 0..extra {
+            obj_b.insert(
+                format!("extra_{i}"),
+                serde_json::Value::String(format!("new_{i}")),
+            );
+        }
+
+        let body_a = serde_json::to_string(&serde_json::Value::Object(obj_a)).unwrap();
+        let body_b = serde_json::to_string(&serde_json::Value::Object(obj_b)).unwrap();
+
+        let result = compute_diff(&body_a, &body_b);
+
+        // Counts must reflect the true totals, not the capped vectors.
+        assert_eq!(result.changed_count, n, "changed_count should be exact");
+        assert_eq!(result.added_count, extra, "added_count should be exact");
+        assert_eq!(result.removed_count, 0);
+
+        // Preview vectors are capped at MAX_DIFF_PATHS.
+        assert!(result.changed_paths.len() <= MAX_DIFF_PATHS);
+        assert!(result.added_paths.len() <= MAX_DIFF_PATHS);
+
+        // Similarity must use the accurate totals.
+        let total_max = (n as f64).max((n + extra) as f64).max(1.0);
+        let expected_sim = (1.0 - (n + extra) as f64 / total_max).max(0.0);
+        assert!(
+            (result.similarity - expected_sim).abs() < 1e-9,
+            "similarity should use accurate counters: got {} expected {}",
+            result.similarity,
+            expected_sim
+        );
     }
 
     // ── resolve_diff_value tests ────────────────────

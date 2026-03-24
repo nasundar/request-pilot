@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ParsedRequest {
@@ -43,6 +44,9 @@ pub struct TestBlock {
     /// Diff directive specifying which two steps to compare.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<DiffDirective>,
+    /// Validation errors detected during parsing (duplicate step names, invalid diff refs, etc.)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: ParseErrors,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -73,6 +77,10 @@ pub struct DiffDirective {
     pub step_a: String,
     pub step_b: String,
 }
+
+/// Validation errors detected during parsing.
+/// Stored on `TestBlock` so the runner can report them.
+pub type ParseErrors = Vec<String>;
 
 /// Backward-compatible parse function. Returns a flat list of requests.
 pub fn parse(content: &str) -> Vec<ParsedRequest> {
@@ -192,6 +200,8 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
     let mut steps: Vec<CompareStep> = Vec::new();
     let mut current_step_name: Option<String> = None;
     let mut step_assertions: Vec<Assertion> = Vec::new();
+    let mut seen_step_names: HashSet<String> = HashSet::new();
+    let mut errors: ParseErrors = Vec::new();
     let mut step_extracts: Vec<Extract> = Vec::new();
     let mut step_request_lines: Vec<&str> = Vec::new();
     let mut step_request_name: Option<String> = None;
@@ -274,6 +284,9 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
         if let Some(rest) = trimmed.strip_prefix("# @step ") {
             let step_name = rest.trim().to_string();
             if !step_name.is_empty() {
+                if !seen_step_names.insert(step_name.clone()) {
+                    errors.push(format!("duplicate step name: '{}'", step_name));
+                }
                 // Finalize previous step if one was open
                 if let Some(prev_name) = current_step_name.take() {
                     if let Some(req) = parse_request_from_lines(&step_request_lines, &step_request_name) {
@@ -341,6 +354,22 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
         }
     }
 
+    // Validate @diff references against actual step names
+    if let Some(ref diff) = diff_directive {
+        if !seen_step_names.contains(&diff.step_a) {
+            errors.push(format!(
+                "@diff references unknown step '{}'",
+                diff.step_a
+            ));
+        }
+        if !seen_step_names.contains(&diff.step_b) {
+            errors.push(format!(
+                "@diff references unknown step '{}'",
+                diff.step_b
+            ));
+        }
+    }
+
     // For compare blocks with steps, we don't require a block-level request
     let request = if is_compare && !steps.is_empty() {
         // Use dummy request for compare blocks — steps hold the real requests
@@ -380,6 +409,7 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
         compare: is_compare,
         steps,
         diff: diff_directive,
+        errors,
     })
 }
 
@@ -966,6 +996,7 @@ POST https://example.com/login";
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+            errors: Vec::new(),
             }],
             ..Default::default()
         };
@@ -1001,6 +1032,7 @@ POST https://example.com/login";
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+            errors: Vec::new(),
             }],
             ..Default::default()
         };
@@ -1051,6 +1083,7 @@ POST https://example.com/login";
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+            errors: Vec::new(),
             }],
             ..Default::default()
         };
@@ -1098,6 +1131,7 @@ POST https://example.com/login";
                     compare: false,
                     steps: Vec::new(),
                     diff: None,
+                errors: Vec::new(),
                 },
                 TestBlock {
                     block_type: "test".into(),
@@ -1131,6 +1165,7 @@ POST https://example.com/login";
                     compare: false,
                     steps: Vec::new(),
                     diff: None,
+                errors: Vec::new(),
                 },
                 TestBlock {
                     block_type: "teardown".into(),
@@ -1153,6 +1188,7 @@ POST https://example.com/login";
                     compare: false,
                     steps: Vec::new(),
                     diff: None,
+                    errors: Vec::new(),
                 },
             ],
             ..Default::default()
@@ -1204,6 +1240,7 @@ POST https://example.com/login";
                     compare: false,
                     steps: Vec::new(),
                     diff: None,
+                errors: Vec::new(),
                 },
                 TestBlock {
                     block_type: "test".into(),
@@ -1230,6 +1267,7 @@ POST https://example.com/login";
                     compare: false,
                     steps: Vec::new(),
                     diff: None,
+                errors: Vec::new(),
                 },
                 TestBlock {
                     block_type: "teardown".into(),
@@ -1252,6 +1290,7 @@ POST https://example.com/login";
                     compare: false,
                     steps: Vec::new(),
                     diff: None,
+                    errors: Vec::new(),
                 },
             ],
             ..Default::default()
@@ -1362,6 +1401,7 @@ POST https://example.com/login";
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+            errors: Vec::new(),
             }],
             ..Default::default()
         };
@@ -1435,6 +1475,7 @@ grant_type=client_credentials
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+            errors: Vec::new(),
             }],
             ..Default::default()
         };
@@ -1483,6 +1524,7 @@ grant_type=client_credentials
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+            errors: Vec::new(),
             }],
             ..Default::default()
         };
@@ -1540,6 +1582,7 @@ grant_type=client_credentials
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+            errors: Vec::new(),
             }],
             ..Default::default()
         };
@@ -1788,6 +1831,7 @@ Authorization: Bearer {{token}}
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+            errors: Vec::new(),
             }],
             ..Default::default()
         };
@@ -1976,5 +2020,88 @@ Authorization: Bearer {{token}}
         assert!(generated.contains("# @diff baseline candidate"));
         assert!(generated.contains("# @assert $diff.match == true"));
         assert!(generated.contains("# @extract v1_id = $.id"));
+    }
+
+    // ── Duplicate step names produce parse error ────────────────────
+    #[test]
+    fn duplicate_step_names_produce_error() {
+        let input = "\
+### @test Duplicate steps
+# @compare
+# @step baseline
+GET https://example.com/v1
+# @step baseline
+GET https://example.com/v2
+# @diff baseline baseline
+# @assert $diff.match == true";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.blocks.len(), 1);
+        let blk = &suite.blocks[0];
+        assert!(
+            blk.errors.iter().any(|e| e.contains("duplicate step name") && e.contains("baseline")),
+            "expected duplicate step name error, got: {:?}",
+            blk.errors
+        );
+    }
+
+    // ── @diff referencing non-existent steps produces parse error ───
+    #[test]
+    fn diff_references_nonexistent_steps_produce_error() {
+        let input = "\
+### @test Bad diff ref
+# @compare
+# @step step_a
+GET https://example.com/a
+# @step step_b
+GET https://example.com/b
+# @diff step_a typo_step
+# @assert $diff.match == true";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.blocks.len(), 1);
+        let blk = &suite.blocks[0];
+        assert!(
+            blk.errors.iter().any(|e| e.contains("unknown step") && e.contains("typo_step")),
+            "expected unknown step error for typo_step, got: {:?}",
+            blk.errors
+        );
+        // step_a is valid, so no error for it
+        assert!(
+            !blk.errors.iter().any(|e| e.contains("step_a")),
+            "step_a is valid and should not appear in errors"
+        );
+    }
+
+    // ── @diff where both references are invalid ─────────────────────
+    #[test]
+    fn diff_both_refs_invalid_produce_two_errors() {
+        let input = "\
+### @test Both bad
+# @compare
+# @step real_a
+GET https://example.com/a
+# @step real_b
+GET https://example.com/b
+# @diff ghost_a ghost_b";
+        let suite = parse_test_suite(input);
+        let blk = &suite.blocks[0];
+        let diff_errors: Vec<_> = blk.errors.iter().filter(|e| e.contains("unknown step")).collect();
+        assert_eq!(diff_errors.len(), 2, "expected two unknown step errors, got: {:?}", blk.errors);
+    }
+
+    // ── Valid compare block has no errors ────────────────────────────
+    #[test]
+    fn valid_compare_block_no_errors() {
+        let input = "\
+### @test Valid compare
+# @compare
+# @step baseline
+GET https://example.com/v1
+# @step candidate
+GET https://example.com/v2
+# @diff baseline candidate
+# @assert $diff.match == true";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.blocks.len(), 1);
+        assert!(suite.blocks[0].errors.is_empty(), "valid block should have no errors");
     }
 }

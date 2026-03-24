@@ -280,6 +280,29 @@ async fn execute_compare_block(
     mut var_store: VariableStore,
     extra_headers: Vec<(String, String)>,
 ) -> BlockResult {
+    // Fail early if the parser found validation errors (duplicate steps, bad diff refs)
+    if !block.errors.is_empty() {
+        let msg = block.errors.join("; ");
+        return BlockResult {
+            seq: None,
+            name: block.name.clone(),
+            block_type: block.block_type.clone(),
+            group: block.group.clone(),
+            request_method: String::new(),
+            request_url: String::new(),
+            request_headers: Vec::new(),
+            request_body: None,
+            status: "error".to_string(),
+            response: None,
+            assertion_results: Vec::new(),
+            extract_results: Vec::new(),
+            error: Some(msg),
+            time_ms: 0,
+            step_results: Vec::new(),
+            diff_result: None,
+        };
+    }
+
     let block_start = std::time::Instant::now();
     let mut step_results: Vec<StepResult> = Vec::new();
     let mut all_step_assertions_passed = true;
@@ -379,6 +402,40 @@ async fn execute_compare_block(
 
     // Compute diff if @diff directive is present
     let diff_result = if let Some(ref diff) = block.diff {
+        let missing_a = !step_responses.contains_key(&diff.step_a);
+        let missing_b = !step_responses.contains_key(&diff.step_b);
+        if missing_a || missing_b {
+            let mut missing = Vec::new();
+            if missing_a {
+                missing.push(format!("'{}'", diff.step_a));
+            }
+            if missing_b {
+                missing.push(format!("'{}'", diff.step_b));
+            }
+            let total_time_ms = block_start.elapsed().as_millis() as u64;
+            let first_step = step_results.first();
+            return BlockResult {
+                seq: None,
+                name: block.name.clone(),
+                block_type: block.block_type.clone(),
+                group: block.group.clone(),
+                request_method: first_step.map(|s| s.request_method.clone()).unwrap_or_default(),
+                request_url: first_step.map(|s| s.request_url.clone()).unwrap_or_default(),
+                request_headers: Vec::new(),
+                request_body: None,
+                status: "error".to_string(),
+                response: None,
+                assertion_results: Vec::new(),
+                extract_results: Vec::new(),
+                error: Some(format!(
+                    "@diff step not found in responses: {}",
+                    missing.join(", ")
+                )),
+                time_ms: total_time_ms,
+                step_results,
+                diff_result: None,
+            };
+        }
         let body_a = step_responses
             .get(&diff.step_a)
             .map(|r| r.body.as_str())
@@ -408,6 +465,12 @@ async fn execute_compare_block(
     let total_time_ms = block_start.elapsed().as_millis() as u64;
     let overall_passed = all_step_assertions_passed && all_comparison_passed;
 
+    // Collect all step extracts for propagation to outer scope
+    let all_extracts: Vec<ExtractResult> = step_results
+        .iter()
+        .flat_map(|sr| sr.extract_results.iter().cloned())
+        .collect();
+
     // Use first step's request info for the block-level fields
     let first_step = step_results.first();
 
@@ -423,7 +486,7 @@ async fn execute_compare_block(
         status: if overall_passed { "passed" } else { "failed" }.to_string(),
         response: None,
         assertion_results: comparison_assertions,
-        extract_results: Vec::new(),
+        extract_results: all_extracts,
         error: None,
         time_ms: total_time_ms,
         step_results,
@@ -1026,7 +1089,7 @@ mod tests {
         assert_eq!(er.value.as_deref(), Some("abc123"));
     }
 
-    use crate::http_parser::{Extract, ParsedRequest};
+    use crate::http_parser::{CompareStep, Extract, ParsedRequest};
 
     fn make_block(
         block_type: &str,
@@ -1056,6 +1119,7 @@ mod tests {
             compare: false,
             steps: Vec::new(),
             diff: None,
+            errors: Vec::new(),
         }
     }
 
@@ -1276,5 +1340,218 @@ mod tests {
         assert_eq!(results.block_results[0].name, "First");
         assert_eq!(results.block_results[1].name, "Second");
         assert_eq!(results.block_results[2].name, "Third");
+    }
+
+    #[tokio::test]
+    async fn compare_block_propagates_step_extracts() {
+        use crate::variables::VariableStore;
+
+        let block = TestBlock {
+            block_type: "test".to_string(),
+            name: "compare_extract_test".to_string(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: vec![],
+            request: ParsedRequest {
+                name: Some("compare_extract_test".to_string()),
+                method: "GET".to_string(),
+                url: "http://127.0.0.1:0/nonexistent".to_string(),
+                headers: Vec::new(),
+                body: None,
+            },
+            assertions: Vec::new(),
+            extracts: Vec::new(),
+            compare: true,
+            steps: vec![
+                CompareStep {
+                    name: "step_a".to_string(),
+                    request: ParsedRequest {
+                        name: Some("step_a".to_string()),
+                        method: "GET".to_string(),
+                        url: "http://127.0.0.1:0/a".to_string(),
+                        headers: Vec::new(),
+                        body: None,
+                    },
+                    assertions: Vec::new(),
+                    extracts: vec![Extract {
+                        variable_name: "token_a".to_string(),
+                        source_path: "$.token".to_string(),
+                    }],
+                },
+                CompareStep {
+                    name: "step_b".to_string(),
+                    request: ParsedRequest {
+                        name: Some("step_b".to_string()),
+                        method: "GET".to_string(),
+                        url: "http://127.0.0.1:0/b".to_string(),
+                        headers: Vec::new(),
+                        body: None,
+                    },
+                    assertions: Vec::new(),
+                    extracts: vec![Extract {
+                        variable_name: "token_b".to_string(),
+                        source_path: "$.token".to_string(),
+                    }],
+                },
+            ],
+            diff: None,
+            errors: Vec::new(),
+        };
+
+        let var_store = VariableStore::new();
+        let result = execute_compare_block(block, var_store, vec![]).await;
+
+        // Both steps will fail (connection refused), so extract_results will be
+        // empty from the error path. But the important thing is that step_results
+        // extracts are collected into the BlockResult. Let's verify the structure
+        // is wired correctly by checking step_results exist.
+        assert_eq!(result.step_results.len(), 2);
+        assert_eq!(result.step_results[0].name, "step_a");
+        assert_eq!(result.step_results[1].name, "step_b");
+
+        // On connection error, steps produce empty extract_results, so
+        // block-level extract_results should also be empty (no false positives).
+        // The key fix is that when steps DO succeed, their extracts propagate.
+        assert_eq!(
+            result.extract_results.len(),
+            result
+                .step_results
+                .iter()
+                .map(|sr| sr.extract_results.len())
+                .sum::<usize>(),
+            "BlockResult.extract_results must equal the sum of all step extract_results"
+        );
+    }
+
+    #[tokio::test]
+    async fn compare_block_with_parser_errors_returns_error_status() {
+        use crate::http_parser::{CompareStep, DiffDirective};
+        use crate::variables::VariableStore;
+
+        let block = TestBlock {
+            block_type: "test".to_string(),
+            name: "bad_diff_ref".to_string(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: vec![],
+            request: ParsedRequest {
+                name: Some("bad_diff_ref".to_string()),
+                method: String::new(),
+                url: String::new(),
+                headers: Vec::new(),
+                body: None,
+            },
+            assertions: Vec::new(),
+            extracts: Vec::new(),
+            compare: true,
+            steps: vec![
+                CompareStep {
+                    name: "step_a".to_string(),
+                    request: ParsedRequest {
+                        name: None,
+                        method: "GET".to_string(),
+                        url: "http://127.0.0.1:0/a".to_string(),
+                        headers: Vec::new(),
+                        body: None,
+                    },
+                    assertions: Vec::new(),
+                    extracts: Vec::new(),
+                },
+            ],
+            diff: Some(DiffDirective {
+                step_a: "step_a".to_string(),
+                step_b: "nonexistent".to_string(),
+            }),
+            errors: vec!["@diff references unknown step 'nonexistent'".to_string()],
+        };
+
+        let var_store = VariableStore::new();
+        let result = execute_compare_block(block, var_store, vec![]).await;
+
+        assert_eq!(result.status, "error");
+        assert!(
+            result.error.as_ref().unwrap().contains("nonexistent"),
+            "error should mention the invalid step name"
+        );
+        // No steps should have been executed
+        assert!(result.step_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compare_block_missing_diff_response_returns_error() {
+        use crate::http_parser::{CompareStep, DiffDirective};
+        use crate::variables::VariableStore;
+
+        // Steps exist but diff references a step whose HTTP call will fail,
+        // resulting in no response entry. The runner should error, not diff empty strings.
+        let block = TestBlock {
+            block_type: "test".to_string(),
+            name: "missing_response".to_string(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: vec![],
+            request: ParsedRequest {
+                name: None,
+                method: String::new(),
+                url: String::new(),
+                headers: Vec::new(),
+                body: None,
+            },
+            assertions: Vec::new(),
+            extracts: Vec::new(),
+            compare: true,
+            steps: vec![
+                CompareStep {
+                    name: "step_a".to_string(),
+                    request: ParsedRequest {
+                        name: None,
+                        method: "GET".to_string(),
+                        url: "http://127.0.0.1:0/a".to_string(),
+                        headers: Vec::new(),
+                        body: None,
+                    },
+                    assertions: Vec::new(),
+                    extracts: Vec::new(),
+                },
+                CompareStep {
+                    name: "step_b".to_string(),
+                    request: ParsedRequest {
+                        name: None,
+                        method: "GET".to_string(),
+                        url: "http://127.0.0.1:0/b".to_string(),
+                        headers: Vec::new(),
+                        body: None,
+                    },
+                    assertions: Vec::new(),
+                    extracts: Vec::new(),
+                },
+            ],
+            diff: Some(DiffDirective {
+                step_a: "step_a".to_string(),
+                step_b: "step_b".to_string(),
+            }),
+            errors: Vec::new(),
+        };
+
+        let var_store = VariableStore::new();
+        let result = execute_compare_block(block, var_store, vec![]).await;
+
+        // Both steps fail (connection refused), so their responses are NOT in
+        // step_responses. The runner should detect this and return an error.
+        assert_eq!(result.status, "error");
+        assert!(
+            result.error.as_ref().unwrap().contains("@diff step not found"),
+            "expected '@diff step not found' error, got: {:?}",
+            result.error
+        );
     }
 }

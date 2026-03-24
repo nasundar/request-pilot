@@ -2028,13 +2028,12 @@ function renderAssertions(fileIdx, blockIdx) {
       html += '</div>';
     }
 
-    // Comparison assertions (from diff directive)
-    if (block.diff && block.diff.comparison_assertions && block.diff.comparison_assertions.length > 0) {
+    // Comparison assertions (stored on block.assertions for compare blocks)
+    if (block.assertions && block.assertions.length > 0) {
       html += '<div class="assertion-group"><div class="assertion-group-header">Comparison Assertions</div>';
-      const totalStepAsserts = block.steps.reduce((sum, s) => sum + (s.assertions?.length || 0), 0);
-      block.diff.comparison_assertions.forEach((assertion, i) => {
+      block.assertions.forEach((assertion, i) => {
         const assertionText = `${assertion.left} ${assertion.operator} ${assertion.right}`;
-        const ar = br?.assertion_results?.[totalStepAsserts + i];
+        const ar = br?.assertion_results?.[i];
         const passed = ar ? ar.passed : null;
         const statusClass = passed === true ? 'passed' : passed === false ? 'failed' : '';
         const icon = passed === true ? '\u2713' : passed === false ? '\u2717' : '\u25CB';
