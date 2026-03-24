@@ -35,13 +35,29 @@
           <button class="btn btn-ghost btn-xs" id="extraHeadersAddBtn">+ Add Header</button>
         </div>
       </div>
-      <div class="mem-wrapper">
-        <button class="icon-btn mem-btn" id="memPill" title="Memory cleanup">🧹</button>
-        <div class="mem-dropdown" id="memDropdown" style="display:none">
-          <div class="mem-dd-header">Memory Usage</div>
-          <div class="mem-dd-value" id="memValue">0 KB</div>
-          <div class="mem-dd-desc">Estimated UI memory held by loaded responses, logs, and cached data.</div>
-          <button class="btn btn-sm btn-primary mem-dd-free" id="memFreeAction">🧹 Free Memory</button>
+      <div class="clear-wrapper">
+        <button class="icon-btn clear-btn" id="clearToolbarBtn" title="Clear data">🗑</button>
+        <div class="clear-dropdown" id="clearDropdown" style="display:none">
+          <div class="clear-dd-mem">
+            <span class="clear-dd-mem-icon">📊</span>
+            <span>UI Memory: </span>
+            <span class="clear-dd-mem-val" id="clearMemValue">0 KB</span>
+          </div>
+          <div class="clear-dd-divider"></div>
+          <button class="clear-dd-item" id="clearHistoryAction">
+            <span class="clear-dd-icon">📋</span>
+            <div>
+              <div class="clear-dd-label">Clear History</div>
+              <div class="clear-dd-desc">Remove all captured requests and test run results</div>
+            </div>
+          </button>
+          <button class="clear-dd-item" id="clearViewedAction">
+            <span class="clear-dd-icon">👁</span>
+            <div>
+              <div class="clear-dd-label">Clear Viewed</div>
+              <div class="clear-dd-desc">Reset viewed/seen state on all test results</div>
+            </div>
+          </button>
         </div>
       </div>
       <div class="live-capture-wrapper">
@@ -182,8 +198,7 @@
             <button class="btn btn-primary btn-xs hidden" id="historyCompareBtn" title="Compare selected requests">⚖ Compare</button>
             <button class="btn btn-ghost btn-xs" id="historyExpandAllBtn" title="Expand all groups">⊞ Expand All</button>
             <button class="btn btn-ghost btn-xs" id="historyCollapseAllBtn" title="Collapse all groups">⊟ Collapse All</button>
-            <button class="btn btn-ghost btn-xs clear-viewed-btn" id="historyClearViewedBtn" title="Clear viewed state">👁 Clear Viewed</button>
-            <button class="btn btn-ghost btn-xs" id="historyClearBtn" title="Clear all history">🗑 Clear</button>
+
           </div>
         </div>
         <div class="history-filters">
@@ -370,7 +385,7 @@
             <span class="result-stat failed">✗ <span id="resultsFailed">0</span> failed</span>
             <span class="result-stat skipped">○ <span id="resultsSkipped">0</span> skipped</span>
             <span class="result-stat time">— <span id="resultsTotalTime">0</span> ms</span>
-            <button class="btn btn-ghost btn-xs clear-viewed-btn" id="clearViewedBtn" title="Clear viewed state">👁 Clear Viewed</button>
+
           </div>
           <div class="test-progress-bar" id="testProgressBar">
             <div class="progress-passed" id="progressPassed"></div>

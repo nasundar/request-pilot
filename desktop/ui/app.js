@@ -5699,17 +5699,6 @@ async function openHistoryComparison() {
   const summaryB = historyCache.find(e => e.seq === seqB);
   if (!summaryA || !summaryB) return;
 
-  // Bodies are not in historyCache (summary mode) — fetch full entries from Rust
-  const sizeA = summaryA.response_size_bytes || 0;
-  const sizeB = summaryB.response_size_bytes || 0;
-  const totalSize = sizeA + sizeB;
-  const COMPARE_WARN_THRESHOLD = 524288; // 512 KiB
-
-  if (totalSize > COMPARE_WARN_THRESHOLD) {
-    const msg = `Response bodies are large (${formatBytes(sizeA)} + ${formatBytes(sizeB)} = ${formatBytes(totalSize)}). Loading and comparing may be slow. Continue?`;
-    if (!confirm(msg)) return;
-  }
-
   showToast('Loading response bodies…', 'info');
   try {
     const [fullA, fullB] = await Promise.all([
@@ -5720,6 +5709,20 @@ async function openHistoryComparison() {
       showToast('Could not load one or both entries', 'error');
       return;
     }
+
+    // Large body guard — defer response body rendering
+    const sizeA = fullA.response_body ? fullA.response_body.length : 0;
+    const sizeB = fullB.response_body ? fullB.response_body.length : 0;
+    const totalSize = sizeA + sizeB;
+
+    if (totalSize > BODY_RENDER_THRESHOLD) {
+      const storedBodies = { a: fullA.response_body, b: fullB.response_body };
+      fullA.response_body = null;
+      fullB.response_body = null;
+      fullA._large_body_info = { size: sizeA, stored: storedBodies };
+      fullB._large_body_info = { size: sizeB, stored: storedBodies };
+    }
+
     openComparisonOverlay(fullA, fullB);
   } catch (err) {
     showToast(`Failed to load entries: ${err}`, 'error');
@@ -6087,27 +6090,39 @@ $('#historyCollapseAllBtn').addEventListener('click', () => {
   });
 });
 
-// Clear viewed state for history
-$('#historyClearViewedBtn').addEventListener('click', () => {
-  viewedHistoryEntries.clear();
-  historyLog.querySelectorAll('.hist-entry-row').forEach(r => {
-    r.classList.remove('seen', 'seen-mutated');
-    const v = r.querySelector('.hist-viewed');
-    if (v) v.remove();
+// Estimate UI memory usage for clear dropdown
+function estimateMemoryUsage() {
+  let bytes = 0;
+  loadedFiles.forEach(f => {
+    if (f.results) bytes += JSON.stringify(f.results).length * 2;
   });
-});
+  if (lastResponse) bytes += JSON.stringify(lastResponse).length * 2;
+  bytes += rpLogs.length * 200;
+  if (typeof liveCapturedRequests !== 'undefined') bytes += liveCapturedRequests.length * 500;
+  bytes += historyCache.length * 300;
+  return bytes;
+}
 
-// Clear viewed state for test results
-$('#clearViewedBtn').addEventListener('click', () => {
-  viewedResults.clear();
-  document.querySelectorAll('.result-detail-row').forEach(r => {
-    r.classList.remove('seen', 'seen-mutated');
-    const v = r.querySelector('.detail-viewed');
-    if (v) v.remove();
-  });
-});
+// Clear toolbar dropdown
+{
+  const clearWrapper = document.querySelector('.clear-wrapper');
+  const clearDropdown = $('#clearDropdown');
+  let clearHideTimer = null;
+  if (clearWrapper && clearDropdown) {
+    clearWrapper.addEventListener('mouseenter', () => {
+      clearTimeout(clearHideTimer);
+      // Update memory display on hover
+      const memEl = $('#clearMemValue');
+      if (memEl) memEl.textContent = formatBytes(estimateMemoryUsage());
+      clearDropdown.style.display = 'block';
+    });
+    clearWrapper.addEventListener('mouseleave', () => {
+      clearHideTimer = setTimeout(() => { clearDropdown.style.display = 'none'; }, 200);
+    });
+  }
+}
 
-$('#historyClearBtn').addEventListener('click', async () => {
+$('#clearHistoryAction').addEventListener('click', async () => {
   if (historyCache.length === 0) {
     showToast('No history to clear', 'info');
     return;
@@ -6119,98 +6134,30 @@ $('#historyClearBtn').addEventListener('click', async () => {
     renderHistoryStats([]);
     renderHistoryLog([]);
     historyCountBadge.textContent = '0';
-    showToast('History cleared', 'success');
-    rpLog('info', 'History cleared');
+    loadedFiles.forEach(f => { if (f.results) f.results = null; });
+    lastResponse = null;
+    responseBodyEl.innerHTML = '';
+    responseHeadersEl.innerHTML = '';
+    responseEmpty.classList.remove('hidden');
+    responseContent.classList.add('hidden');
+    showToast('History and test results cleared', 'success');
+    rpLog('info', 'History and test results cleared');
   } catch (err) {
-    showToast(`Failed to clear history: ${err}`, 'error');
-    rpLog('error', 'Command failed: clear_history', String(err));
+    showToast(`Failed to clear: ${err}`, 'error');
   }
+  $('#clearDropdown').style.display = 'none';
 });
 
-// --- Global Memory Tracking & Free ---
-const MEM_WARN_THRESHOLD = 52428800; // 50 MB — highlight warning
-
-function estimateMemoryUsage() {
-  let bytes = 0;
-  // loadedFiles results
-  loadedFiles.forEach(f => {
-    if (f.results) bytes += JSON.stringify(f.results).length;
+$('#clearViewedAction').addEventListener('click', () => {
+  viewedResults.clear();
+  document.querySelectorAll('.result-detail-row').forEach(r => {
+    r.classList.remove('seen', 'seen-mutated');
+    const v = r.querySelector('.detail-viewed');
+    if (v) v.remove();
   });
-  // lastResponse
-  if (lastResponse) {
-    bytes += (lastResponse.body || '').length;
-    bytes += JSON.stringify(lastResponse.headers || []).length;
-  }
-  // rpLogs
-  bytes += rpLogs.reduce((s, l) => s + (l.message || '').length + 50, 0);
-  // liveCapturedRequests
-  if (typeof liveCapturedRequests !== 'undefined') {
-    liveCapturedRequests.forEach(r => {
-      bytes += (r.request_body || '').length + (r.response_body || '').length + 200;
-    });
-  }
-  return bytes;
-}
-
-function updateMemIndicator() {
-  const bytes = estimateMemoryUsage();
-  const el = $('#memValue');
-  const btn = $('#memPill');
-  if (!el || !btn) return;
-  el.textContent = formatBytes(bytes);
-  if (bytes > MEM_WARN_THRESHOLD) {
-    btn.classList.add('mem-warn');
-    btn.title = `UI memory high (${formatBytes(bytes)})`;
-  } else {
-    btn.classList.remove('mem-warn');
-    btn.title = `Memory cleanup (${formatBytes(bytes)})`;
-  }
-}
-
-function freeMemory() {
-  let freed = 0;
-  loadedFiles.forEach(f => {
-    if (f.results) { f.results = null; freed++; }
-  });
-  lastResponse = null;
-  responseBodyEl.innerHTML = '';
-  responseHeadersEl.innerHTML = '';
-  responseEmpty.classList.remove('hidden');
-  responseContent.classList.add('hidden');
-  if (rpLogs.length > 100) rpLogs.splice(0, rpLogs.length - 100);
-  if (typeof liveCapturedRequests !== 'undefined' && liveCapturedRequests.length > 0) {
-    liveCapturedRequests.length = 0;
-  }
-  historyDetailBody.innerHTML = '';
-  const leftCode = $('#diffLeftBody')?.querySelector('code');
-  const rightCode = $('#diffRightBody')?.querySelector('code');
-  if (leftCode) leftCode.innerHTML = '';
-  if (rightCode) rightCode.innerHTML = '';
-  updateMemIndicator();
-  showToast(`Memory freed: ${freed} file result(s) cleared, UI buffers released`, 'success');
-  rpLog('info', 'Memory freed', { files: freed });
-}
-
-// Memory dropdown toggle on hover
-{
-  const memWrapper = document.querySelector('.mem-wrapper');
-  const memDropdown = $('#memDropdown');
-  let memHideTimer = null;
-  if (memWrapper && memDropdown) {
-    memWrapper.addEventListener('mouseenter', () => {
-      clearTimeout(memHideTimer);
-      updateMemIndicator();
-      memDropdown.style.display = 'block';
-    });
-    memWrapper.addEventListener('mouseleave', () => {
-      memHideTimer = setTimeout(() => { memDropdown.style.display = 'none'; }, 200);
-    });
-  }
-}
-$('#memFreeAction').addEventListener('click', freeMemory);
-
-// Update memory indicator periodically and on key actions
-setInterval(updateMemIndicator, 10000); // every 10s
+  showToast('Viewed state cleared', 'success');
+  $('#clearDropdown').style.display = 'none';
+});
 
 $('#historyDetailCloseBtn').addEventListener('click', closeHistoryDetail);
 historyDetailOverlay.addEventListener('click', (e) => {
@@ -6403,6 +6350,46 @@ async function openDiffViewer(fileIdx, blockIdx) {
   })();
   minimap.innerHTML = '';
   minimap.onclick = null;
+
+  // Large body guard for diff viewer
+  const totalDiffSize = (bodyA ? bodyA.length : 0) + (bodyB ? bodyB.length : 0);
+  const DIFF_BODY_THRESHOLD = 262144; // 256 KiB
+  if (totalDiffSize > DIFF_BODY_THRESHOLD) {
+    leftCode.innerHTML = '';
+    rightCode.innerHTML = '';
+
+    const warningHtml = `
+      <div class="body-truncated-info" style="padding:24px; text-align:center;">
+        <div style="margin-bottom:12px;">
+          <span style="font-size:24px;">📊</span>
+        </div>
+        <div style="margin-bottom:8px; color:var(--text-primary); font-weight:600;">
+          Large Response Diff
+        </div>
+        <div style="margin-bottom:16px; color:var(--text-muted); font-size:12px;">
+          Combined size: ${formatBytes(totalDiffSize)} (${formatBytes(bodyA ? bodyA.length : 0)} + ${formatBytes(bodyB ? bodyB.length : 0)})
+        </div>
+        <button class="btn btn-primary btn-sm diff-load-btn">🔍 Compute & Render Diff</button>
+        <div style="margin-top:8px; color:var(--text-muted); font-size:11px;">
+          This may take a moment for large responses
+        </div>
+      </div>`;
+
+    leftCode.innerHTML = warningHtml;
+    rightCode.innerHTML = '<div style="padding:24px; text-align:center; color:var(--text-muted);">Waiting for diff computation…</div>';
+
+    // Show the overlay immediately so user sees the warning
+    $('#diffViewerOverlay').classList.remove('hidden');
+
+    const loadBtn = leftCode.querySelector('.diff-load-btn');
+    await new Promise(resolve => {
+      loadBtn.addEventListener('click', () => {
+        leftCode.innerHTML = '<div class="body-loading"><span class="spinner-sm"></span> Computing diff…</div>';
+        rightCode.innerHTML = '<div class="body-loading"><span class="spinner-sm"></span> Computing diff…</div>';
+        resolve();
+      });
+    });
+  }
 
   // Use Rust compute_diff — no JS line/byte limit needed since Rust is fast
   const contentType = lang === 'json' ? 'json' : 'text';

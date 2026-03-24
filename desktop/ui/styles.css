@@ -340,9 +340,9 @@ html, body {
   -webkit-app-region: no-drag;
 }
 
-/* Memory cleanup button (matches live-capture-btn pattern) */
-.mem-wrapper { position: relative; }
-.mem-btn {
+/* Clear button (toolbar) */
+.clear-wrapper { position: relative; }
+.clear-btn {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -357,40 +357,50 @@ html, body {
   cursor: pointer;
   transition: all var(--transition);
 }
-.mem-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
+.clear-btn:hover {
+  border-color: var(--red);
+  color: var(--red);
 }
-.mem-btn.mem-warn {
-  border-color: var(--orange);
-  color: var(--orange);
-  animation: mem-pulse 2s ease-in-out infinite;
-}
-@keyframes mem-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
-}
-.mem-dropdown {
+.clear-dropdown {
   position: absolute; top: 100%; right: 0; z-index: 100;
-  width: 220px; background: var(--bg-secondary);
+  width: 260px; background: var(--bg-secondary);
   border: 1px solid var(--border); border-radius: var(--radius);
   box-shadow: 0 8px 24px var(--shadow-heavy);
-  padding: 12px;
+  padding: 8px;
   margin-top: 4px;
 }
-.mem-dd-header {
-  font-size: 12px; font-weight: 600; color: var(--text-primary);
-  margin-bottom: 6px;
+.clear-dd-header {
+  font-size: 11px; font-weight: 600; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 4px 8px 8px;
 }
-.mem-dd-value {
-  font-family: var(--font-mono); font-size: 20px; font-weight: 700;
-  color: var(--accent); margin-bottom: 6px;
+.clear-dd-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 8px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition);
 }
-.mem-dd-desc {
-  font-size: 11px; color: var(--text-muted); line-height: 1.4;
-  margin-bottom: 10px;
+.clear-dd-item:hover {
+  background: var(--bg-elevated);
 }
-.mem-dd-free { width: 100%; }
+.clear-dd-icon { font-size: 16px; flex-shrink: 0; margin-top: 2px; }
+.clear-dd-label { font-size: 12px; font-weight: 600; }
+.clear-dd-desc { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.clear-dd-mem {
+  display: flex; align-items: center; gap: 4px;
+  padding: 6px 8px; font-size: 11px; color: var(--text-muted);
+}
+.clear-dd-mem-icon { font-size: 13px; }
+.clear-dd-mem-val { font-family: var(--font-mono); font-weight: 600; color: var(--accent); }
+.clear-dd-divider { height: 1px; background: var(--border); margin: 4px 0; }
 
 /* ---------- Buttons ---------- */
 .btn {

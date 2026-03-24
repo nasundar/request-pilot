@@ -246,6 +246,77 @@ function buildResponseTabContent(entryA, entryB) {
     ${buildHeadersDiff(entryA.response_headers, entryB.response_headers)}
   </div>`;
 
+  // Large body guard — show deferred load button instead of rendering
+  const largeInfo = entryA._large_body_info || entryB._large_body_info;
+  if (largeInfo) {
+    const sizeA = (entryA._large_body_info || entryB._large_body_info).size || 0;
+    const sizeB = (entryB._large_body_info || entryA._large_body_info).size || 0;
+    const stored = (entryA._large_body_info || entryB._large_body_info).stored;
+
+    html += `<div class="compare-section" id="compareResponseBodySection">
+      <div class="compare-section-title">Response Body</div>
+      <div class="body-truncated-info" style="padding:24px; text-align:center;">
+        <div style="margin-bottom:12px;">
+          <span style="font-size:24px;">⚠</span>
+        </div>
+        <div style="margin-bottom:8px; color:var(--text-primary); font-weight:600;">
+          Large Response Bodies
+        </div>
+        <div style="margin-bottom:16px; color:var(--text-muted); font-size:12px;">
+          Response A: ${typeof formatBytes === 'function' ? formatBytes(sizeA) : sizeA + ' B'} · Response B: ${typeof formatBytes === 'function' ? formatBytes(sizeB) : sizeB + ' B'}
+        </div>
+        <button class="btn btn-primary btn-sm" id="compareLoadBodies">📄 Load & Compare Response Bodies</button>
+        <div style="margin-top:8px; color:var(--text-muted); font-size:11px;">
+          This may take a moment for large responses
+        </div>
+      </div>
+    </div>`;
+
+    // Wire up the load button after DOM insertion via setTimeout
+    setTimeout(() => {
+      const loadBtn = document.getElementById('compareLoadBodies');
+      if (!loadBtn) return;
+      loadBtn.addEventListener('click', () => {
+        loadBtn.textContent = '⏳ Rendering…';
+        loadBtn.disabled = true;
+        setTimeout(() => {
+          // Restore bodies and re-render the section
+          const bodyA = formatBodyForCompare(stored.a);
+          const bodyB = formatBodyForCompare(stored.b);
+          const section = document.getElementById('compareResponseBodySection');
+          if (!section) return;
+
+          let innerHtml = `<div class="compare-section-title">Response Body</div>
+            <div class="compare-grid">
+              <div class="compare-column">
+                <div class="compare-column-label">Response A</div>
+                <pre class="compare-body-pre">${escapeHtml(bodyA)}</pre>
+              </div>
+              <div class="compare-column">
+                <div class="compare-column-label">Response B</div>
+                <pre class="compare-body-pre">${escapeHtml(bodyB)}</pre>
+              </div>
+            </div>`;
+
+          // JSON Diff for response body
+          if (stored.a && stored.b) {
+            const jsonDiff = buildJsonDiff(stored.a, stored.b);
+            if (jsonDiff) {
+              innerHtml += `<div class="compare-section" style="margin-top:16px;">
+                <div class="compare-section-title">Response Body — JSON Diff</div>
+                ${jsonDiff}
+              </div>`;
+            }
+          }
+
+          section.innerHTML = innerHtml;
+        }, 50);
+      });
+    }, 0);
+
+    return html;
+  }
+
   // Response Body
   const bodyA = formatBodyForCompare(entryA.response_body);
   const bodyB = formatBodyForCompare(entryB.response_body);
