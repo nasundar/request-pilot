@@ -2160,51 +2160,8 @@ function renderAssertions(fileIdx, blockIdx) {
 
   let html = '';
 
-  // Compare block: render per-step + diff
+  // Compare block: render summary first, then comparison assertions, then per-step details
   if (block.compare && block.steps && block.steps.length > 0) {
-    // Per-step results
-    block.steps.forEach((step, si) => {
-      const sr = br?.step_results?.[si];
-      const stepStatus = sr ? (sr.error ? 'error' : 'done') : 'pending';
-      html += `<div class="assertion-group compare-step-group">
-        <div class="assertion-group-header">Step: ${escapeHtml(step.name)} <span class="step-badge ${stepStatus}">${stepStatus}</span></div>`;
-
-      // Step assertions
-      if (step.assertions && step.assertions.length > 0) {
-        step.assertions.forEach((assertion, i) => {
-          const assertionText = `${assertion.left} ${assertion.operator} ${assertion.right}`;
-          const ar = sr?.assertion_results?.[i];
-          const passed = ar ? ar.passed : null;
-          const statusClass = passed === true ? 'passed' : passed === false ? 'failed' : '';
-          const icon = passed === true ? '\u2713' : passed === false ? '\u2717' : '\u25CB';
-          let detail = '';
-          if (ar && !ar.passed && ar.actual != null) {
-            detail = `<span class="assert-detail">got: ${escapeHtml(ar.actual)}</span>`;
-          }
-          html += `<div class="assertion-row ${statusClass}"><span class="assert-icon">${icon}</span><span class="assert-text">${escapeHtml(assertionText)}</span>${detail}</div>`;
-        });
-      }
-
-      // Step extracts
-      if (step.extracts && step.extracts.length > 0) {
-        step.extracts.forEach((extract, i) => {
-          const er = sr?.extract_results?.[i];
-          const success = er ? er.success : null;
-          const stateClass = success === true ? 'extract-success' : success === false ? 'extract-failed' : '';
-          const icon = success === true ? '\u2713' : success === false ? '\u2717' : '\u26A1';
-          const val = er?.value ?? '\u2014';
-          html += `<div class="extract-row ${stateClass}"><span class="extract-icon">${icon}</span><span class="extract-var">${escapeHtml(extract.variable_name)}</span><span class="var-sep">=</span><span class="extract-val">${escapeHtml(val)}</span></div>`;
-        });
-      }
-
-      // Step error
-      if (sr?.error) {
-        html += `<div class="assertion-row failed"><span class="assert-icon">\u2717</span><span class="assert-text">${escapeHtml(sr.error)}</span></div>`;
-      }
-
-      html += '</div>';
-    });
-
     // Diff summary
     const diff = br?.diff_result;
     if (diff) {
@@ -2273,6 +2230,49 @@ function renderAssertions(fileIdx, blockIdx) {
       });
       html += '</div>';
     }
+
+    // Per-step results
+    block.steps.forEach((step, si) => {
+      const sr = br?.step_results?.[si];
+      const stepStatus = sr ? (sr.error ? 'error' : 'done') : 'pending';
+      html += `<div class="assertion-group compare-step-group">
+        <div class="assertion-group-header">Step: ${escapeHtml(step.name)} <span class="step-badge ${stepStatus}">${stepStatus}</span></div>`;
+
+      // Step assertions
+      if (step.assertions && step.assertions.length > 0) {
+        step.assertions.forEach((assertion, i) => {
+          const assertionText = `${assertion.left} ${assertion.operator} ${assertion.right}`;
+          const ar = sr?.assertion_results?.[i];
+          const passed = ar ? ar.passed : null;
+          const statusClass = passed === true ? 'passed' : passed === false ? 'failed' : '';
+          const icon = passed === true ? '\u2713' : passed === false ? '\u2717' : '\u25CB';
+          let detail = '';
+          if (ar && !ar.passed && ar.actual != null) {
+            detail = `<span class="assert-detail">got: ${escapeHtml(ar.actual)}</span>`;
+          }
+          html += `<div class="assertion-row ${statusClass}"><span class="assert-icon">${icon}</span><span class="assert-text">${escapeHtml(assertionText)}</span>${detail}</div>`;
+        });
+      }
+
+      // Step extracts
+      if (step.extracts && step.extracts.length > 0) {
+        step.extracts.forEach((extract, i) => {
+          const er = sr?.extract_results?.[i];
+          const success = er ? er.success : null;
+          const stateClass = success === true ? 'extract-success' : success === false ? 'extract-failed' : '';
+          const icon = success === true ? '\u2713' : success === false ? '\u2717' : '\u26A1';
+          const val = er?.value ?? '\u2014';
+          html += `<div class="extract-row ${stateClass}"><span class="extract-icon">${icon}</span><span class="extract-var">${escapeHtml(extract.variable_name)}</span><span class="var-sep">=</span><span class="extract-val">${escapeHtml(val)}</span></div>`;
+        });
+      }
+
+      // Step error
+      if (sr?.error) {
+        html += `<div class="assertion-row failed"><span class="assert-icon">\u2717</span><span class="assert-text">${escapeHtml(sr.error)}</span></div>`;
+      }
+
+      html += '</div>';
+    });
 
     // Block-level error
     if (br?.error) {
@@ -5852,13 +5852,22 @@ function openDiffViewer(fileIdx, blockIdx) {
 
   const leftCode = $('#diffLeftBody').querySelector('code');
   const rightCode = $('#diffRightBody').querySelector('code');
+  const minimap = document.getElementById('diffMinimap') || (() => {
+    const m = document.createElement('div');
+    m.id = 'diffMinimap';
+    m.className = 'diff-minimap';
+    document.querySelector('.diff-side-by-side').appendChild(m);
+    return m;
+  })();
+  minimap.innerHTML = '';
+  minimap.onclick = null;
 
   // Performance guard: skip line diff for very large responses
   const linesA = formattedA.split('\n');
   const linesB = formattedB.split('\n');
   if (linesA.length > 5000 || linesB.length > 5000) {
-    leftCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)">Response too large for line diff (${linesA.length} / ${linesB.length} lines). Showing raw.</div>` + escapeHtml(formattedA);
-    rightCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)">...</div>` + escapeHtml(formattedB);
+    leftCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">Response too large for line diff (${linesA.length} / ${linesB.length} lines). Showing raw.</span></div>` + escapeHtml(formattedA);
+    rightCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">...</span></div>` + escapeHtml(formattedB);
   } else {
     // Compute line diff
     const diffOps = computeLineDiff(formattedA, formattedB);
@@ -5872,31 +5881,48 @@ function openDiffViewer(fileIdx, blockIdx) {
         case 'same':
           leftLineNum++; rightLineNum++;
           const sameLine = highlightFn(escapeHtml(op.left));
-          leftHtml += `<div class="diff-line diff-same"><span class="diff-ln">${leftLineNum}</span>${sameLine}</div>`;
-          rightHtml += `<div class="diff-line diff-same"><span class="diff-ln">${rightLineNum}</span>${sameLine}</div>`;
+          leftHtml += `<div class="diff-line diff-same"><span class="diff-ln">${leftLineNum}</span><span class="diff-text">${sameLine}</span></div>`;
+          rightHtml += `<div class="diff-line diff-same"><span class="diff-ln">${rightLineNum}</span><span class="diff-text">${sameLine}</span></div>`;
           break;
         case 'remove':
           leftLineNum++;
-          leftHtml += `<div class="diff-line diff-removed"><span class="diff-ln">${leftLineNum}</span>${highlightFn(escapeHtml(op.left))}</div>`;
-          rightHtml += `<div class="diff-line diff-empty"><span class="diff-ln"></span></div>`;
+          leftHtml += `<div class="diff-line diff-removed"><span class="diff-ln">${leftLineNum}</span><span class="diff-text">${highlightFn(escapeHtml(op.left))}</span></div>`;
+          rightHtml += `<div class="diff-line diff-empty"><span class="diff-ln"></span><span class="diff-text"></span></div>`;
           break;
         case 'add':
           rightLineNum++;
-          leftHtml += `<div class="diff-line diff-empty"><span class="diff-ln"></span></div>`;
-          rightHtml += `<div class="diff-line diff-added"><span class="diff-ln">${rightLineNum}</span>${highlightFn(escapeHtml(op.right))}</div>`;
+          leftHtml += `<div class="diff-line diff-empty"><span class="diff-ln"></span><span class="diff-text"></span></div>`;
+          rightHtml += `<div class="diff-line diff-added"><span class="diff-ln">${rightLineNum}</span><span class="diff-text">${highlightFn(escapeHtml(op.right))}</span></div>`;
           break;
         case 'change':
           leftLineNum++; rightLineNum++;
           const leftCharHtml = charDiffHighlight(op.left, op.right, 'left', highlightFn);
           const rightCharHtml = charDiffHighlight(op.left, op.right, 'right', highlightFn);
-          leftHtml += `<div class="diff-line diff-changed"><span class="diff-ln">${leftLineNum}</span>${leftCharHtml}</div>`;
-          rightHtml += `<div class="diff-line diff-changed"><span class="diff-ln">${rightLineNum}</span>${rightCharHtml}</div>`;
+          leftHtml += `<div class="diff-line diff-changed"><span class="diff-ln">${leftLineNum}</span><span class="diff-text">${leftCharHtml}</span></div>`;
+          rightHtml += `<div class="diff-line diff-changed"><span class="diff-ln">${rightLineNum}</span><span class="diff-text">${rightCharHtml}</span></div>`;
           break;
       }
     });
 
     leftCode.innerHTML = leftHtml;
     rightCode.innerHTML = rightHtml;
+
+    const totalLines = diffOps.length || 1;
+    let minimapHtml = '';
+    diffOps.forEach((op, idx) => {
+      if (op.type === 'same') return;
+      const pct = (idx / totalLines) * 100;
+      const cls = op.type === 'remove' ? 'mm-removed' : op.type === 'add' ? 'mm-added' : 'mm-changed';
+      minimapHtml += `<div class="mm-mark ${cls}" style="top:${pct}%" data-line-idx="${idx}"></div>`;
+    });
+    minimap.innerHTML = minimapHtml;
+    minimap.onclick = (e) => {
+      const mark = e.target.closest('.mm-mark');
+      if (!mark) return;
+      const lineIdx = parseInt(mark.dataset.lineIdx, 10);
+      const lineEl = leftCode.children[lineIdx];
+      if (lineEl) lineEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    };
   }
 
   renderChangesOnly(diff);
