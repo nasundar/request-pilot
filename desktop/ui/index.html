@@ -35,7 +35,15 @@
           <button class="btn btn-ghost btn-xs" id="extraHeadersAddBtn">+ Add Header</button>
         </div>
       </div>
-      <button class="btn-icon-sm mem-btn" id="memPill" title="UI memory — click to free">🧹 <span class="mem-badge" id="memValue">0 KB</span></button>
+      <div class="mem-wrapper">
+        <button class="icon-btn mem-btn" id="memPill" title="Memory cleanup">🧹</button>
+        <div class="mem-dropdown" id="memDropdown" style="display:none">
+          <div class="mem-dd-header">Memory Usage</div>
+          <div class="mem-dd-value" id="memValue">0 KB</div>
+          <div class="mem-dd-desc">Estimated UI memory held by loaded responses, logs, and cached data.</div>
+          <button class="btn btn-sm btn-primary mem-dd-free" id="memFreeAction">🧹 Free Memory</button>
+        </div>
+      </div>
       <div class="live-capture-wrapper">
         <button class="icon-btn live-capture-btn" id="liveCaptureToggle" title="Live Capture from Extension">
           <span class="live-dot" id="liveDot"></span>

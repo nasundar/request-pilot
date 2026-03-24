@@ -340,31 +340,57 @@ html, body {
   -webkit-app-region: no-drag;
 }
 
-/* Memory button */
+/* Memory cleanup button (matches live-capture-btn pattern) */
+.mem-wrapper { position: relative; }
 .mem-btn {
   position: relative;
-  font-size: 14px;
-  width: auto !important;
-  gap: 3px;
-  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  font-size: 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition);
 }
-.mem-badge {
-  font-family: var(--font-mono);
-  font-size: 9px;
-  font-weight: 600;
-  color: var(--text-muted);
+.mem-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 .mem-btn.mem-warn {
+  border-color: var(--orange);
   color: var(--orange);
   animation: mem-pulse 2s ease-in-out infinite;
-}
-.mem-btn.mem-warn .mem-badge {
-  color: var(--orange);
 }
 @keyframes mem-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.7; }
 }
+.mem-dropdown {
+  position: absolute; top: 100%; right: 0; z-index: 100;
+  width: 220px; background: var(--bg-secondary);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 8px 24px var(--shadow-heavy);
+  padding: 12px;
+  margin-top: 4px;
+}
+.mem-dd-header {
+  font-size: 12px; font-weight: 600; color: var(--text-primary);
+  margin-bottom: 6px;
+}
+.mem-dd-value {
+  font-family: var(--font-mono); font-size: 20px; font-weight: 700;
+  color: var(--accent); margin-bottom: 6px;
+}
+.mem-dd-desc {
+  font-size: 11px; color: var(--text-muted); line-height: 1.4;
+  margin-bottom: 10px;
+}
+.mem-dd-free { width: 100%; }
 
 /* ---------- Buttons ---------- */
 .btn {

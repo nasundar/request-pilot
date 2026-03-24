@@ -5928,15 +5928,15 @@ function estimateMemoryUsage() {
 function updateMemIndicator() {
   const bytes = estimateMemoryUsage();
   const el = $('#memValue');
-  const pill = $('#memPill');
-  if (!el || !pill) return;
+  const btn = $('#memPill');
+  if (!el || !btn) return;
   el.textContent = formatBytes(bytes);
   if (bytes > MEM_WARN_THRESHOLD) {
-    pill.classList.add('mem-warn');
-    pill.title = `UI memory high (${formatBytes(bytes)}) — click to free`;
+    btn.classList.add('mem-warn');
+    btn.title = `UI memory high (${formatBytes(bytes)})`;
   } else {
-    pill.classList.remove('mem-warn');
-    pill.title = `UI memory (${formatBytes(bytes)}) — click to free`;
+    btn.classList.remove('mem-warn');
+    btn.title = `Memory cleanup (${formatBytes(bytes)})`;
   }
 }
 
@@ -5964,7 +5964,23 @@ function freeMemory() {
   rpLog('info', 'Memory freed', { files: freed });
 }
 
-$('#memPill').addEventListener('click', freeMemory);
+// Memory dropdown toggle on hover
+{
+  const memWrapper = document.querySelector('.mem-wrapper');
+  const memDropdown = $('#memDropdown');
+  let memHideTimer = null;
+  if (memWrapper && memDropdown) {
+    memWrapper.addEventListener('mouseenter', () => {
+      clearTimeout(memHideTimer);
+      updateMemIndicator();
+      memDropdown.style.display = 'block';
+    });
+    memWrapper.addEventListener('mouseleave', () => {
+      memHideTimer = setTimeout(() => { memDropdown.style.display = 'none'; }, 200);
+    });
+  }
+}
+$('#memFreeAction').addEventListener('click', freeMemory);
 
 // Update memory indicator periodically and on key actions
 setInterval(updateMemIndicator, 10000); // every 10s
