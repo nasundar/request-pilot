@@ -1554,4 +1554,128 @@ mod tests {
             result.error
         );
     }
+
+    #[tokio::test]
+    async fn compare_block_empty_steps_returns_error() {
+        use crate::http_parser::DiffDirective;
+        use crate::variables::VariableStore;
+
+        // A compare block with zero steps but a diff directive — can't diff nothing
+        let block = TestBlock {
+            block_type: "test".to_string(),
+            name: "empty_steps".to_string(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: vec![],
+            request: ParsedRequest {
+                name: None,
+                method: String::new(),
+                url: String::new(),
+                headers: Vec::new(),
+                body: None,
+            },
+            assertions: Vec::new(),
+            extracts: Vec::new(),
+            compare: true,
+            steps: vec![], // no steps
+            diff: Some(DiffDirective {
+                step_a: "a".to_string(),
+                step_b: "b".to_string(),
+            }),
+            errors: vec![
+                "@diff references unknown step 'a'".to_string(),
+                "@diff references unknown step 'b'".to_string(),
+            ],
+        };
+
+        let var_store = VariableStore::new();
+        let result = execute_compare_block(block, var_store, vec![]).await;
+
+        assert_eq!(result.status, "error", "empty steps with diff should be error");
+        assert!(result.step_results.is_empty(), "no steps should have been executed");
+        assert!(result.error.is_some(), "error message should be present");
+    }
+
+    #[tokio::test]
+    async fn compare_block_diff_missing_step_response_reports_step_names() {
+        use crate::http_parser::{CompareStep, DiffDirective};
+        use crate::variables::VariableStore;
+
+        // Both steps will fail (connection refused), producing no responses.
+        // The diff should report which specific steps are missing.
+        let block = TestBlock {
+            block_type: "test".to_string(),
+            name: "diff_missing_both".to_string(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: vec![],
+            request: ParsedRequest {
+                name: None,
+                method: String::new(),
+                url: String::new(),
+                headers: Vec::new(),
+                body: None,
+            },
+            assertions: Vec::new(),
+            extracts: Vec::new(),
+            compare: true,
+            steps: vec![
+                CompareStep {
+                    name: "alpha".to_string(),
+                    request: ParsedRequest {
+                        name: None,
+                        method: "GET".to_string(),
+                        url: "http://127.0.0.1:0/alpha".to_string(),
+                        headers: Vec::new(),
+                        body: None,
+                    },
+                    assertions: Vec::new(),
+                    extracts: Vec::new(),
+                },
+                CompareStep {
+                    name: "beta".to_string(),
+                    request: ParsedRequest {
+                        name: None,
+                        method: "GET".to_string(),
+                        url: "http://127.0.0.1:0/beta".to_string(),
+                        headers: Vec::new(),
+                        body: None,
+                    },
+                    assertions: Vec::new(),
+                    extracts: Vec::new(),
+                },
+            ],
+            diff: Some(DiffDirective {
+                step_a: "alpha".to_string(),
+                step_b: "beta".to_string(),
+            }),
+            errors: Vec::new(),
+        };
+
+        let var_store = VariableStore::new();
+        let result = execute_compare_block(block, var_store, vec![]).await;
+
+        assert_eq!(result.status, "error");
+        let err_msg = result.error.as_ref().unwrap();
+        assert!(
+            err_msg.contains("alpha"),
+            "error should mention missing step 'alpha', got: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("beta"),
+            "error should mention missing step 'beta', got: {}",
+            err_msg
+        );
+        // Steps were attempted even though they failed
+        assert_eq!(result.step_results.len(), 2, "both steps should have been attempted");
+        assert!(result.step_results[0].error.is_some(), "alpha step should have an error");
+        assert!(result.step_results[1].error.is_some(), "beta step should have an error");
+    }
 }

@@ -736,4 +736,89 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|e| e.source == "extension-live"));
     }
+
+    // --- compare_step tests ---
+
+    fn make_entry_with_compare_step(
+        seq: u64,
+        compare_step: Option<&str>,
+    ) -> HistoryEntry {
+        HistoryEntry {
+            seq,
+            id: format!("id-{}", seq),
+            run_id: Some("run-cmp".to_string()),
+            source: "test-run".to_string(),
+            file_name: Some("compare.http".to_string()),
+            group: None,
+            block_name: Some("Compare APIs".to_string()),
+            compare_step: compare_step.map(|s| s.to_string()),
+            method: "GET".to_string(),
+            url: format!("https://api.test.com/v{}", seq),
+            request_headers: Vec::new(),
+            request_body: None,
+            status: 200,
+            response_headers: Vec::new(),
+            response_body: Some(format!("{{\"step\":\"{}\"}}", seq)),
+            response_time_ms: 50,
+            response_size_bytes: 20,
+            timestamp: "2024-06-15T12:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn filter_by_compare_step() {
+        let mut store = HistoryStore::new();
+        store.add(make_entry_with_compare_step(1, Some("baseline")));
+        store.add(make_entry_with_compare_step(2, Some("candidate")));
+        store.add(make_entry_with_compare_step(3, Some("baseline")));
+        store.add(make_entry_with_compare_step(4, None)); // no compare_step
+
+        let f = HistoryFilter {
+            compare_step: Some("baseline".to_string()),
+            ..Default::default()
+        };
+        let results = store.filter(&f);
+        assert_eq!(results.len(), 2, "should match exactly the two baseline entries");
+        assert!(
+            results.iter().all(|e| e.compare_step.as_deref() == Some("baseline")),
+            "all results should have compare_step='baseline'"
+        );
+    }
+
+    #[test]
+    fn compare_step_serde_roundtrip() {
+        let entry = make_entry_with_compare_step(1, Some("baseline"));
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: HistoryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.compare_step.as_deref(),
+            Some("baseline"),
+            "compare_step should survive serialization roundtrip"
+        );
+    }
+
+    #[test]
+    fn compare_step_none_excluded_from_json() {
+        let entry = make_entry_with_compare_step(1, None);
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(
+            !json.contains("compare_step"),
+            "compare_step=None should be omitted from JSON via skip_serializing_if, got: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn filter_compare_step_no_match() {
+        let mut store = HistoryStore::new();
+        store.add(make_entry_with_compare_step(1, Some("baseline")));
+        store.add(make_entry_with_compare_step(2, Some("candidate")));
+
+        let f = HistoryFilter {
+            compare_step: Some("nonexistent_step".to_string()),
+            ..Default::default()
+        };
+        let results = store.filter(&f);
+        assert!(results.is_empty(), "no entries should match a non-existent compare_step");
+    }
 }

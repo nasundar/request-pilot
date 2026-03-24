@@ -919,4 +919,145 @@ mod tests {
         let result = evaluate_with_diff(&assertion, &diff);
         assert!(result.passed);
     }
+
+    // ── Diff engine edge cases ──────────────────────
+
+    #[test]
+    fn diff_empty_json_objects() {
+        let result = compute_diff("{}", "{}");
+        assert!(result.match_exact, "two empty objects should be exact match");
+        assert!(result.is_json);
+        assert_eq!(result.similarity, 1.0);
+        assert_eq!(result.added_count, 0);
+        assert_eq!(result.removed_count, 0);
+        assert_eq!(result.changed_count, 0);
+    }
+
+    #[test]
+    fn diff_empty_vs_nonempty() {
+        let result = compute_diff("{}", r#"{"a":1}"#);
+        assert!(!result.match_exact);
+        assert!(result.is_json);
+        // Empty object has a sentinel leaf ("", "{}"), so it counts as removed
+        // while "a" counts as added — net result: 1 added + 1 removed
+        assert_eq!(result.added_count, 1, "one field was added");
+        assert_eq!(result.removed_count, 1, "empty-object sentinel was removed");
+        assert_eq!(result.changed_count, 0);
+        assert!(result.added_paths.contains(&"a".to_string()));
+    }
+
+    #[test]
+    fn diff_nested_array_diff() {
+        let a = r#"{"items":[1,2,3]}"#;
+        let b = r#"{"items":[1,2]}"#;
+        let result = compute_diff(a, b);
+        assert!(!result.match_exact);
+        assert!(result.is_json);
+        // items[2] exists in a but not b → removed
+        assert!(result.removed_count >= 1, "shorter array should have removed paths");
+    }
+
+    #[test]
+    fn diff_deeply_nested_paths() {
+        let a = r#"{"l1":{"l2":{"l3":{"l4":{"l5":"deep_a"}}}}}"#;
+        let b = r#"{"l1":{"l2":{"l3":{"l4":{"l5":"deep_b"}}}}}"#;
+        let result = compute_diff(a, b);
+        assert!(!result.match_exact);
+        assert_eq!(result.changed_count, 1);
+        assert_eq!(result.changed_paths[0].path, "l1.l2.l3.l4.l5");
+        assert_eq!(result.changed_paths[0].left, "deep_a");
+        assert_eq!(result.changed_paths[0].right, "deep_b");
+    }
+
+    #[test]
+    fn diff_non_json_text() {
+        let a = "plain text response A";
+        let b = "plain text response B";
+        let result = compute_diff(a, b);
+        assert!(!result.match_exact);
+        assert!(!result.is_json, "non-JSON should have is_json=false");
+        assert!(result.similarity > 0.0, "similar text should have positive similarity");
+        assert!(result.similarity < 1.0, "different text should have similarity < 1");
+        // Text diff should not have path-level info
+        assert!(result.added_paths.is_empty());
+        assert!(result.removed_paths.is_empty());
+        assert!(result.changed_paths.is_empty());
+    }
+
+    #[test]
+    fn diff_mixed_types() {
+        let a = r#"{"val":"hello"}"#;
+        let b = r#"{"val":42}"#;
+        let result = compute_diff(a, b);
+        assert!(!result.match_exact);
+        assert_eq!(result.changed_count, 1, "same key with different type should be a change");
+        assert_eq!(result.changed_paths[0].path, "val");
+        assert_eq!(result.changed_paths[0].left, "hello");
+        assert_eq!(result.changed_paths[0].right, "42");
+    }
+
+    #[test]
+    fn diff_null_values() {
+        // null vs value
+        let a = r#"{"x":null}"#;
+        let b = r#"{"x":"present"}"#;
+        let result = compute_diff(a, b);
+        assert!(!result.match_exact);
+        assert_eq!(result.changed_count, 1);
+        assert_eq!(result.changed_paths[0].path, "x");
+
+        // value vs null
+        let result2 = compute_diff(b, a);
+        assert!(!result2.match_exact);
+        assert_eq!(result2.changed_count, 1);
+    }
+
+    #[test]
+    fn resolve_diff_value_all_paths() {
+        let diff = DiffResult {
+            match_exact: false,
+            similarity: 0.8765,
+            is_json: true,
+            added_count: 2,
+            removed_count: 1,
+            changed_count: 1,
+            added_paths: vec!["new_a".into(), "new_b".into()],
+            removed_paths: vec!["old_c".into()],
+            changed_paths: vec![
+                ChangedField {
+                    path: "name".into(),
+                    left: "Alice".into(),
+                    right: "Bob".into(),
+                },
+            ],
+        };
+
+        assert_eq!(resolve_diff_value("$diff.match", &diff), Some("false".to_string()));
+        assert_eq!(resolve_diff_value("$diff.similarity", &diff), Some("0.8765".to_string()));
+        assert_eq!(resolve_diff_value("$diff.is_json", &diff), Some("true".to_string()));
+        assert_eq!(resolve_diff_value("$diff.added_count", &diff), Some("2".to_string()));
+        assert_eq!(resolve_diff_value("$diff.removed_count", &diff), Some("1".to_string()));
+        assert_eq!(resolve_diff_value("$diff.changed_count", &diff), Some("1".to_string()));
+        assert_eq!(resolve_diff_value("$diff.added_paths.length", &diff), Some("2".to_string()));
+        assert_eq!(resolve_diff_value("$diff.removed_paths.length", &diff), Some("1".to_string()));
+        assert_eq!(resolve_diff_value("$diff.changed_paths.length", &diff), Some("1".to_string()));
+        assert_eq!(resolve_diff_value("$diff.changed_paths[0].path", &diff), Some("name".to_string()));
+        assert_eq!(resolve_diff_value("$diff.changed_paths[0].left", &diff), Some("Alice".to_string()));
+        assert_eq!(resolve_diff_value("$diff.changed_paths[0].right", &diff), Some("Bob".to_string()));
+
+        // Verify JSON array serialization for paths
+        let added_json = resolve_diff_value("$diff.added_paths", &diff).unwrap();
+        assert!(added_json.contains("new_a"));
+        assert!(added_json.contains("new_b"));
+    }
+
+    #[test]
+    fn resolve_diff_value_invalid_path() {
+        let diff = DiffResult::default();
+        assert_eq!(resolve_diff_value("$diff.nonexistent_field", &diff), None);
+        assert_eq!(resolve_diff_value("$something.else", &diff), None);
+        assert_eq!(resolve_diff_value("no_prefix", &diff), None);
+        assert_eq!(resolve_diff_value("$diff.changed_paths[99].path", &diff), None);
+        assert_eq!(resolve_diff_value("$diff.changed_paths[0].unknown", &diff), None);
+    }
 }

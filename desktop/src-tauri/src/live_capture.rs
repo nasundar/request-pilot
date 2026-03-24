@@ -459,4 +459,25 @@ mod tests {
             assert!(json.contains(&format!(r#""mode":"{}""#, mode)));
         }
     }
+
+    #[test]
+    fn invalid_addr_returns_parse_error() {
+        // Verify that an invalid SocketAddr string is properly rejected
+        // by the same parse logic used in start_server
+        let bad_addr = "not_a_valid_address:xyz";
+        let result = bad_addr.parse::<std::net::SocketAddr>();
+        assert!(
+            result.is_err(),
+            "invalid address should fail to parse as SocketAddr"
+        );
+
+        // Also verify a valid address parses correctly
+        let good_addr = format!("127.0.0.1:{}", LIVE_CAPTURE_PORT);
+        let result = good_addr.parse::<std::net::SocketAddr>();
+        assert!(
+            result.is_ok(),
+            "valid address should parse successfully: {}",
+            good_addr
+        );
+    }
 }

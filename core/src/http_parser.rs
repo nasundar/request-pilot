@@ -2104,4 +2104,193 @@ GET https://example.com/v2
         assert_eq!(suite.blocks.len(), 1);
         assert!(suite.blocks[0].errors.is_empty(), "valid block should have no errors");
     }
+
+    // ── Compare block edge cases ────────────────────────────────────
+
+    #[test]
+    fn compare_empty_steps() {
+        // @compare with no @step directives — block still parses, steps is empty
+        let input = "\
+### @test Empty compare
+# @compare
+GET https://example.com/api
+# @assert status == 200";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.blocks.len(), 1);
+        let blk = &suite.blocks[0];
+        assert!(blk.compare);
+        assert!(blk.steps.is_empty(), "no @step directives means empty steps vec");
+        // The block-level request should still be parsed normally
+        assert_eq!(blk.request.method, "GET");
+    }
+
+    #[test]
+    fn compare_single_step() {
+        let input = "\
+### @test Single step compare
+# @compare
+# @step only
+GET https://example.com/v1
+# @assert status == 200";
+        let suite = parse_test_suite(input);
+        let blk = &suite.blocks[0];
+        assert!(blk.compare);
+        assert_eq!(blk.steps.len(), 1);
+        assert_eq!(blk.steps[0].name, "only");
+        assert!(blk.diff.is_none(), "no @diff directive for a single step");
+    }
+
+    #[test]
+    fn compare_step_name_with_spaces() {
+        let input = "\
+### @test Spaced steps
+# @compare
+# @step production api
+GET https://prod.example.com/users
+# @step staging api
+GET https://staging.example.com/users
+# @diff production api staging api";
+        let suite = parse_test_suite(input);
+        let blk = &suite.blocks[0];
+        assert_eq!(blk.steps.len(), 2);
+        assert_eq!(blk.steps[0].name, "production api");
+        assert_eq!(blk.steps[1].name, "staging api");
+        let diff = blk.diff.as_ref().unwrap();
+        assert_eq!(diff.step_a, "production");
+        assert_eq!(diff.step_b, "api");
+    }
+
+    #[test]
+    fn compare_diff_references_same_step() {
+        let input = "\
+### @test Self diff
+# @compare
+# @step alpha
+GET https://example.com/v1
+# @diff alpha alpha";
+        let suite = parse_test_suite(input);
+        let blk = &suite.blocks[0];
+        assert!(blk.diff.is_some());
+        let diff = blk.diff.as_ref().unwrap();
+        assert_eq!(diff.step_a, "alpha");
+        assert_eq!(diff.step_b, "alpha");
+        assert!(blk.errors.is_empty(), "self-diff is syntactically valid");
+    }
+
+    #[test]
+    fn compare_step_with_body() {
+        let input = r#"
+### @test POST steps
+# @compare
+# @step first
+POST https://api.example.com/query
+Content-Type: application/json
+
+{"query": "test", "limit": 10}
+
+# @assert status == 200
+
+# @step second
+POST https://api.example.com/query-v2
+Content-Type: application/json
+
+{"query": "test", "limit": 10}
+
+# @assert status == 200
+
+# @diff first second
+"#;
+        let suite = parse_test_suite(input);
+        let blk = &suite.blocks[0];
+        assert_eq!(blk.steps.len(), 2);
+        assert_eq!(blk.steps[0].request.method, "POST");
+        assert!(
+            blk.steps[0].request.body.is_some(),
+            "first step should have a body"
+        );
+        assert!(
+            blk.steps[0].request.body.as_ref().unwrap().contains("\"query\""),
+            "first step body should contain query field"
+        );
+        assert!(
+            blk.steps[1].request.body.is_some(),
+            "second step should have a body"
+        );
+    }
+
+    #[test]
+    fn compare_assertions_mixed_with_diff() {
+        let input = "\
+### @test Mixed assertions
+# @compare
+# @step baseline
+GET https://api.example.com/v1
+# @assert status == 200
+# @step candidate
+GET https://api.example.com/v2
+# @assert status == 200
+# @assert $.name != null
+# @diff baseline candidate
+# @assert $diff.match == true
+# @assert $diff.changed_count == 0";
+        let suite = parse_test_suite(input);
+        let blk = &suite.blocks[0];
+        // Step-level assertions (non $diff.*)
+        assert_eq!(blk.steps[0].assertions.len(), 1, "baseline has 1 step assertion");
+        assert_eq!(blk.steps[1].assertions.len(), 2, "candidate has 2 step assertions");
+        // Block-level assertions ($diff.*)
+        assert_eq!(blk.assertions.len(), 2, "two block-level diff assertions");
+        assert!(blk.assertions[0].left.starts_with("$diff."));
+        assert!(blk.assertions[1].left.starts_with("$diff."));
+    }
+
+    #[test]
+    fn generate_roundtrip_compare_block() {
+        let input = r#"
+### @test Roundtrip Test
+# @description Verifies parse-generate-parse identity
+# @compare
+# @step baseline
+GET https://api.example.com/v1
+Authorization: Bearer {{token}}
+
+# @extract v1_id = $.id
+# @assert status == 200
+
+# @step candidate
+POST https://api.example.com/v2
+Content-Type: application/json
+
+{"query": "test"}
+
+# @extract v2_id = $.id
+# @assert status == 201
+
+# @diff baseline candidate
+# @assert $diff.match == true
+# @assert $diff.changed_count == 0
+"#;
+        let suite1 = parse_test_suite(input);
+        let generated = generate_http_content(&suite1);
+        let suite2 = parse_test_suite(&generated);
+
+        assert_eq!(suite1.blocks.len(), suite2.blocks.len());
+        let b1 = &suite1.blocks[0];
+        let b2 = &suite2.blocks[0];
+        assert_eq!(b1.compare, b2.compare);
+        assert_eq!(b1.steps.len(), b2.steps.len());
+        for (s1, s2) in b1.steps.iter().zip(b2.steps.iter()) {
+            assert_eq!(s1.name, s2.name, "step names must match");
+            assert_eq!(s1.request.method, s2.request.method, "step methods must match");
+            assert_eq!(s1.request.url, s2.request.url, "step URLs must match");
+            assert_eq!(s1.assertions.len(), s2.assertions.len(), "step assertion counts must match for {}", s1.name);
+            assert_eq!(s1.extracts.len(), s2.extracts.len(), "step extract counts must match for {}", s1.name);
+        }
+        assert_eq!(b1.assertions.len(), b2.assertions.len(), "block-level assertion count must match");
+        assert_eq!(b1.diff.is_some(), b2.diff.is_some(), "diff directive presence must match");
+        if let (Some(d1), Some(d2)) = (&b1.diff, &b2.diff) {
+            assert_eq!(d1.step_a, d2.step_a);
+            assert_eq!(d1.step_b, d2.step_b);
+        }
+    }
 }

@@ -650,3 +650,348 @@ describe('live capture history entry', () => {
     expect(entry.response_headers).toEqual([['X-R', '3']]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 7. Body syntax highlighting — detectBodyLang
+// ---------------------------------------------------------------------------
+describe('detectBodyLang', () => {
+  // Inline the function to avoid brace-counting issues in extractFunction
+  // (the source contains '{' and '[' in string literals which confuse the extractor)
+  function detectBodyLang(text) {
+    const t = text.trim();
+    if (!t) return 'text';
+    if (t.startsWith('{') || t.startsWith('[')) return 'json';
+    if (t.startsWith('<') && t.includes('>')) return 'xml';
+    if (/\b(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|FROM|WHERE|JOIN)\b/i.test(t)) return 'sql';
+    if (/[{}[\]()]/.test(t) && /\b(rate|sum|avg|count|histogram_quantile|topk|bottomk|by|without|on|group_left|group_right|offset)\b/i.test(t)) return 'promql';
+    return 'text';
+  }
+
+  test('detects JSON object', () => {
+    expect(detectBodyLang('{"key": "value"}')).toBe('json');
+  });
+
+  test('detects JSON array', () => {
+    expect(detectBodyLang('[1, 2, 3]')).toBe('json');
+  });
+
+  test('detects XML', () => {
+    expect(detectBodyLang('<root><item>hello</item></root>')).toBe('xml');
+  });
+
+  test('detects SQL SELECT', () => {
+    expect(detectBodyLang('SELECT * FROM users WHERE id = 1')).toBe('sql');
+  });
+
+  test('detects SQL INSERT', () => {
+    expect(detectBodyLang('INSERT INTO users VALUES (1, "test")')).toBe('sql');
+  });
+
+  test('detects PromQL rate expression', () => {
+    expect(detectBodyLang('rate(http_requests_total{job="api"}[5m])')).toBe('promql');
+  });
+
+  test('detects PromQL with aggregate functions', () => {
+    expect(detectBodyLang('sum by (pod) (rate(container_cpu_usage_seconds_total[5m]))')).toBe('promql');
+  });
+
+  test('returns text for plain text', () => {
+    expect(detectBodyLang('hello world')).toBe('text');
+  });
+
+  test('returns text for empty string', () => {
+    expect(detectBodyLang('')).toBe('text');
+  });
+
+  test('returns text for whitespace only', () => {
+    expect(detectBodyLang('   ')).toBe('text');
+  });
+
+  test('detects JSON with leading whitespace', () => {
+    expect(detectBodyLang('  {"a":1}')).toBe('json');
+  });
+
+  test('detects XML self-closing tag', () => {
+    expect(detectBodyLang('<br/>')).toBe('xml');
+  });
+
+  test('detects SQL UPDATE', () => {
+    expect(detectBodyLang('UPDATE users SET name = "Bob" WHERE id = 1')).toBe('sql');
+  });
+
+  test('detects SQL DELETE', () => {
+    expect(detectBodyLang('DELETE FROM users WHERE id = 1')).toBe('sql');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. Body syntax highlighting — hlJSON
+// ---------------------------------------------------------------------------
+describe('hlJSON', () => {
+  let hlJSON;
+
+  beforeAll(() => {
+    const fnBody = extractFunction('hlJSON');
+    hlJSON = evalFunctions(fnBody, 'hlJSON');
+  });
+
+  test('highlights strings with hl-str class', () => {
+    const result = hlJSON('&quot;hello&quot;');
+    expect(result).toContain('hl-str');
+  });
+
+  test('highlights numbers with hl-num class', () => {
+    const result = hlJSON('42');
+    expect(result).toContain('hl-num');
+  });
+
+  test('highlights booleans with hl-kw class', () => {
+    expect(hlJSON('true')).toContain('hl-kw');
+    expect(hlJSON('false')).toContain('hl-kw');
+  });
+
+  test('highlights null with hl-kw class', () => {
+    expect(hlJSON('null')).toContain('hl-kw');
+  });
+
+  test('highlights brackets with hl-bkt class', () => {
+    const result = hlJSON('{}');
+    expect(result).toContain('hl-bkt');
+  });
+
+  test('highlights colons and commas with hl-pct class', () => {
+    const result = hlJSON('&quot;a&quot;: 1, &quot;b&quot;: 2');
+    expect(result).toContain('hl-pct');
+  });
+
+  test('handles empty object {}', () => {
+    const result = hlJSON('{}');
+    expect(result).toContain('hl-bkt');
+    expect(result).not.toContain('hl-str');
+  });
+
+  test('handles nested objects', () => {
+    const result = hlJSON('{&quot;a&quot;: {&quot;b&quot;: 1}}');
+    expect(result).toContain('hl-str');
+    expect(result).toContain('hl-num');
+    expect(result).toContain('hl-bkt');
+  });
+
+  test('highlights negative numbers', () => {
+    const result = hlJSON('-3.14');
+    expect(result).toContain('hl-num');
+  });
+
+  test('highlights scientific notation numbers', () => {
+    const result = hlJSON('1.5e10');
+    expect(result).toContain('hl-num');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. Body syntax highlighting — hlXML
+// ---------------------------------------------------------------------------
+describe('hlXML', () => {
+  let hlXML;
+
+  beforeAll(() => {
+    const fnBody = extractFunction('hlXML');
+    hlXML = evalFunctions(fnBody, 'hlXML');
+  });
+
+  test('highlights tag names with hl-tag class', () => {
+    const result = hlXML('&lt;root&gt;text&lt;/root&gt;');
+    expect(result).toContain('hl-tag');
+  });
+
+  test('highlights attributes with hl-attr class', () => {
+    const result = hlXML('&lt;item id=&quot;1&quot;&gt;&lt;/item&gt;');
+    expect(result).toContain('hl-attr');
+  });
+
+  test('handles self-closing tags', () => {
+    const result = hlXML('&lt;br/&gt;');
+    expect(result).toContain('hl-tag');
+    expect(result).toContain('hl-bkt');
+  });
+
+  test('highlights comments with hl-cmt class', () => {
+    const result = hlXML('&lt;!-- comment --&gt;');
+    expect(result).toContain('hl-cmt');
+  });
+
+  test('highlights attribute values with hl-str class', () => {
+    const result = hlXML('&lt;a href=&quot;url&quot;&gt;&lt;/a&gt;');
+    expect(result).toContain('hl-str');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. Body syntax highlighting — hlSQL
+// ---------------------------------------------------------------------------
+describe('hlSQL', () => {
+  let hlSQL;
+
+  beforeAll(() => {
+    const fnBody = extractFunction('hlSQL');
+    hlSQL = evalFunctions(fnBody, 'hlSQL');
+  });
+
+  test('highlights SELECT keyword with hl-kw class', () => {
+    const result = hlSQL('SELECT * FROM users');
+    expect(result).toContain('hl-kw');
+    expect(result).toMatch(/hl-kw.*SELECT/i);
+  });
+
+  test('highlights FROM keyword with hl-kw class', () => {
+    const result = hlSQL('SELECT id FROM users');
+    expect(result).toMatch(/hl-kw.*FROM/i);
+  });
+
+  test('highlights WHERE keyword with hl-kw class', () => {
+    const result = hlSQL('SELECT * FROM users WHERE id = 1');
+    expect(result).toMatch(/hl-kw.*WHERE/i);
+  });
+
+  test('keyword highlighting is case-insensitive', () => {
+    const upper = hlSQL('SELECT * FROM users');
+    const lower = hlSQL('select * from users');
+    expect(upper).toContain('hl-kw');
+    expect(lower).toContain('hl-kw');
+  });
+
+  test('highlights numbers with hl-num class', () => {
+    const result = hlSQL('SELECT * FROM users WHERE id = 42');
+    expect(result).toContain('hl-num');
+  });
+
+  test('highlights INSERT, INTO, VALUES keywords', () => {
+    const result = hlSQL('INSERT INTO users VALUES (1)');
+    expect(result).toMatch(/hl-kw.*INSERT/i);
+    expect(result).toMatch(/hl-kw.*INTO/i);
+    expect(result).toMatch(/hl-kw.*VALUES/i);
+  });
+
+  test('highlights SQL comments with hl-cmt class', () => {
+    const result = hlSQL('SELECT 1 -- comment');
+    expect(result).toContain('hl-cmt');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. Body syntax highlighting — hlPromQL
+// ---------------------------------------------------------------------------
+describe('hlPromQL', () => {
+  let hlPromQL;
+
+  beforeAll(() => {
+    const fnBody = extractFunction('hlPromQL');
+    hlPromQL = evalFunctions(fnBody, 'hlPromQL');
+  });
+
+  test('highlights rate function with hl-fn class', () => {
+    const result = hlPromQL('rate(http_requests_total[5m])');
+    expect(result).toContain('hl-fn');
+    expect(result).toMatch(/hl-fn.*rate/);
+  });
+
+  test('highlights sum function with hl-fn class', () => {
+    const result = hlPromQL('sum(up)');
+    expect(result).toContain('hl-fn');
+    expect(result).toMatch(/hl-fn.*sum/);
+  });
+
+  test('highlights by keyword with hl-kw class', () => {
+    const result = hlPromQL('sum by (job) (up)');
+    expect(result).toContain('hl-kw');
+    expect(result).toMatch(/hl-kw.*by/);
+  });
+
+  test('highlights without keyword with hl-kw class', () => {
+    const result = hlPromQL('sum without (instance) (up)');
+    expect(result).toMatch(/hl-kw.*without/);
+  });
+
+  test('highlights numbers with hl-num class', () => {
+    const result = hlPromQL('rate(metric[5m])');
+    expect(result).toContain('hl-num');
+  });
+
+  test('highlights brackets with hl-bkt class', () => {
+    const result = hlPromQL('rate(metric{job="api"}[5m])');
+    expect(result).toContain('hl-bkt');
+  });
+
+  test('highlights histogram_quantile function', () => {
+    const result = hlPromQL('histogram_quantile(0.99, rate(http_duration_bucket[5m]))');
+    expect(result).toMatch(/hl-fn.*histogram_quantile/);
+  });
+
+  test('highlights label matchers with hl-attr and hl-pct', () => {
+    const result = hlPromQL('metric{job="api"}');
+    expect(result).toContain('hl-attr');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12. New function existence tests
+// ---------------------------------------------------------------------------
+describe('new function existence in app.js', () => {
+  const functionNames = [
+    'openDiffViewer',
+    'closeDiffViewer',
+    'runCompareStep',
+    'viewCompareStep',
+    'highlightWithDiffMarkers',
+    'renderChangesOnly',
+  ];
+
+  test.each(functionNames)('%s is defined as a function in app.js', (name) => {
+    const re = new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\(`);
+    expect(jsSource).toMatch(re);
+  });
+
+  test('detectBodyLang is defined as a function', () => {
+    expect(jsSource).toMatch(/function\s+detectBodyLang\s*\(/);
+  });
+
+  test('hlJSON is defined as a function', () => {
+    expect(jsSource).toMatch(/function\s+hlJSON\s*\(/);
+  });
+
+  test('hlXML is defined as a function', () => {
+    expect(jsSource).toMatch(/function\s+hlXML\s*\(/);
+  });
+
+  test('hlSQL is defined as a function', () => {
+    expect(jsSource).toMatch(/function\s+hlSQL\s*\(/);
+  });
+
+  test('hlPromQL is defined as a function', () => {
+    expect(jsSource).toMatch(/function\s+hlPromQL\s*\(/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 13. switchMode builder assertion re-render code path
+// ---------------------------------------------------------------------------
+describe('switchMode builder assertion re-render path', () => {
+  test('switchMode function contains renderAssertions call for builder mode', () => {
+    const fnBody = extractFunction('switchMode');
+    expect(fnBody).toContain("mode === 'builder'");
+    expect(fnBody).toContain('renderAssertions');
+  });
+
+  test('switchMode early-returns when mode is unchanged', () => {
+    const fnBody = extractFunction('switchMode');
+    expect(fnBody).toContain('if (mode === currentMode) return');
+  });
+
+  test('switchMode handles all four modes', () => {
+    const fnBody = extractFunction('switchMode');
+    expect(fnBody).toContain("'builder'");
+    expect(fnBody).toContain("'code'");
+    expect(fnBody).toContain("'history'");
+    expect(fnBody).toContain("'logs'");
+  });
+});
