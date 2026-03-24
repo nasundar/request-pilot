@@ -909,10 +909,11 @@ function renderCsvTable(csvString) {
 }
 
 // --- Render response body by content type into a container ---
+const BODY_RENDER_THRESHOLD = 262144; // 256 KiB — above this, show preview + load button
+
 function renderResponseBodyInto(container, body, headers) {
   const contentType = detectContentType(body, headers);
   container.innerHTML = '';
-  container.dataset.rawBody = body || '';
   container.dataset.contentType = contentType;
 
   const badge = document.createElement('span');
@@ -920,6 +921,43 @@ function renderResponseBodyInto(container, body, headers) {
   badge.textContent = contentType.toUpperCase();
   container.appendChild(badge);
 
+  const bodyLen = body ? body.length : 0;
+
+  // Large body guard — show raw preview with option to load full
+  if (bodyLen > BODY_RENDER_THRESHOLD) {
+    const preview = body.substring(0, 8192); // first 8 KiB
+    const pre = document.createElement('pre');
+    pre.className = 'syntax-plain';
+    pre.textContent = preview + '\n…';
+    container.appendChild(pre);
+    const info = document.createElement('div');
+    info.className = 'body-truncated-info';
+    info.innerHTML = `<span>⚠ Response is ${formatBytes(bodyLen)} — showing first 8 KiB preview</span>`;
+    const loadBtn = document.createElement('button');
+    loadBtn.className = 'btn btn-ghost btn-xs';
+    loadBtn.textContent = '📄 Load Full Body (plain text)';
+    loadBtn.onclick = () => {
+      pre.textContent = body;
+      info.remove();
+    };
+    const renderBtn = document.createElement('button');
+    renderBtn.className = 'btn btn-ghost btn-xs';
+    renderBtn.textContent = '🎨 Parse & Render (may be slow)';
+    renderBtn.onclick = () => {
+      info.remove();
+      pre.remove();
+      renderResponseBodyFull(container, body, contentType);
+    };
+    info.appendChild(loadBtn);
+    info.appendChild(renderBtn);
+    container.appendChild(info);
+    return;
+  }
+
+  renderResponseBodyFull(container, body, contentType);
+}
+
+function renderResponseBodyFull(container, body, contentType) {
   switch (contentType) {
     case 'json':
       try {
@@ -4461,9 +4499,10 @@ async function loadHistory() {
   try {
     const filter = buildHistoryFilter();
     const hasFilter = Object.keys(filter).length > 0;
+    // Use summary commands — no request/response bodies transferred to JS
     let entries = hasFilter
-      ? await invoke('get_filtered_history', { filter })
-      : await invoke('get_history');
+      ? await invoke('get_filtered_history_summary', { filter })
+      : await invoke('get_history_summary');
     // Rebuild tree filter options from full dataset, then apply selection
     rebuildTreeFilter(entries);
     entries = applyTreeFilter(entries);
@@ -4471,7 +4510,7 @@ async function loadHistory() {
     renderHistoryStats(historyCache);
     renderHistoryLog(historyCache);
     historyCountBadge.textContent = historyCache.length;
-    rpLog('debug', 'History loaded', { count: historyCache.length });
+    rpLog('debug', 'History loaded (summary)', { count: historyCache.length });
   } catch (err) {
     historyCache = [];
     renderHistoryStats([]);
@@ -5335,7 +5374,7 @@ function formatHistoryTime(isoString) {
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-function showHistoryDetail(entry) {
+async function showHistoryDetail(entry) {
   historyDetailOverlay.classList.remove('hidden');
   const statusClass = getHistoryStatusClass(entry.status);
   const timeColor = entry.response_time_ms < 200 ? 'var(--green)' : entry.response_time_ms < 500 ? 'var(--orange)' : 'var(--red)';
@@ -5351,8 +5390,8 @@ function showHistoryDetail(entry) {
   const respHeaders = (entry.response_headers || []).map(([k, v]) =>
     `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`
   ).join('');
-  let reqBody = entry.request_body || '(no body)';
-  try { if (entry.request_body) reqBody = JSON.stringify(JSON.parse(entry.request_body), null, 2); } catch { /* non-critical: JSON format */ }
+
+  // Show headers immediately; bodies load on demand from Rust
   historyDetailBody.innerHTML = `
     <div class="hist-detail-url">
       <span class="hist-entry-method method-${entry.method}">${entry.method}</span>
@@ -5362,6 +5401,7 @@ function showHistoryDetail(entry) {
       <span class="hist-entry-seq">#${entry.seq}</span>
       <span class="hist-source-badge ${entry.source === 'test-run' ? 'test-run' : entry.source === 'extension-live' ? 'extension-live' : 'manual'}">${entry.source === 'test-run' ? 'Test Run' : entry.source === 'extension-live' ? '📡 Live' : 'Manual'}</span>
       ${entry.block_name ? `<span class="hist-block-name">${escapeHtml(entry.block_name)}</span>` : ''}
+      ${entry.compare_step ? `<span class="hist-step-name">${escapeHtml(entry.compare_step)}</span>` : ''}
       <span class="hist-entry-timestamp">${formatHistoryTime(entry.timestamp)}</span>
       ${entry.run_id ? `<span class="hist-run-id" title="Run ID: ${escapeAttr(entry.run_id)}">🔗 Run</span>` : ''}
     </div>
@@ -5371,7 +5411,7 @@ function showHistoryDetail(entry) {
     </div>
     <div class="hist-detail-section">
       <div class="hist-detail-section-title">Request Body</div>
-      <pre class="hist-detail-body-pre">${escapeHtml(reqBody)}</pre>
+      <div class="hist-detail-req-body"><div class="history-loading"><div class="loading-spinner"></div><span>Loading…</span></div></div>
     </div>
     <div class="hist-detail-section">
       <div class="hist-detail-section-title">Response Headers</div>
@@ -5379,18 +5419,38 @@ function showHistoryDetail(entry) {
     </div>
     <div class="hist-detail-section">
       <div class="hist-detail-section-title">Response Body</div>
-      <div class="hist-detail-resp-body"></div>
+      <div class="hist-detail-resp-body"><div class="history-loading"><div class="loading-spinner"></div><span>Loading…</span></div></div>
     </div>`;
-  const histRespBodyContainer = historyDetailBody.querySelector('.hist-detail-resp-body');
-  if (entry.response_body) {
-    renderResponseBodyInto(histRespBodyContainer, entry.response_body, entry.response_headers || []);
-  } else {
-    histRespBodyContainer.innerHTML = '<pre class="hist-detail-body-pre">(no body)</pre>';
+
+  // Fetch full entry with bodies from Rust (on demand)
+  try {
+    const full = await invoke('get_history_entry', { seq: entry.seq });
+    if (!full) return;
+    const reqBodyContainer = historyDetailBody.querySelector('.hist-detail-req-body');
+    const respBodyContainer = historyDetailBody.querySelector('.hist-detail-resp-body');
+    // Request body
+    if (full.request_body) {
+      let reqBody = full.request_body;
+      try { reqBody = JSON.stringify(JSON.parse(full.request_body), null, 2); } catch { /* keep raw */ }
+      reqBodyContainer.innerHTML = `<pre class="hist-detail-body-pre">${escapeHtml(reqBody)}</pre>`;
+    } else {
+      reqBodyContainer.innerHTML = '<pre class="hist-detail-body-pre">(no body)</pre>';
+    }
+    // Response body — use size-aware rendering
+    if (full.response_body) {
+      renderResponseBodyInto(respBodyContainer, full.response_body, full.response_headers || []);
+    } else {
+      respBodyContainer.innerHTML = '<pre class="hist-detail-body-pre">(no body)</pre>';
+    }
+  } catch (err) {
+    rpLog('error', 'Failed to load history entry body', String(err));
   }
 }
 
 function closeHistoryDetail() {
   historyDetailOverlay.classList.add('hidden');
+  // Free DOM memory — clear large rendered bodies
+  historyDetailBody.innerHTML = '';
 }
 
 function updateHistoryCompareBtn() {
@@ -5813,6 +5873,40 @@ $('#historyClearBtn').addEventListener('click', async () => {
   }
 });
 
+$('#historyFreeMemBtn').addEventListener('click', () => {
+  // Clear loaded file results (response bodies stay in Rust, re-fetched on next run)
+  let freed = 0;
+  loadedFiles.forEach(f => {
+    if (f.results) {
+      f.results = null;
+      freed++;
+    }
+  });
+  // Clear last displayed response
+  lastResponse = null;
+  // Clear response display DOM
+  responseBodyEl.innerHTML = '';
+  responseHeadersEl.innerHTML = '';
+  responseEmpty.classList.remove('hidden');
+  responseContent.classList.add('hidden');
+  // Trim logs to last 100
+  if (rpLogs.length > 100) rpLogs.splice(0, rpLogs.length - 100);
+  // Clear live capture buffer
+  if (typeof liveCapturedRequests !== 'undefined' && liveCapturedRequests.length > 0) {
+    liveCapturedRequests.length = 0;
+  }
+  // Clear history detail DOM
+  historyDetailBody.innerHTML = '';
+  // Clear diff viewer DOM
+  const leftCode = $('#diffLeftBody')?.querySelector('code');
+  const rightCode = $('#diffRightBody')?.querySelector('code');
+  if (leftCode) leftCode.innerHTML = '';
+  if (rightCode) rightCode.innerHTML = '';
+
+  showToast(`Memory freed: ${freed} file result(s) cleared, UI buffers released`, 'success');
+  rpLog('info', 'Memory freed', { files: freed });
+});
+
 $('#historyDetailCloseBtn').addEventListener('click', closeHistoryDetail);
 historyDetailOverlay.addEventListener('click', (e) => {
   if (e.target === historyDetailOverlay) closeHistoryDetail();
@@ -5956,12 +6050,16 @@ function openDiffViewer(fileIdx, blockIdx) {
   minimap.innerHTML = '';
   minimap.onclick = null;
 
-  // Performance guard: skip line diff for very large responses
+  // Performance guard: skip LCS diff for large responses (O(m*n) DP table)
   const linesA = formattedA.split('\n');
   const linesB = formattedB.split('\n');
-  if (linesA.length > 5000 || linesB.length > 5000) {
-    leftCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">Response too large for line diff (${linesA.length} / ${linesB.length} lines). Showing raw.</span></div>` + escapeHtml(formattedA);
-    rightCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">...</span></div>` + escapeHtml(formattedB);
+  const DIFF_LINE_LIMIT = 1500;
+  const DIFF_BYTE_LIMIT = 131072; // 128 KiB
+  if (linesA.length > DIFF_LINE_LIMIT || linesB.length > DIFF_LINE_LIMIT ||
+      formattedA.length > DIFF_BYTE_LIMIT || formattedB.length > DIFF_BYTE_LIMIT) {
+    const warnMsg = `Response too large for line diff (${linesA.length}/${linesB.length} lines, ${formatBytes(formattedA.length)}/${formatBytes(formattedB.length)}). Showing raw text.`;
+    leftCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">${warnMsg}</span></div>` + `<div class="diff-line diff-same"><span class="diff-text">${highlightFn(escapeHtml(formattedA))}</span></div>`;
+    rightCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">...</span></div>` + `<div class="diff-line diff-same"><span class="diff-text">${highlightFn(escapeHtml(formattedB))}</span></div>`;
   } else {
     // Compute line diff
     const diffOps = computeLineDiff(formattedA, formattedB);
@@ -6102,6 +6200,15 @@ function renderChangesOnly(diff) {
 
 function closeDiffViewer() {
   $('#diffViewerOverlay').classList.add('hidden');
+  // Free DOM memory — clear large diff content
+  const leftCode = $('#diffLeftBody')?.querySelector('code');
+  const rightCode = $('#diffRightBody')?.querySelector('code');
+  if (leftCode) leftCode.innerHTML = '';
+  if (rightCode) rightCode.innerHTML = '';
+  const minimap = document.getElementById('diffMinimap');
+  if (minimap) minimap.innerHTML = '';
+  const changesOnly = $('#diffChangesOnly');
+  if (changesOnly) changesOnly.innerHTML = '';
 }
 
 $('#diffViewerClose').addEventListener('click', closeDiffViewer);

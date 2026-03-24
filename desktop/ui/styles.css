@@ -1667,6 +1667,23 @@ html, body {
   border: 1px solid var(--border-light);
   color: var(--text-muted);
 }
+.body-truncated-info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-top: 8px;
+  background: var(--orange-dim, rgba(210,153,34,0.1));
+  border: 1px solid var(--orange, #d29922);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--orange, #d29922);
+}
+.body-truncated-info .btn {
+  color: var(--text-primary);
+  border-color: var(--border);
+}
 
 /* ---------- Syntax Highlighting Base ---------- */
 .syntax-plain {
@@ -2909,7 +2926,7 @@ input:focus, select:focus, textarea:focus { outline: none; }
   font-weight: 600;
 }
 
-/* Header picker dropdown */
+/* Header picker dropdown — matches hist-tree-filter pattern */
 .hist-header-picker {
   position: relative;
 }
@@ -2918,18 +2935,17 @@ input:focus, select:focus, textarea:focus { outline: none; }
 }
 .hist-header-picker-dropdown {
   position: absolute;
-  top: 100%;
+  top: calc(100% + 2px);
   right: 0;
-  z-index: 100;
-  width: 260px;
-  max-height: 320px;
-  background: var(--bg-primary);
+  z-index: 1000;
+  background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+  width: 280px;
+  max-height: 320px;
+  box-shadow: 0 8px 24px var(--shadow-light);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
 }
 .hist-header-picker-dropdown.hidden { display: none; }
 .hist-header-picker-search {
@@ -2938,7 +2954,7 @@ input:focus, select:focus, textarea:focus { outline: none; }
 }
 .hist-header-picker-search input {
   width: 100%;
-  background: var(--bg-secondary);
+  background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-xs);
   color: var(--text-primary);
@@ -2970,12 +2986,22 @@ input:focus, select:focus, textarea:focus { outline: none; }
   font-size: 12px;
   color: var(--text-primary);
   cursor: pointer;
+  transition: background 0.1s;
 }
 .hhp-item:hover {
-  background: var(--bg-elevated);
+  background: var(--bg-tertiary);
 }
 .hhp-item input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
   flex-shrink: 0;
+}
+.hhp-item span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .hhp-empty {
   padding: 12px;

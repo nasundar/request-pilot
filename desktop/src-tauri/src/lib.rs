@@ -171,6 +171,46 @@ fn get_history(
     Ok(store.lock().map_err(|e| e.to_string())?.entries.clone())
 }
 
+/// Return history entries with bodies stripped (request_body, response_body = None).
+/// Much lighter for listing 1000s of entries in the UI.
+#[tauri::command]
+fn get_history_summary(
+    store: State<'_, Mutex<HistoryStore>>,
+) -> Result<Vec<history::HistoryEntry>, String> {
+    let s = store.lock().map_err(|e| e.to_string())?;
+    Ok(s.entries.iter().map(|e| {
+        let mut lite = e.clone();
+        lite.request_body = None;
+        lite.response_body = None;
+        lite
+    }).collect())
+}
+
+/// Return a single history entry's full data (with bodies) by seq number.
+#[tauri::command]
+fn get_history_entry(
+    seq: u64,
+    store: State<'_, Mutex<HistoryStore>>,
+) -> Result<Option<history::HistoryEntry>, String> {
+    let s = store.lock().map_err(|e| e.to_string())?;
+    Ok(s.entries.iter().find(|e| e.seq == seq).cloned())
+}
+
+/// Return filtered history entries with bodies stripped.
+#[tauri::command]
+fn get_filtered_history_summary(
+    filter: history::HistoryFilter,
+    store: State<'_, Mutex<HistoryStore>>,
+) -> Result<Vec<history::HistoryEntry>, String> {
+    let s = store.lock().map_err(|e| e.to_string())?;
+    Ok(s.filter(&filter).into_iter().map(|e| {
+        let mut lite = e.clone();
+        lite.request_body = None;
+        lite.response_body = None;
+        lite
+    }).collect())
+}
+
 #[tauri::command]
 fn get_filtered_history(
     filter: history::HistoryFilter,
@@ -411,7 +451,10 @@ pub fn run() {
             run_test_suite,
             resolve_variables,
             get_history,
+            get_history_summary,
+            get_history_entry,
             get_filtered_history,
+            get_filtered_history_summary,
             get_history_distinct_values,
             clear_history,
             suggest_urls,
