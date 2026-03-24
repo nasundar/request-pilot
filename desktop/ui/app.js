@@ -5911,20 +5911,21 @@ function openDiffViewer(fileIdx, blockIdx) {
     rightCode.innerHTML = rightHtml;
 
     const totalLines = diffOps.length || 1;
-    let minimapHtml = '';
+    let marksHtml = '';
     diffOps.forEach((op, idx) => {
       if (op.type === 'same') return;
       const pct = (idx / totalLines) * 100;
       const cls = op.type === 'remove' ? 'mm-removed' : op.type === 'add' ? 'mm-added' : 'mm-changed';
-      minimapHtml += `<div class="mm-mark ${cls}" style="top:${pct}%"></div>`;
+      marksHtml += `<div class="mm-mark ${cls}" style="top:${pct}%"></div>`;
     });
-    // Viewport thumb shows current scroll position
-    minimapHtml += '<div class="mm-thumb" id="mmThumb"></div>';
-    minimap.innerHTML = minimapHtml;
+    marksHtml += '<div class="mm-thumb" id="mmThumb"></div>';
+    // Header spacer aligns track with the pane body (below pane headers)
+    minimap.innerHTML = `<div class="diff-minimap-header"></div><div class="diff-minimap-track" id="mmTrack">${marksHtml}</div>`;
 
-    // Click anywhere on minimap to jump proportionally
-    minimap.onclick = (e) => {
-      const rect = minimap.getBoundingClientRect();
+    // Click anywhere on track to jump proportionally
+    const mmTrack = document.getElementById('mmTrack');
+    mmTrack.onclick = (e) => {
+      const rect = mmTrack.getBoundingClientRect();
       const pct = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
       const leftPane = document.getElementById('diffLeftBody');
       const scrollTarget = pct * (leftPane.scrollHeight - leftPane.clientHeight);
@@ -5935,19 +5936,20 @@ function openDiffViewer(fileIdx, blockIdx) {
     const updateMmThumb = () => {
       const lp = document.getElementById('diffLeftBody');
       const thumb = document.getElementById('mmThumb');
-      if (!lp || !thumb) return;
+      const track = document.getElementById('mmTrack');
+      if (!lp || !thumb || !track) return;
+      const trackH = track.clientHeight;
       const scrollRatio = lp.scrollHeight > lp.clientHeight
         ? lp.scrollTop / (lp.scrollHeight - lp.clientHeight) : 0;
       const viewRatio = lp.clientHeight / lp.scrollHeight;
-      const thumbH = Math.max(8, viewRatio * minimap.clientHeight);
-      const thumbTop = scrollRatio * (minimap.clientHeight - thumbH);
+      const thumbH = Math.max(8, viewRatio * trackH);
+      const thumbTop = scrollRatio * (trackH - thumbH);
       thumb.style.height = thumbH + 'px';
       thumb.style.top = thumbTop + 'px';
     };
-    // Attach scroll listener for thumb sync
     const leftPaneRef = document.getElementById('diffLeftBody');
     leftPaneRef.addEventListener('scroll', updateMmThumb);
-    // Initial thumb position
+    requestAnimationFrame(updateMmThumb);
     requestAnimationFrame(updateMmThumb);
   }
 

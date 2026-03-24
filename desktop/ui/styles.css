@@ -4674,6 +4674,18 @@ input:focus, select:focus, textarea:focus { outline: none; }
   flex-shrink: 0;
   cursor: pointer;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.diff-minimap-header {
+  height: 31px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+.diff-minimap-track {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
 }
 .mm-mark {
   position: absolute;
