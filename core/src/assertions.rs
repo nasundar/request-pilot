@@ -277,13 +277,82 @@ pub fn collect_json_paths(
     }
 }
 
+/// Recursively normalize a JSON value for order-independent comparison.
+/// Object keys are sorted lexicographically. Array elements are sorted by
+/// their canonical JSON representation so `[2,1]` and `[1,2]` compare equal.
+fn normalize_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut sorted: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for k in keys {
+                sorted.insert(k.clone(), normalize_json(&map[k]));
+            }
+            serde_json::Value::Object(sorted)
+        }
+        serde_json::Value::Array(arr) => {
+            let mut normalized: Vec<serde_json::Value> =
+                arr.iter().map(normalize_json).collect();
+            normalized.sort_by(|a, b| {
+                let sa = serde_json::to_string(a).unwrap_or_default();
+                let sb = serde_json::to_string(b).unwrap_or_default();
+                sa.cmp(&sb)
+            });
+            serde_json::Value::Array(normalized)
+        }
+        other => other.clone(),
+    }
+}
+
+/// Normalize XML text for order-independent comparison.
+/// Sorts attributes within each tag and trims inter-element whitespace.
+fn normalize_xml(text: &str) -> String {
+    // Regex to find opening tags with attributes
+    let tag_re = regex::Regex::new(r#"<(\w[\w:.-]*)((?:\s+[\w:.-]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(/?)>"#).unwrap();
+    let attr_re = regex::Regex::new(r#"([\w:.-]+)\s*=\s*("[^"]*"|'[^']*')"#).unwrap();
+
+    let result = tag_re.replace_all(text, |caps: &regex::Captures| {
+        let tag_name = &caps[1];
+        let attrs_str = &caps[2];
+        let self_close = &caps[3];
+
+        if attrs_str.trim().is_empty() {
+            return format!("<{}{}>", tag_name, if self_close.is_empty() { "" } else { " /" });
+        }
+
+        let mut attrs: Vec<(String, String)> = attr_re
+            .captures_iter(attrs_str)
+            .map(|m| (m[1].to_string(), m[2].to_string()))
+            .collect();
+        attrs.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let attrs_sorted = attrs
+            .iter()
+            .map(|(k, v)| format!(" {}={}", k, v))
+            .collect::<String>();
+        format!("<{}{}{}>", tag_name, attrs_sorted, if self_close.is_empty() { "" } else { " /" })
+    });
+
+    // Trim whitespace between tags for consistent comparison
+    let ws_re = regex::Regex::new(r">\s+<").unwrap();
+    ws_re.replace_all(&result, "><").to_string()
+}
+
 /// Compare two response bodies and produce a structured diff.
 pub fn compute_diff(body_a: &str, body_b: &str) -> DiffResult {
     let json_a = serde_json::from_str::<serde_json::Value>(body_a);
     let json_b = serde_json::from_str::<serde_json::Value>(body_b);
 
     if let (Ok(va), Ok(vb)) = (json_a, json_b) {
-        compute_json_diff(&va, &vb)
+        let na = normalize_json(&va);
+        let nb = normalize_json(&vb);
+        compute_json_diff(&na, &nb)
+    } else if body_a.trim().starts_with('<') && body_b.trim().starts_with('<') {
+        // Both look like XML — normalize before text comparison
+        let norm_a = normalize_xml(body_a);
+        let norm_b = normalize_xml(body_b);
+        compute_text_diff(&norm_a, &norm_b)
     } else {
         compute_text_diff(body_a, body_b)
     }
@@ -753,12 +822,23 @@ mod tests {
     }
 
     #[test]
-    fn diff_json_arrays_order_sensitive() {
+    fn diff_json_arrays_order_independent() {
+        // Arrays with same elements in different order should match after normalization
         let a = r#"{"items":[1,2,3]}"#;
         let b = r#"{"items":[1,3,2]}"#;
         let result = compute_diff(a, b);
+        assert!(result.match_exact, "arrays with same elements in different order should match");
+        assert_eq!(result.changed_count, 0);
+    }
+
+    #[test]
+    fn diff_json_arrays_different_elements() {
+        // Arrays with genuinely different elements should NOT match
+        let a = r#"{"items":[1,2,3]}"#;
+        let b = r#"{"items":[1,4,3]}"#;
+        let result = compute_diff(a, b);
         assert!(!result.match_exact);
-        assert!(result.changed_count >= 1); // at least items[1] or items[2] differ
+        assert!(result.changed_count >= 1);
     }
 
     #[test]
@@ -1059,5 +1139,82 @@ mod tests {
         assert_eq!(resolve_diff_value("no_prefix", &diff), None);
         assert_eq!(resolve_diff_value("$diff.changed_paths[99].path", &diff), None);
         assert_eq!(resolve_diff_value("$diff.changed_paths[0].unknown", &diff), None);
+    }
+
+    // --- Normalization tests ---
+
+    #[test]
+    fn diff_json_object_key_order_independent() {
+        let a = r#"{"z":3,"a":1,"m":2}"#;
+        let b = r#"{"a":1,"m":2,"z":3}"#;
+        let result = compute_diff(a, b);
+        assert!(result.match_exact, "same keys in different order should match");
+        assert_eq!(result.changed_count, 0);
+    }
+
+    #[test]
+    fn diff_json_nested_key_order_independent() {
+        let a = r#"{"outer":{"z":1,"a":2},"list":[{"b":2,"a":1}]}"#;
+        let b = r#"{"list":[{"a":1,"b":2}],"outer":{"a":2,"z":1}}"#;
+        let result = compute_diff(a, b);
+        assert!(result.match_exact, "deeply nested reordered keys should match");
+    }
+
+    #[test]
+    fn diff_json_array_of_objects_order_independent() {
+        let a = r#"[{"id":2,"name":"b"},{"id":1,"name":"a"}]"#;
+        let b = r#"[{"id":1,"name":"a"},{"id":2,"name":"b"}]"#;
+        let result = compute_diff(a, b);
+        assert!(result.match_exact, "array of objects in different order should match");
+    }
+
+    #[test]
+    fn diff_json_array_duplicate_elements() {
+        let a = r#"[1,1,2]"#;
+        let b = r#"[1,2,1]"#;
+        let result = compute_diff(a, b);
+        assert!(result.match_exact, "same multiset in different order should match");
+    }
+
+    #[test]
+    fn diff_json_array_different_counts() {
+        let a = r#"[1,1,2]"#;
+        let b = r#"[1,2,2]"#;
+        let result = compute_diff(a, b);
+        assert!(!result.match_exact, "different element counts should not match");
+    }
+
+    #[test]
+    fn diff_xml_attribute_order_independent() {
+        let a = r#"<root><item id="1" name="test" /></root>"#;
+        let b = r#"<root><item name="test" id="1" /></root>"#;
+        let result = compute_diff(a, b);
+        assert!(result.match_exact, "XML with reordered attributes should match");
+        assert!(!result.is_json);
+    }
+
+    #[test]
+    fn diff_xml_whitespace_independent() {
+        let a = "<root>\n  <item>hello</item>\n</root>";
+        let b = "<root><item>hello</item></root>";
+        let result = compute_diff(a, b);
+        assert!(result.match_exact, "XML with different whitespace should match");
+    }
+
+    #[test]
+    fn diff_xml_different_content() {
+        let a = r#"<root><item id="1">hello</item></root>"#;
+        let b = r#"<root><item id="2">world</item></root>"#;
+        let result = compute_diff(a, b);
+        assert!(!result.match_exact, "XML with different content should not match");
+    }
+
+    #[test]
+    fn normalize_json_preserves_values() {
+        let a = r#"{"name":"Alice","age":30,"active":true,"score":null}"#;
+        let b = r#"{"score":null,"active":true,"name":"Alice","age":30}"#;
+        let result = compute_diff(a, b);
+        assert!(result.match_exact);
+        assert_eq!(result.similarity, 1.0);
     }
 }
