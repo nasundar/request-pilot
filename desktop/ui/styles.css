@@ -4667,12 +4667,13 @@ input:focus, select:focus, textarea:focus { outline: none; }
   padding: 0 1px;
 }
 .diff-minimap {
-  width: 14px;
+  width: 24px;
   background: var(--bg-tertiary);
   border-left: 1px solid var(--border);
   position: relative;
   flex-shrink: 0;
   cursor: pointer;
+  overflow: hidden;
 }
 .mm-mark {
   position: absolute;
@@ -4680,10 +4681,22 @@ input:focus, select:focus, textarea:focus { outline: none; }
   right: 2px;
   height: 3px;
   border-radius: 1px;
+  pointer-events: none;
 }
-.mm-removed { background: var(--red); opacity: 0.7; }
-.mm-added { background: var(--green); opacity: 0.7; }
-.mm-changed { background: var(--orange); opacity: 0.7; }
+.mm-removed { background: var(--red); opacity: 0.8; }
+.mm-added { background: var(--green); opacity: 0.8; }
+.mm-changed { background: var(--orange); opacity: 0.8; }
+.mm-thumb {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 2px;
+  pointer-events: none;
+  min-height: 8px;
+  transition: top 0.05s linear;
+}
 
 /* Changes only view */
 .diff-changes-only {

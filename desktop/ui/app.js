@@ -2160,60 +2160,11 @@ function renderAssertions(fileIdx, blockIdx) {
 
   let html = '';
 
-  // Compare block: render summary first, then comparison assertions, then per-step details
+  // Compare block: assertions first, then action button, then details
   if (block.compare && block.steps && block.steps.length > 0) {
-    // Diff summary
     const diff = br?.diff_result;
-    if (diff) {
-      html += `<div class="assertion-group diff-summary-group">
-        <div class="assertion-group-header">\u21C4 Comparison Result</div>
-        <div class="diff-summary">
-          <div class="diff-stat"><span class="diff-label">Match:</span><span class="diff-value ${diff.match_exact ? 'diff-match' : 'diff-mismatch'}">${diff.match_exact ? 'Exact Match \u2713' : 'Differences Found'}</span></div>
-          <div class="diff-stat"><span class="diff-label">Similarity:</span><span class="diff-value">${(diff.similarity * 100).toFixed(1)}%</span></div>
-          <div class="diff-stat"><span class="diff-label">Type:</span><span class="diff-value">${diff.is_json ? 'JSON' : 'Text'}</span></div>
-          ${diff.added_count ? `<div class="diff-stat"><span class="diff-label">Added:</span><span class="diff-value diff-added">+${diff.added_count}</span></div>` : ''}
-          ${diff.removed_count ? `<div class="diff-stat"><span class="diff-label">Removed:</span><span class="diff-value diff-removed">-${diff.removed_count}</span></div>` : ''}
-          ${diff.changed_count ? `<div class="diff-stat"><span class="diff-label">Changed:</span><span class="diff-value diff-changed">\u0394${diff.changed_count}</span></div>` : ''}
-        </div>`;
 
-      // Changed paths detail
-      if (diff.changed_paths && diff.changed_paths.length > 0) {
-        html += `<div class="diff-paths"><div class="diff-paths-header">Changed Paths</div>`;
-        diff.changed_paths.slice(0, 50).forEach(cp => {
-          html += `<div class="diff-path-row">
-            <span class="diff-path-name">${escapeHtml(cp.path)}</span>
-            <span class="diff-path-left" title="Step A">${escapeHtml(String(cp.left ?? ''))}</span>
-            <span class="diff-path-arrow">\u2192</span>
-            <span class="diff-path-right" title="Step B">${escapeHtml(String(cp.right ?? ''))}</span>
-          </div>`;
-        });
-        if (diff.changed_paths.length > 50) {
-          html += `<div class="diff-path-row">... and ${diff.changed_paths.length - 50} more</div>`;
-        }
-        html += '</div>';
-      }
-
-      // Added/removed paths
-      if (diff.added_paths && diff.added_paths.length > 0) {
-        html += `<div class="diff-paths"><div class="diff-paths-header">Added Paths</div>`;
-        diff.added_paths.slice(0, 20).forEach(p => {
-          html += `<div class="diff-path-row"><span class="diff-path-name diff-added">+ ${escapeHtml(p)}</span></div>`;
-        });
-        html += '</div>';
-      }
-      if (diff.removed_paths && diff.removed_paths.length > 0) {
-        html += `<div class="diff-paths"><div class="diff-paths-header">Removed Paths</div>`;
-        diff.removed_paths.slice(0, 20).forEach(p => {
-          html += `<div class="diff-path-row"><span class="diff-path-name diff-removed">- ${escapeHtml(p)}</span></div>`;
-        });
-        html += '</div>';
-      }
-
-      html += '</div>';
-      html += `<button class="diff-view-btn" onclick="openDiffViewer(${fileIdx}, ${blockIdx})">🔍 View Full Diff</button>`;
-    }
-
-    // Comparison assertions (stored on block.assertions for compare blocks)
+    // 1. Comparison assertions (top priority — what the user cares about)
     if (block.assertions && block.assertions.length > 0) {
       html += '<div class="assertion-group"><div class="assertion-group-header">Comparison Assertions</div>';
       block.assertions.forEach((assertion, i) => {
@@ -2231,7 +2182,7 @@ function renderAssertions(fileIdx, blockIdx) {
       html += '</div>';
     }
 
-    // Per-step results
+    // 2. Per-step assertions & extracts
     block.steps.forEach((step, si) => {
       const sr = br?.step_results?.[si];
       const stepStatus = sr ? (sr.error ? 'error' : 'done') : 'pending';
@@ -2273,6 +2224,58 @@ function renderAssertions(fileIdx, blockIdx) {
 
       html += '</div>';
     });
+
+    // 3. View Full Diff button
+    if (diff) {
+      html += `<button class="diff-view-btn" onclick="openDiffViewer(${fileIdx}, ${blockIdx})">🔍 View Full Diff</button>`;
+    }
+
+    // 4. Comparison result details (summary, changed paths)
+    if (diff) {
+      html += `<div class="assertion-group diff-summary-group">
+        <div class="assertion-group-header">\u21C4 Comparison Result</div>
+        <div class="diff-summary">
+          <div class="diff-stat"><span class="diff-label">Match:</span><span class="diff-value ${diff.match_exact ? 'diff-match' : 'diff-mismatch'}">${diff.match_exact ? 'Exact Match \u2713' : 'Differences Found'}</span></div>
+          <div class="diff-stat"><span class="diff-label">Similarity:</span><span class="diff-value">${(diff.similarity * 100).toFixed(1)}%</span></div>
+          <div class="diff-stat"><span class="diff-label">Type:</span><span class="diff-value">${diff.is_json ? 'JSON' : 'Text'}</span></div>
+          ${diff.added_count ? `<div class="diff-stat"><span class="diff-label">Added:</span><span class="diff-value diff-added">+${diff.added_count}</span></div>` : ''}
+          ${diff.removed_count ? `<div class="diff-stat"><span class="diff-label">Removed:</span><span class="diff-value diff-removed">-${diff.removed_count}</span></div>` : ''}
+          ${diff.changed_count ? `<div class="diff-stat"><span class="diff-label">Changed:</span><span class="diff-value diff-changed">\u0394${diff.changed_count}</span></div>` : ''}
+        </div>`;
+
+      if (diff.changed_paths && diff.changed_paths.length > 0) {
+        html += `<div class="diff-paths"><div class="diff-paths-header">Changed Paths</div>`;
+        diff.changed_paths.slice(0, 50).forEach(cp => {
+          html += `<div class="diff-path-row">
+            <span class="diff-path-name">${escapeHtml(cp.path)}</span>
+            <span class="diff-path-left" title="Step A">${escapeHtml(String(cp.left ?? ''))}</span>
+            <span class="diff-path-arrow">\u2192</span>
+            <span class="diff-path-right" title="Step B">${escapeHtml(String(cp.right ?? ''))}</span>
+          </div>`;
+        });
+        if (diff.changed_paths.length > 50) {
+          html += `<div class="diff-path-row">... and ${diff.changed_paths.length - 50} more</div>`;
+        }
+        html += '</div>';
+      }
+
+      if (diff.added_paths && diff.added_paths.length > 0) {
+        html += `<div class="diff-paths"><div class="diff-paths-header">Added Paths</div>`;
+        diff.added_paths.slice(0, 20).forEach(p => {
+          html += `<div class="diff-path-row"><span class="diff-path-name diff-added">+ ${escapeHtml(p)}</span></div>`;
+        });
+        html += '</div>';
+      }
+      if (diff.removed_paths && diff.removed_paths.length > 0) {
+        html += `<div class="diff-paths"><div class="diff-paths-header">Removed Paths</div>`;
+        diff.removed_paths.slice(0, 20).forEach(p => {
+          html += `<div class="diff-path-row"><span class="diff-path-name diff-removed">- ${escapeHtml(p)}</span></div>`;
+        });
+        html += '</div>';
+      }
+
+      html += '</div>';
+    }
 
     // Block-level error
     if (br?.error) {
@@ -5913,16 +5916,39 @@ function openDiffViewer(fileIdx, blockIdx) {
       if (op.type === 'same') return;
       const pct = (idx / totalLines) * 100;
       const cls = op.type === 'remove' ? 'mm-removed' : op.type === 'add' ? 'mm-added' : 'mm-changed';
-      minimapHtml += `<div class="mm-mark ${cls}" style="top:${pct}%" data-line-idx="${idx}"></div>`;
+      minimapHtml += `<div class="mm-mark ${cls}" style="top:${pct}%"></div>`;
     });
+    // Viewport thumb shows current scroll position
+    minimapHtml += '<div class="mm-thumb" id="mmThumb"></div>';
     minimap.innerHTML = minimapHtml;
+
+    // Click anywhere on minimap to jump proportionally
     minimap.onclick = (e) => {
-      const mark = e.target.closest('.mm-mark');
-      if (!mark) return;
-      const lineIdx = parseInt(mark.dataset.lineIdx, 10);
-      const lineEl = leftCode.children[lineIdx];
-      if (lineEl) lineEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const rect = minimap.getBoundingClientRect();
+      const pct = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+      const leftPane = document.getElementById('diffLeftBody');
+      const scrollTarget = pct * (leftPane.scrollHeight - leftPane.clientHeight);
+      leftPane.scrollTop = scrollTarget;
     };
+
+    // Sync minimap thumb with scroll position
+    const updateMmThumb = () => {
+      const lp = document.getElementById('diffLeftBody');
+      const thumb = document.getElementById('mmThumb');
+      if (!lp || !thumb) return;
+      const scrollRatio = lp.scrollHeight > lp.clientHeight
+        ? lp.scrollTop / (lp.scrollHeight - lp.clientHeight) : 0;
+      const viewRatio = lp.clientHeight / lp.scrollHeight;
+      const thumbH = Math.max(8, viewRatio * minimap.clientHeight);
+      const thumbTop = scrollRatio * (minimap.clientHeight - thumbH);
+      thumb.style.height = thumbH + 'px';
+      thumb.style.top = thumbTop + 'px';
+    };
+    // Attach scroll listener for thumb sync
+    const leftPaneRef = document.getElementById('diffLeftBody');
+    leftPaneRef.addEventListener('scroll', updateMmThumb);
+    // Initial thumb position
+    requestAnimationFrame(updateMmThumb);
   }
 
   renderChangesOnly(diff);
