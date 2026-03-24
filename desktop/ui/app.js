@@ -5465,12 +5465,39 @@ function updateHistoryCompareBtn() {
   }
 }
 
-function openHistoryComparison() {
+async function openHistoryComparison() {
   if (historySelectedIds.size < 2) return;
   const [seqA, seqB] = [...historySelectedIds];
-  const entryA = historyCache.find(e => e.seq === seqA);
-  const entryB = historyCache.find(e => e.seq === seqB);
-  if (entryA && entryB) openComparisonOverlay(entryA, entryB);
+  const summaryA = historyCache.find(e => e.seq === seqA);
+  const summaryB = historyCache.find(e => e.seq === seqB);
+  if (!summaryA || !summaryB) return;
+
+  // Bodies are not in historyCache (summary mode) — fetch full entries from Rust
+  const sizeA = summaryA.response_size_bytes || 0;
+  const sizeB = summaryB.response_size_bytes || 0;
+  const totalSize = sizeA + sizeB;
+  const COMPARE_WARN_THRESHOLD = 524288; // 512 KiB
+
+  if (totalSize > COMPARE_WARN_THRESHOLD) {
+    const msg = `Response bodies are large (${formatBytes(sizeA)} + ${formatBytes(sizeB)} = ${formatBytes(totalSize)}). Loading and comparing may be slow. Continue?`;
+    if (!confirm(msg)) return;
+  }
+
+  showToast('Loading response bodies…', 'info');
+  try {
+    const [fullA, fullB] = await Promise.all([
+      invoke('get_history_entry', { seq: seqA }),
+      invoke('get_history_entry', { seq: seqB }),
+    ]);
+    if (!fullA || !fullB) {
+      showToast('Could not load one or both entries', 'error');
+      return;
+    }
+    openComparisonOverlay(fullA, fullB);
+  } catch (err) {
+    showToast(`Failed to load entries: ${err}`, 'error');
+    rpLog('error', 'Failed to load history entries for comparison', String(err));
+  }
 }
 
 // --- Autocomplete State ---
@@ -5873,39 +5900,74 @@ $('#historyClearBtn').addEventListener('click', async () => {
   }
 });
 
-$('#historyFreeMemBtn').addEventListener('click', () => {
-  // Clear loaded file results (response bodies stay in Rust, re-fetched on next run)
+// --- Global Memory Tracking & Free ---
+const MEM_WARN_THRESHOLD = 52428800; // 50 MB — highlight warning
+
+function estimateMemoryUsage() {
+  let bytes = 0;
+  // loadedFiles results
+  loadedFiles.forEach(f => {
+    if (f.results) bytes += JSON.stringify(f.results).length;
+  });
+  // lastResponse
+  if (lastResponse) {
+    bytes += (lastResponse.body || '').length;
+    bytes += JSON.stringify(lastResponse.headers || []).length;
+  }
+  // rpLogs
+  bytes += rpLogs.reduce((s, l) => s + (l.message || '').length + 50, 0);
+  // liveCapturedRequests
+  if (typeof liveCapturedRequests !== 'undefined') {
+    liveCapturedRequests.forEach(r => {
+      bytes += (r.request_body || '').length + (r.response_body || '').length + 200;
+    });
+  }
+  return bytes;
+}
+
+function updateMemIndicator() {
+  const bytes = estimateMemoryUsage();
+  const el = $('#memValue');
+  const indicator = $('#memIndicator');
+  if (!el || !indicator) return;
+  el.textContent = `(${formatBytes(bytes)})`;
+  if (bytes > MEM_WARN_THRESHOLD) {
+    indicator.classList.add('mem-warn');
+    indicator.title = `UI memory high (${formatBytes(bytes)}) — click Free to release`;
+  } else {
+    indicator.classList.remove('mem-warn');
+    indicator.title = `Estimated UI memory usage (${formatBytes(bytes)})`;
+  }
+}
+
+function freeMemory() {
   let freed = 0;
   loadedFiles.forEach(f => {
-    if (f.results) {
-      f.results = null;
-      freed++;
-    }
+    if (f.results) { f.results = null; freed++; }
   });
-  // Clear last displayed response
   lastResponse = null;
-  // Clear response display DOM
   responseBodyEl.innerHTML = '';
   responseHeadersEl.innerHTML = '';
   responseEmpty.classList.remove('hidden');
   responseContent.classList.add('hidden');
-  // Trim logs to last 100
   if (rpLogs.length > 100) rpLogs.splice(0, rpLogs.length - 100);
-  // Clear live capture buffer
   if (typeof liveCapturedRequests !== 'undefined' && liveCapturedRequests.length > 0) {
     liveCapturedRequests.length = 0;
   }
-  // Clear history detail DOM
   historyDetailBody.innerHTML = '';
-  // Clear diff viewer DOM
   const leftCode = $('#diffLeftBody')?.querySelector('code');
   const rightCode = $('#diffRightBody')?.querySelector('code');
   if (leftCode) leftCode.innerHTML = '';
   if (rightCode) rightCode.innerHTML = '';
-
+  updateMemIndicator();
   showToast(`Memory freed: ${freed} file result(s) cleared, UI buffers released`, 'success');
   rpLog('info', 'Memory freed', { files: freed });
-});
+}
+
+$('#memFreeBtn').addEventListener('click', freeMemory);
+
+// Update memory indicator periodically and on key actions
+setInterval(updateMemIndicator, 10000); // every 10s
 
 $('#historyDetailCloseBtn').addEventListener('click', closeHistoryDetail);
 historyDetailOverlay.addEventListener('click', (e) => {

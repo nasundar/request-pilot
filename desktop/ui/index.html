@@ -25,6 +25,12 @@
       </button>
     </div>
     <div class="toolbar-right">
+      <div class="mem-indicator" id="memIndicator" title="Estimated UI memory usage — click to free">
+        <span class="mem-icon">🧹</span>
+        <span>Free Memory</span>
+        <span class="mem-value" id="memValue">(0 KB)</span>
+        <button class="mem-free-btn" id="memFreeBtn">Free</button>
+      </div>
       <div class="extra-headers-wrapper">
         <button class="btn-icon-sm extra-headers-btn" id="extraHeadersBtn" title="Extra headers injected into all test requests">
           📋 <span class="extra-headers-count" id="extraHeadersCount"></span>
@@ -175,7 +181,6 @@
             <button class="btn btn-ghost btn-xs" id="historyCollapseAllBtn" title="Collapse all groups">⊟ Collapse All</button>
             <button class="btn btn-ghost btn-xs clear-viewed-btn" id="historyClearViewedBtn" title="Clear viewed state">👁 Clear Viewed</button>
             <button class="btn btn-ghost btn-xs" id="historyClearBtn" title="Clear all history">🗑 Clear</button>
-            <button class="btn btn-ghost btn-xs" id="historyFreeMemBtn" title="Free UI memory: clear loaded response data, results, and logs">🧹 Free Memory</button>
           </div>
         </div>
         <div class="history-filters">
@@ -229,7 +234,7 @@
             <option value="compare-steps">Compare Steps</option>
           </select>
           <div class="hist-header-picker" id="histHeaderPicker">
-            <button class="btn btn-ghost btn-xs hist-header-picker-btn" id="histHeaderPickerBtn">Headers ▾</button>
+            <button class="history-filter-select hist-header-picker-btn" id="histHeaderPickerBtn">Headers ▾</button>
             <div class="hist-header-picker-dropdown hidden" id="histHeaderPickerDropdown">
               <div class="hist-header-picker-search"><input type="text" id="histHeaderPickerSearch" placeholder="Filter headers..." spellcheck="false"></div>
               <div class="hist-header-picker-list" id="histHeaderPickerList"></div>
