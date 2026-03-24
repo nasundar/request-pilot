@@ -104,7 +104,7 @@ pub async fn start_server(
         .set_reuseaddr(true)
         .map_err(|e| format!("Failed to set SO_REUSEADDR: {}", e))?;
     socket
-        .bind(addr.parse().unwrap())
+        .bind(addr.parse::<std::net::SocketAddr>().map_err(|e| format!("Invalid address {}: {}", addr, e))?)
         .map_err(|e| format!("Failed to bind WS server on {}: {}", addr, e))?;
     let listener = socket
         .listen(8)

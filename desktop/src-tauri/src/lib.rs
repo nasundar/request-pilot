@@ -393,6 +393,13 @@ async fn get_live_capture_status(
 }
 
 pub fn run() {
+    // Install a panic hook so unexpected panics are logged instead of silently lost.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        eprintln!("[RequestPilot] PANIC: {}", info);
+        default_hook(info);
+    }));
+
     tauri::Builder::default()
         .manage(Mutex::new(HistoryStore::new()))
         .manage(Arc::new(live_capture::LiveCaptureState::new()))
