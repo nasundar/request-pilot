@@ -942,7 +942,8 @@ describe('new function existence in app.js', () => {
     'closeDiffViewer',
     'runCompareStep',
     'viewCompareStep',
-    'highlightWithDiffMarkers',
+    'computeLineDiff',
+    'charDiffHighlight',
     'renderChangesOnly',
   ];
 

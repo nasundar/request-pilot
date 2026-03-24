@@ -1286,27 +1286,59 @@ function showBlockTooltip(block, anchorEl, fileIdx, blockIdx) {
 
     // Show request differences between steps
     if (block.steps.length >= 2) {
-      const diffs = [];
       const s0 = block.steps[0];
       const s1 = block.steps[1];
+      let hasDiffs = false;
+      let diffHtml = `<div class="btt-section"><div class="btt-section-title">Request Differences</div><div class="btt-req-diff">`;
+
       if (s0.request && s1.request) {
-        if (s0.request.method !== s1.request.method) diffs.push(`Method: ${s0.request.method} \u2192 ${s1.request.method}`);
-        if (s0.request.url !== s1.request.url) diffs.push(`URL: ${escapeHtml(s0.request.url)} \u2192 ${escapeHtml(s1.request.url)}`);
-        const h0 = (s0.request.headers || []).map(([k,v]) => `${k}: ${v}`).sort();
-        const h1 = (s1.request.headers || []).map(([k,v]) => `${k}: ${v}`).sort();
-        const addedH = h1.filter(h => !h0.includes(h));
-        const removedH = h0.filter(h => !h1.includes(h));
-        if (addedH.length > 0) diffs.push(`Headers added: ${addedH.join(', ')}`);
-        if (removedH.length > 0) diffs.push(`Headers removed: ${removedH.join(', ')}`);
-        const hasBodyA = !!s0.request.body;
-        const hasBodyB = !!s1.request.body;
-        if (hasBodyA !== hasBodyB) diffs.push(`Body: ${hasBodyA ? 'present' : 'none'} \u2192 ${hasBodyB ? 'present' : 'none'}`);
-        else if (hasBodyA && hasBodyB && s0.request.body !== s1.request.body) diffs.push('Body: different content');
+        // Method
+        if (s0.request.method !== s1.request.method) {
+          hasDiffs = true;
+          const mc0 = `method-${s0.request.method.toLowerCase()}`;
+          const mc1 = `method-${s1.request.method.toLowerCase()}`;
+          diffHtml += `<div class="btt-rd-row"><span class="btt-rd-label">Method</span><span class="btt-method ${mc0}">${escapeHtml(s0.request.method)}</span><span class="btt-rd-arrow">\u2192</span><span class="btt-method ${mc1}">${escapeHtml(s1.request.method)}</span></div>`;
+        }
+        // URL
+        if (s0.request.url !== s1.request.url) {
+          hasDiffs = true;
+          diffHtml += `<div class="btt-rd-row btt-rd-url"><span class="btt-rd-label">URL</span><div class="btt-rd-urls"><div class="btt-rd-old">${escapeHtml(s0.request.url)}</div><div class="btt-rd-new">${escapeHtml(s1.request.url)}</div></div></div>`;
+        }
+        // Headers
+        const h0 = new Map((s0.request.headers || []).map(([k,v]) => [k, v]));
+        const h1 = new Map((s1.request.headers || []).map(([k,v]) => [k, v]));
+        const allKeys = new Set([...h0.keys(), ...h1.keys()]);
+        const headerDiffs = [];
+        allKeys.forEach(k => {
+          const v0 = h0.get(k), v1 = h1.get(k);
+          if (v0 === undefined) headerDiffs.push({ key: k, type: 'added', val: v1 });
+          else if (v1 === undefined) headerDiffs.push({ key: k, type: 'removed', val: v0 });
+          else if (v0 !== v1) headerDiffs.push({ key: k, type: 'changed', from: v0, to: v1 });
+        });
+        if (headerDiffs.length > 0) {
+          hasDiffs = true;
+          diffHtml += `<div class="btt-rd-row"><span class="btt-rd-label">Headers</span><div class="btt-rd-headers">`;
+          headerDiffs.forEach(hd => {
+            if (hd.type === 'added') diffHtml += `<div class="btt-rd-h btt-rd-h-add"><span class="btt-rd-h-icon">+</span> ${escapeHtml(hd.key)}: ${escapeHtml(hd.val)}</div>`;
+            else if (hd.type === 'removed') diffHtml += `<div class="btt-rd-h btt-rd-h-rm"><span class="btt-rd-h-icon">\u2212</span> ${escapeHtml(hd.key)}: ${escapeHtml(hd.val)}</div>`;
+            else diffHtml += `<div class="btt-rd-h btt-rd-h-chg"><span class="btt-rd-h-icon">\u0394</span> ${escapeHtml(hd.key)}: ${escapeHtml(hd.from)} \u2192 ${escapeHtml(hd.to)}</div>`;
+          });
+          diffHtml += `</div></div>`;
+        }
+        // Body
+        const hasBodyA = !!s0.request.body, hasBodyB = !!s1.request.body;
+        if (hasBodyA !== hasBodyB) {
+          hasDiffs = true;
+          diffHtml += `<div class="btt-rd-row"><span class="btt-rd-label">Body</span><span class="${hasBodyA ? 'btt-rd-old' : 'btt-rd-new'}">${hasBodyA ? 'present \u2192 none' : 'none \u2192 present'}</span></div>`;
+        } else if (hasBodyA && hasBodyB && s0.request.body !== s1.request.body) {
+          hasDiffs = true;
+          diffHtml += `<div class="btt-rd-row"><span class="btt-rd-label">Body</span><span class="btt-rd-chg">different content</span></div>`;
+        }
       }
-      if (diffs.length > 0) {
-        html += `<div class="btt-section"><div class="btt-section-title">Request Differences</div>`;
-        diffs.forEach(d => { html += `<div class="btt-diff-item">\u0394 ${d}</div>`; });
-        html += `</div>`;
+
+      diffHtml += `</div></div>`;
+      if (hasDiffs) {
+        html += diffHtml;
       } else {
         html += `<div class="btt-section"><div class="btt-section-title">Request Differences</div><div class="btt-diff-item" style="opacity:0.6">Identical requests (comparing response differences)</div></div>`;
       }
@@ -5693,6 +5725,87 @@ historyDetailOverlay.addEventListener('click', (e) => {
 });
 
 // --- Diff Viewer ---
+
+/**
+ * Compute line-level diff using LCS (O(nm) but fine for typical API responses).
+ * Returns array of ops: { type: 'same'|'add'|'remove'|'change', left?: string, right?: string }
+ */
+function computeLineDiff(textA, textB) {
+  const linesA = textA.split('\n');
+  const linesB = textB.split('\n');
+  const m = linesA.length, n = linesB.length;
+
+  // Build LCS table
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (linesA[i - 1] === linesB[j - 1]) dp[i][j] = dp[i - 1][j - 1] + 1;
+      else dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+
+  // Backtrack to get diff ops
+  const ops = [];
+  let i = m, j = n;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && linesA[i - 1] === linesB[j - 1]) {
+      ops.push({ type: 'same', left: linesA[i - 1], right: linesB[j - 1] });
+      i--; j--;
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      ops.push({ type: 'add', right: linesB[j - 1] });
+      j--;
+    } else {
+      ops.push({ type: 'remove', left: linesA[i - 1] });
+      i--;
+    }
+  }
+  ops.reverse();
+
+  // Merge adjacent remove+add into 'change' ops
+  const merged = [];
+  let idx = 0;
+  while (idx < ops.length) {
+    if (ops[idx].type === 'remove' && idx + 1 < ops.length && ops[idx + 1].type === 'add') {
+      merged.push({ type: 'change', left: ops[idx].left, right: ops[idx + 1].right });
+      idx += 2;
+    } else {
+      merged.push(ops[idx]);
+      idx++;
+    }
+  }
+
+  return merged;
+}
+
+/**
+ * Compute character-level diff within two strings.
+ * Returns HTML with <span class="diff-char-rm/add"> around differing chars.
+ */
+function charDiffHighlight(lineA, lineB, side) {
+  const a = lineA, b = lineB;
+
+  // Find common prefix and suffix, mark the middle as changed
+  let prefixLen = 0;
+  while (prefixLen < a.length && prefixLen < b.length && a[prefixLen] === b[prefixLen]) prefixLen++;
+
+  let suffixLen = 0;
+  while (suffixLen < a.length - prefixLen && suffixLen < b.length - prefixLen &&
+         a[a.length - 1 - suffixLen] === b[b.length - 1 - suffixLen]) suffixLen++;
+
+  const text = side === 'left' ? a : b;
+  const start = prefixLen;
+  const end = text.length - suffixLen;
+
+  if (start >= end) return escapeHtml(text);
+
+  const prefix = escapeHtml(text.substring(0, start));
+  const changed = escapeHtml(text.substring(start, end));
+  const suffix = escapeHtml(text.substring(end));
+  const cls = side === 'left' ? 'diff-char-rm' : 'diff-char-add';
+
+  return `${prefix}<span class="${cls}">${changed}</span>${suffix}`;
+}
+
 function openDiffViewer(fileIdx, blockIdx) {
   const file = loadedFiles[fileIdx];
   const block = file?.suite?.blocks?.[blockIdx];
@@ -5738,12 +5851,50 @@ function openDiffViewer(fileIdx, blockIdx) {
   const leftCode = $('#diffLeftBody').querySelector('code');
   const rightCode = $('#diffRightBody').querySelector('code');
 
-  if (diff.is_json && diff.changed_paths?.length > 0) {
-    leftCode.innerHTML = highlightWithDiffMarkers(formattedA, highlightFn, diff, 'left');
-    rightCode.innerHTML = highlightWithDiffMarkers(formattedB, highlightFn, diff, 'right');
+  // Performance guard: skip line diff for very large responses
+  const linesA = formattedA.split('\n');
+  const linesB = formattedB.split('\n');
+  if (linesA.length > 5000 || linesB.length > 5000) {
+    leftCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)">Response too large for line diff (${linesA.length} / ${linesB.length} lines). Showing raw.</div>` + escapeHtml(formattedA);
+    rightCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)">...</div>` + escapeHtml(formattedB);
   } else {
-    leftCode.innerHTML = highlightFn(escapeHtml(formattedA));
-    rightCode.innerHTML = highlightFn(escapeHtml(formattedB));
+    // Compute line diff
+    const diffOps = computeLineDiff(formattedA, formattedB);
+
+    let leftHtml = '';
+    let rightHtml = '';
+    let leftLineNum = 0, rightLineNum = 0;
+
+    diffOps.forEach(op => {
+      switch (op.type) {
+        case 'same':
+          leftLineNum++; rightLineNum++;
+          const sameLine = highlightFn(escapeHtml(op.left));
+          leftHtml += `<div class="diff-line diff-same"><span class="diff-ln">${leftLineNum}</span>${sameLine}</div>`;
+          rightHtml += `<div class="diff-line diff-same"><span class="diff-ln">${rightLineNum}</span>${sameLine}</div>`;
+          break;
+        case 'remove':
+          leftLineNum++;
+          leftHtml += `<div class="diff-line diff-removed"><span class="diff-ln">${leftLineNum}</span>${highlightFn(escapeHtml(op.left))}</div>`;
+          rightHtml += `<div class="diff-line diff-empty"><span class="diff-ln"></span></div>`;
+          break;
+        case 'add':
+          rightLineNum++;
+          leftHtml += `<div class="diff-line diff-empty"><span class="diff-ln"></span></div>`;
+          rightHtml += `<div class="diff-line diff-added"><span class="diff-ln">${rightLineNum}</span>${highlightFn(escapeHtml(op.right))}</div>`;
+          break;
+        case 'change':
+          leftLineNum++; rightLineNum++;
+          const leftCharHtml = charDiffHighlight(op.left, op.right, 'left');
+          const rightCharHtml = charDiffHighlight(op.left, op.right, 'right');
+          leftHtml += `<div class="diff-line diff-changed"><span class="diff-ln">${leftLineNum}</span>${leftCharHtml}</div>`;
+          rightHtml += `<div class="diff-line diff-changed"><span class="diff-ln">${rightLineNum}</span>${rightCharHtml}</div>`;
+          break;
+      }
+    });
+
+    leftCode.innerHTML = leftHtml;
+    rightCode.innerHTML = rightHtml;
   }
 
   renderChangesOnly(diff);
@@ -5761,42 +5912,6 @@ function openDiffViewer(fileIdx, blockIdx) {
   $('#diffChangesOnly').classList.add('hidden');
 
   $('#diffViewerOverlay').classList.remove('hidden');
-}
-
-function highlightWithDiffMarkers(text, highlightFn, diff, side) {
-  let highlighted = highlightFn(escapeHtml(text));
-  const lines = highlighted.split('\n');
-  const changedKeys = new Set();
-
-  if (diff.changed_paths) {
-    diff.changed_paths.forEach(cp => {
-      const parts = cp.path.split('.');
-      changedKeys.add(parts[parts.length - 1]);
-    });
-  }
-  if (side === 'left' && diff.removed_paths) {
-    diff.removed_paths.forEach(p => {
-      const parts = p.split('.');
-      changedKeys.add(parts[parts.length - 1]);
-    });
-  }
-  if (side === 'right' && diff.added_paths) {
-    diff.added_paths.forEach(p => {
-      const parts = p.split('.');
-      changedKeys.add(parts[parts.length - 1]);
-    });
-  }
-
-  const markedLines = lines.map(line => {
-    const isChanged = Array.from(changedKeys).some(key => line.includes(key));
-    if (isChanged) {
-      const markerClass = side === 'left' ? 'diff-line-removed' : 'diff-line-added';
-      return `<span class="${markerClass}">${line}</span>`;
-    }
-    return line;
-  });
-
-  return markedLines.join('\n');
 }
 
 function renderChangesOnly(diff) {
