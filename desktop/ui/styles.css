@@ -340,32 +340,26 @@ html, body {
   -webkit-app-region: no-drag;
 }
 
-/* Memory pill */
-.mem-pill {
-  display: inline-flex;
-  align-items: center;
+/* Memory button */
+.mem-btn {
+  position: relative;
+  font-size: 14px;
+  width: auto !important;
   gap: 3px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 10px;
+  padding: 0 4px;
+}
+.mem-badge {
   font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
   color: var(--text-muted);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  cursor: pointer;
-  transition: all 0.3s;
-  white-space: nowrap;
 }
-.mem-pill:hover {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: var(--accent-dim);
-}
-.mem-pill.mem-warn {
-  border-color: var(--orange);
+.mem-btn.mem-warn {
   color: var(--orange);
-  background: var(--orange-dim, rgba(210,153,34,0.1));
   animation: mem-pulse 2s ease-in-out infinite;
+}
+.mem-btn.mem-warn .mem-badge {
+  color: var(--orange);
 }
 @keyframes mem-pulse {
   0%, 100% { opacity: 1; }
