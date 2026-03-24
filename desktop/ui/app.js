@@ -681,11 +681,13 @@ function hlSQL(text) {
 function hlPromQL(text) {
   const funcs = /\b(rate|sum|avg|count|min|max|histogram_quantile|topk|bottomk|increase|irate|delta|idelta|deriv|predict_linear|resets|changes|label_replace|label_join|absent|absent_over_time|ceil|floor|round|clamp|clamp_max|clamp_min|exp|ln|log2|log10|sqrt|sgn|sort|sort_desc|time|timestamp|vector|scalar|quantile|stddev|stdvar|count_values|group|last_over_time|present_over_time|avg_over_time|min_over_time|max_over_time|sum_over_time|quantile_over_time|stddev_over_time|stdvar_over_time)\b/g;
   const mods = /\b(by|without|on|ignoring|group_left|group_right|offset|bool)\b/g;
+  // Label matchers must run BEFORE function/keyword wrapping to avoid
+  // matching inside injected HTML attributes (e.g. class="hl-fn")
   return text
+    .replace(/([\w]+)\s*(=~|!=|=|!~)/g, '<span class="hl-attr">$1</span><span class="hl-pct">$2</span>')
     .replace(funcs, '<span class="hl-fn">$1</span>')
     .replace(mods, '<span class="hl-kw">$1</span>')
     .replace(/(&quot;)((?:[^&]|&(?!quot;))*)(&quot;)/g, '<span class="hl-str">$1$2$3</span>')
-    .replace(/([\w]+)\s*(=~|!=|=|!~)/g, '<span class="hl-attr">$1</span> <span class="hl-pct">$2</span>')
     .replace(/\b(\d+\.?\d*)(s|m|h|d|w|y)?\b/g, '<span class="hl-num">$1$2</span>')
     .replace(/([{}[\]()])/g, '<span class="hl-bkt">$1</span>');
 }
