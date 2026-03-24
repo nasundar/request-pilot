@@ -289,7 +289,10 @@
                 <option value="form">Form URL-Encoded</option>
               </select>
             </div>
-            <textarea id="bodyInput" class="body-input" placeholder="Request body..." spellcheck="false" disabled></textarea>
+            <div class="body-editor-wrapper" id="bodyEditorWrapper">
+              <pre class="body-highlight" id="bodyHighlight"><code></code></pre>
+              <textarea id="bodyInput" class="body-input" placeholder="Request body..." spellcheck="false" disabled></textarea>
+            </div>
           </div>
         </section>
 
@@ -394,6 +397,34 @@
   </div>
 
   <div class="block-tooltip hidden" id="blockTooltip"></div>
+
+  <!-- Diff Viewer Overlay -->
+  <div class="diff-viewer-overlay hidden" id="diffViewerOverlay">
+    <div class="diff-viewer-panel">
+      <div class="diff-viewer-header">
+        <span class="diff-viewer-title">⇄ Response Comparison</span>
+        <div class="diff-viewer-summary" id="diffViewerSummary"></div>
+        <div class="diff-viewer-tabs">
+          <button class="diff-tab active" data-diff-tab="side-by-side">Side by Side</button>
+          <button class="diff-tab" data-diff-tab="changes">Changes Only</button>
+        </div>
+        <button class="diff-viewer-close" id="diffViewerClose">✕</button>
+      </div>
+      <div class="diff-viewer-body">
+        <div class="diff-side-by-side" id="diffSideBySide">
+          <div class="diff-pane diff-left">
+            <div class="diff-pane-header" id="diffLeftHeader">Step A</div>
+            <pre class="diff-pane-body" id="diffLeftBody"><code></code></pre>
+          </div>
+          <div class="diff-pane diff-right">
+            <div class="diff-pane-header" id="diffRightHeader">Step B</div>
+            <pre class="diff-pane-body" id="diffRightBody"><code></code></pre>
+          </div>
+        </div>
+        <div class="diff-changes-only hidden" id="diffChangesOnly"></div>
+      </div>
+    </div>
+  </div>
 
   <!-- Tour Picker Dialog -->
   <div class="tour-picker-overlay hidden" id="tourPickerOverlay">

@@ -183,6 +183,8 @@ const addHeaderBtn    = $('#addHeaderBtn');
 const headersContainer= $('#headersContainer');
 const bodyType        = $('#bodyType');
 const bodyInput       = $('#bodyInput');
+const bodyHighlight   = $('#bodyHighlight');
+const bodyEditorWrap  = $('#bodyEditorWrapper');
 const responseEmpty   = $('#responseEmpty');
 const responseContent = $('#responseContent');
 const responseMeta    = $('#responseMeta');
@@ -290,8 +292,22 @@ function updateActiveHighlight() {
   if (activeFileIndex < 0 || activeBlockIndex < 0) return;
   const fileNode = fileTree.querySelector(`.file-node[data-file-idx="${activeFileIndex}"]`);
   if (!fileNode) return;
+  // Auto-expand file node if collapsed
+  if (!fileNode.classList.contains('expanded')) {
+    fileNode.classList.add('expanded');
+    treeExpandState[`file-${activeFileIndex}`] = true;
+  }
   const item = fileNode.querySelector(`.block-item[data-block-idx="${activeBlockIndex}"]`);
-  if (item) item.classList.add('active');
+  if (item) {
+    item.classList.add('active');
+    // Also expand parent group node if needed
+    const parentGroup = item.closest('.group-node');
+    if (parentGroup && !parentGroup.classList.contains('expanded')) {
+      parentGroup.classList.add('expanded');
+      const expandKey = parentGroup.dataset.expandKey;
+      if (expandKey) treeExpandState[expandKey] = true;
+    }
+  }
 }
 
 // --- Update status dots without full rebuild ---
@@ -512,6 +528,91 @@ bodyType.addEventListener('change', () => {
   } else {
     bodyInput.placeholder = 'Request body...';
   }
+  highlightBody();
+});
+
+// --- Body Syntax Highlighting ---
+function detectBodyLang(text) {
+  const t = text.trim();
+  if (!t) return 'text';
+  if (t.startsWith('{') || t.startsWith('[')) return 'json';
+  if (t.startsWith('<') && t.includes('>')) return 'xml';
+  if (/\b(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|FROM|WHERE|JOIN)\b/i.test(t)) return 'sql';
+  if (/[{}[\]()]/.test(t) && /\b(rate|sum|avg|count|histogram_quantile|topk|bottomk|by|without|on|group_left|group_right|offset)\b/i.test(t)) return 'promql';
+  return 'text';
+}
+
+function hlJSON(text) {
+  return text
+    .replace(/(&quot;)((?:[^&]|&(?!quot;))*)(&quot;)/g, '<span class="hl-str">$1$2$3</span>')
+    .replace(/\b(-?\d+\.?\d*([eE][+-]?\d+)?)\b/g, '<span class="hl-num">$1</span>')
+    .replace(/\b(true|false|null)\b/g, '<span class="hl-kw">$1</span>')
+    .replace(/([{}[\]])/g, '<span class="hl-bkt">$1</span>')
+    .replace(/:/g, '<span class="hl-pct">:</span>')
+    .replace(/,/g, '<span class="hl-pct">,</span>');
+}
+
+function hlXML(text) {
+  return text
+    .replace(/(&lt;!--)([\s\S]*?)(--&gt;)/g, '<span class="hl-cmt">$1$2$3</span>')
+    .replace(/(&lt;\/?)([\w:.-]+)/g, '$1<span class="hl-tag">$2</span>')
+    .replace(/([\w:.-]+)(=)/g, '<span class="hl-attr">$1</span>$2')
+    .replace(/(&quot;)((?:[^&]|&(?!quot;))*)(&quot;)/g, '<span class="hl-str">$1$2$3</span>')
+    .replace(/(\/?&gt;)/g, '<span class="hl-bkt">$1</span>');
+}
+
+function hlSQL(text) {
+  const kw = /\b(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|FROM|WHERE|JOIN|INNER|OUTER|LEFT|RIGHT|CROSS|ON|AND|OR|NOT|IN|BETWEEN|LIKE|IS|NULL|AS|ORDER|BY|GROUP|HAVING|LIMIT|OFFSET|UNION|ALL|DISTINCT|SET|INTO|VALUES|TABLE|INDEX|VIEW|EXISTS|CASE|WHEN|THEN|ELSE|END|ASC|DESC|COUNT|SUM|AVG|MIN|MAX|COALESCE|CAST)\b/gi;
+  return text
+    .replace(kw, '<span class="hl-kw">$1</span>')
+    .replace(/(&#39;)((?:[^&]|&(?!#39;))*)(&#39;)/g, '<span class="hl-str">$1$2$3</span>')
+    .replace(/\b(\d+\.?\d*)\b/g, '<span class="hl-num">$1</span>')
+    .replace(/(--.*)/g, '<span class="hl-cmt">$1</span>');
+}
+
+function hlPromQL(text) {
+  const funcs = /\b(rate|sum|avg|count|min|max|histogram_quantile|topk|bottomk|increase|irate|delta|idelta|deriv|predict_linear|resets|changes|label_replace|label_join|absent|absent_over_time|ceil|floor|round|clamp|clamp_max|clamp_min|exp|ln|log2|log10|sqrt|sgn|sort|sort_desc|time|timestamp|vector|scalar|quantile|stddev|stdvar|count_values|group|last_over_time|present_over_time|avg_over_time|min_over_time|max_over_time|sum_over_time|quantile_over_time|stddev_over_time|stdvar_over_time)\b/g;
+  const mods = /\b(by|without|on|ignoring|group_left|group_right|offset|bool)\b/g;
+  return text
+    .replace(funcs, '<span class="hl-fn">$1</span>')
+    .replace(mods, '<span class="hl-kw">$1</span>')
+    .replace(/(&quot;)((?:[^&]|&(?!quot;))*)(&quot;)/g, '<span class="hl-str">$1$2$3</span>')
+    .replace(/([\w]+)\s*(=~|!=|=|!~)/g, '<span class="hl-attr">$1</span> <span class="hl-pct">$2</span>')
+    .replace(/\b(\d+\.?\d*)(s|m|h|d|w|y)?\b/g, '<span class="hl-num">$1$2</span>')
+    .replace(/([{}[\]()])/g, '<span class="hl-bkt">$1</span>');
+}
+
+function highlightBody() {
+  const text = bodyInput.value;
+  const codeEl = bodyHighlight.querySelector('code');
+  if (!text.trim() || bodyInput.disabled) {
+    codeEl.innerHTML = '';
+    bodyEditorWrap.classList.remove('highlighting');
+    return;
+  }
+  const lang = detectBodyLang(text);
+  if (lang === 'text') {
+    codeEl.innerHTML = '';
+    bodyEditorWrap.classList.remove('highlighting');
+    return;
+  }
+  bodyEditorWrap.classList.add('highlighting');
+  const escaped = escapeHtml(text);
+  switch (lang) {
+    case 'json':   codeEl.innerHTML = hlJSON(escaped); break;
+    case 'xml':    codeEl.innerHTML = hlXML(escaped); break;
+    case 'sql':    codeEl.innerHTML = hlSQL(escaped); break;
+    case 'promql': codeEl.innerHTML = hlPromQL(escaped); break;
+    default:       codeEl.innerHTML = escaped;
+  }
+  bodyHighlight.scrollTop = bodyInput.scrollTop;
+  bodyHighlight.scrollLeft = bodyInput.scrollLeft;
+}
+
+bodyInput.addEventListener('input', highlightBody);
+bodyInput.addEventListener('scroll', () => {
+  bodyHighlight.scrollTop = bodyInput.scrollTop;
+  bodyHighlight.scrollLeft = bodyInput.scrollLeft;
 });
 
 // --- Variable interpolation ---
@@ -1803,7 +1904,17 @@ function createBlockItem(file, fileIdx, block, blockIdx) {
         <span class="block-status ${stepStatus ? 'status-' + stepStatus : ''}"></span>
         <span class="step-label">${escapeHtml(step.name)}</span>
         <span class="step-method">${escapeHtml(step.request?.method || '')}</span>
+        <button class="step-play" title="Run this step">▶</button>
       `;
+      const playBtn = stepEl.querySelector('.step-play');
+      playBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        runCompareStep(fileIdx, blockIdx, si);
+      });
+      stepEl.addEventListener('click', (e) => {
+        if (e.target.closest('.step-play')) return;
+        viewCompareStep(fileIdx, blockIdx, si);
+      });
       stepsContainer.appendChild(stepEl);
     });
     item.appendChild(stepsContainer);
@@ -2026,6 +2137,7 @@ function renderAssertions(fileIdx, blockIdx) {
       }
 
       html += '</div>';
+      html += `<button class="diff-view-btn" onclick="openDiffViewer(${fileIdx}, ${blockIdx})">🔍 View Full Diff</button>`;
     }
 
     // Comparison assertions (stored on block.assertions for compare blocks)
@@ -2359,7 +2471,7 @@ async function runSingleBlock(fileIdx, blockIdx) {
   const file = loadedFiles[fileIdx];
   if (!file) return;
   const block = file.suite.blocks[blockIdx];
-  if (!block || !block.request) return;
+  if (!block || (!block.request && !block.compare)) return;
 
   selectBlock(fileIdx, blockIdx);
   sendBtn.disabled = true;
@@ -2426,6 +2538,171 @@ async function runSingleBlock(fileIdx, blockIdx) {
     sendBtn.classList.remove('loading');
     refreshHistoryIfVisible();
   }
+}
+
+// --- Run Single Compare Step ---
+async function runCompareStep(fileIdx, blockIdx, stepIdx) {
+  const file = loadedFiles[fileIdx];
+  if (!file) return;
+  const block = file.suite.blocks[blockIdx];
+  if (!block || !block.compare || !block.steps?.[stepIdx]) return;
+
+  const step = block.steps[stepIdx];
+
+  // Construct a simple (non-compare) block from this step
+  const tempBlock = {
+    block_type: block.block_type,
+    name: `${block.name} \u2192 ${step.name}`,
+    description: `Step: ${step.name}`,
+    request: step.request,
+    assertions: step.assertions || [],
+    extracts: step.extracts || [],
+    compare: false,
+    steps: [],
+    diff: null,
+    disabled: false,
+    mode: block.mode || null,
+    dev_auth_scope: block.dev_auth_scope || null,
+    group: block.group || null,
+    depends: [],
+  };
+
+  selectBlock(fileIdx, blockIdx);
+  sendBtn.disabled = true;
+  sendBtn.classList.add('loading');
+  rpLog('info', `Compare step run started: ${block.name} → ${step.name}`, { file: file.name, blockIdx, stepIdx });
+
+  try {
+    const singleSuite = { variables: file.suite.variables, blocks: [tempBlock] };
+    let extraVars = collectVariablesArray();
+    if (azureAuthState === 'authenticated') {
+      const tokenVars = fetchDevModeToken(file.suite, file.content);
+      if (tokenVars.length > 0) extraVars = [...extraVars, ...tokenVars];
+    }
+    const results = await invoke('run_test_suite', {
+      suite: singleSuite,
+      extraVariables: extraVars,
+      extraHeaders: getExtraHeaders(),
+      runMode: azureAuthState === 'authenticated' ? 'dev' : null,
+      fileName: file.name,
+    });
+
+    const br = results.block_results?.[0];
+    if (br) {
+      if (!file.results) {
+        file.results = {
+          passed: 0, failed: 0, skipped: 0, total_time_ms: 0,
+          block_results: new Array(file.suite.blocks.length).fill(null),
+          final_variables: {}
+        };
+      }
+      if (!file.results.block_results[blockIdx]) {
+        file.results.block_results[blockIdx] = {
+          seq: null, name: block.name, block_type: block.block_type,
+          group: block.group, request_method: '', request_url: '',
+          request_headers: [], request_body: null,
+          status: 'pending', response: null,
+          assertion_results: [], extract_results: [],
+          error: null, time_ms: 0, step_results: [], diff_result: null
+        };
+      }
+      const parentBr = file.results.block_results[blockIdx];
+      while (parentBr.step_results.length <= stepIdx) {
+        parentBr.step_results.push(null);
+      }
+      parentBr.step_results[stepIdx] = {
+        name: step.name,
+        request_method: br.request_method,
+        request_url: br.request_url,
+        request_headers: br.request_headers,
+        request_body: br.request_body,
+        response: br.response,
+        assertion_results: br.assertion_results || [],
+        extract_results: br.extract_results || [],
+        time_ms: br.time_ms,
+        error: br.error
+      };
+
+      if (results.final_variables) {
+        Object.entries(results.final_variables).forEach(([name, value]) => {
+          envVars[name] = value;
+        });
+      }
+    }
+
+    updateBlockStatuses();
+    renderFileTree();
+    renderEnvVars();
+
+    if (br?.response) {
+      lastResponse = br.response;
+      displayResponse(br.response);
+    } else if (br?.error) {
+      displayError(br.error);
+    }
+
+    renderAssertions(fileIdx, blockIdx);
+
+    const status = br?.status || 'done';
+    showToast(`${step.name}: ${status}`, status === 'passed' ? 'success' : status === 'failed' ? 'error' : 'info');
+    rpLog('info', `Compare step run completed: ${step.name}`, { status, timeMs: br?.time_ms });
+  } catch (err) {
+    displayError(err);
+    showToast(String(err), 'error');
+    rpLog('error', 'Command failed: run_test_suite (compare step)', String(err));
+  } finally {
+    sendBtn.disabled = false;
+    sendBtn.classList.remove('loading');
+    refreshHistoryIfVisible();
+  }
+}
+
+// --- View Compare Step ---
+function viewCompareStep(fileIdx, blockIdx, stepIdx) {
+  const file = loadedFiles[fileIdx];
+  const block = file?.suite?.blocks?.[blockIdx];
+  const step = block?.steps?.[stepIdx];
+  if (!step) return;
+
+  activeFileIndex = fileIdx;
+  activeBlockIndex = blockIdx;
+
+  if (step.request) {
+    methodSelect.value = step.request.method || 'GET';
+    updateMethodColor();
+    urlInput.value = step.request.url || '';
+    headersContainer.innerHTML = '';
+    if (step.request.headers?.length > 0) {
+      step.request.headers.forEach(([k, v]) => headersContainer.appendChild(createHeaderRow(k, v)));
+    } else {
+      headersContainer.appendChild(createHeaderRow());
+    }
+    if (step.request.body) {
+      const isJson = step.request.body.trim().startsWith('{') || step.request.body.trim().startsWith('[');
+      bodyType.value = isJson ? 'json' : 'text';
+      bodyInput.value = step.request.body;
+      bodyInput.disabled = false;
+    } else {
+      bodyType.value = 'none';
+      bodyInput.value = '';
+      bodyInput.disabled = true;
+    }
+    bodyType.dispatchEvent(new Event('change'));
+  }
+
+  const br = file.results?.block_results?.[blockIdx];
+  const sr = br?.step_results?.[stepIdx];
+  if (sr?.response) {
+    displayResponse(sr.response);
+    lastResponse = sr.response;
+  }
+
+  assertionsTab.style.display = '';
+  renderAssertions(fileIdx, blockIdx);
+
+  updateActiveHighlight();
+
+  if (typeof highlightBody === 'function') highlightBody();
 }
 
 // --- Test Results Bar ---
@@ -2519,8 +2796,35 @@ function showTestResults(passed, failed, skipped, timeMs, blockResults, pendingB
         const vi = row.querySelector('.detail-viewed');
         if (vi) { vi.textContent = '👁'; vi.title = 'Viewed'; vi.classList.remove('mutated'); }
         else row.insertAdjacentHTML('beforeend', '<span class="detail-viewed" title="Viewed">👁</span>');
+        // Expand parent file node if collapsed
+        const fileNode = fileTree.querySelector(`.file-node[data-file-idx="${br.fileIdx}"]`);
+        if (fileNode && !fileNode.classList.contains('expanded')) {
+          fileNode.classList.add('expanded');
+          treeExpandState[`file-${br.fileIdx}`] = true;
+        }
+
+        // Also expand any group node containing this block
+        const blockItem = fileNode?.querySelector(`.block-item[data-block-idx="${br.blockIdx}"]`);
+        if (blockItem) {
+          const parentGroup = blockItem.closest('.group-node');
+          if (parentGroup && !parentGroup.classList.contains('expanded')) {
+            parentGroup.classList.add('expanded');
+            const expandKey = parentGroup.dataset.expandKey;
+            if (expandKey) treeExpandState[expandKey] = true;
+          }
+        }
+
+        if (currentMode !== 'builder') {
+          switchMode('builder');
+        }
+
         selectBlock(br.fileIdx, br.blockIdx);
-        if (currentMode === 'code') setMode('builder');
+
+        // Scroll the block into view in sidebar
+        const selectedItem = fileNode?.querySelector(`.block-item[data-block-idx="${br.blockIdx}"]`);
+        if (selectedItem) {
+          selectedItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
       });
     }
 
@@ -2636,8 +2940,35 @@ async function startBlockProgressListener() {
         const vi = row.querySelector('.detail-viewed');
         if (vi) { vi.textContent = '👁'; vi.title = 'Viewed'; vi.classList.remove('mutated'); }
         else row.insertAdjacentHTML('beforeend', '<span class="detail-viewed" title="Viewed">👁</span>');
+        // Expand parent file node if collapsed
+        const fileNode = fileTree.querySelector(`.file-node[data-file-idx="${fIdx}"]`);
+        if (fileNode && !fileNode.classList.contains('expanded')) {
+          fileNode.classList.add('expanded');
+          treeExpandState[`file-${fIdx}`] = true;
+        }
+
+        // Also expand any group node containing this block
+        const blockItem = fileNode?.querySelector(`.block-item[data-block-idx="${bIdx}"]`);
+        if (blockItem) {
+          const parentGroup = blockItem.closest('.group-node');
+          if (parentGroup && !parentGroup.classList.contains('expanded')) {
+            parentGroup.classList.add('expanded');
+            const expandKey = parentGroup.dataset.expandKey;
+            if (expandKey) treeExpandState[expandKey] = true;
+          }
+        }
+
+        if (currentMode !== 'builder') {
+          switchMode('builder');
+        }
+
         selectBlock(fIdx, bIdx);
-        if (currentMode === 'code') setMode('builder');
+
+        // Scroll the block into view in sidebar
+        const selectedItem = fileNode?.querySelector(`.block-item[data-block-idx="${bIdx}"]`);
+        if (selectedItem) {
+          selectedItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
       });
 
       // Update streaming counts and progress bar
@@ -3448,6 +3779,15 @@ async function switchMode(mode) {
   if (mode === 'builder') {
     urlBar.classList.remove('hidden');
     splitPanels.classList.remove('hidden');
+    // Re-render assertions for active block if it has results
+    if (activeFileIndex >= 0 && activeBlockIndex >= 0) {
+      const file = loadedFiles[activeFileIndex];
+      const block = file?.suite?.blocks?.[activeBlockIndex];
+      const br = file?.results?.block_results?.[activeBlockIndex];
+      if (block && br) {
+        renderAssertions(activeFileIndex, activeBlockIndex);
+      }
+    }
   } else if (mode === 'code') {
     codeEditorPanel.classList.remove('hidden');
   } else if (mode === 'history') {
@@ -5268,6 +5608,168 @@ historyDetailOverlay.addEventListener('click', (e) => {
   if (e.target === historyDetailOverlay) closeHistoryDetail();
 });
 
+// --- Diff Viewer ---
+function openDiffViewer(fileIdx, blockIdx) {
+  const file = loadedFiles[fileIdx];
+  const block = file?.suite?.blocks?.[blockIdx];
+  const br = file?.results?.block_results?.[blockIdx];
+  if (!br || !br.diff_result) return;
+
+  const diff = br.diff_result;
+  const steps = br.step_results || [];
+
+  const stepAName = block?.diff?.step_a || steps[0]?.name || 'Step A';
+  const stepBName = block?.diff?.step_b || steps[1]?.name || 'Step B';
+
+  const stepA = steps.find(s => s.name === stepAName);
+  const stepB = steps.find(s => s.name === stepBName);
+  const bodyA = stepA?.response?.body || '(no response)';
+  const bodyB = stepB?.response?.body || '(no response)';
+
+  // Summary badges
+  const summaryEl = $('#diffViewerSummary');
+  summaryEl.innerHTML = `
+    <span class="diff-badge ${diff.match_exact ? 'diff-match' : 'diff-mismatch'}">
+      ${diff.match_exact ? '✓ Exact Match' : `${(diff.similarity * 100).toFixed(1)}% Similar`}
+    </span>
+    <span class="diff-type">${diff.is_json ? 'JSON' : 'Text'}</span>
+    ${diff.added_count ? `<span class="diff-stat-badge added">+${diff.added_count} added</span>` : ''}
+    ${diff.removed_count ? `<span class="diff-stat-badge removed">-${diff.removed_count} removed</span>` : ''}
+    ${diff.changed_count ? `<span class="diff-stat-badge changed">Δ${diff.changed_count} changed</span>` : ''}
+  `;
+
+  // Side-by-side headers
+  $('#diffLeftHeader').textContent = stepAName;
+  $('#diffRightHeader').textContent = stepBName;
+
+  // Pretty-print JSON bodies
+  let formattedA = bodyA;
+  let formattedB = bodyB;
+  try { formattedA = JSON.stringify(JSON.parse(bodyA), null, 2); } catch {}
+  try { formattedB = JSON.stringify(JSON.parse(bodyB), null, 2); } catch {}
+
+  const lang = detectBodyLang(formattedA);
+  const highlightFn = lang === 'json' ? hlJSON : lang === 'xml' ? hlXML : lang === 'sql' ? hlSQL : lang === 'promql' ? hlPromQL : (t) => t;
+
+  const leftCode = $('#diffLeftBody').querySelector('code');
+  const rightCode = $('#diffRightBody').querySelector('code');
+
+  if (diff.is_json && diff.changed_paths?.length > 0) {
+    leftCode.innerHTML = highlightWithDiffMarkers(formattedA, highlightFn, diff, 'left');
+    rightCode.innerHTML = highlightWithDiffMarkers(formattedB, highlightFn, diff, 'right');
+  } else {
+    leftCode.innerHTML = highlightFn(escapeHtml(formattedA));
+    rightCode.innerHTML = highlightFn(escapeHtml(formattedB));
+  }
+
+  renderChangesOnly(diff);
+
+  // Sync scroll between panes
+  const leftPane = $('#diffLeftBody');
+  const rightPane = $('#diffRightBody');
+  leftPane.onscroll = () => { rightPane.scrollTop = leftPane.scrollTop; };
+  rightPane.onscroll = () => { leftPane.scrollTop = rightPane.scrollTop; };
+
+  // Reset tabs to side-by-side
+  document.querySelectorAll('.diff-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector('.diff-tab[data-diff-tab="side-by-side"]')?.classList.add('active');
+  $('#diffSideBySide').classList.remove('hidden');
+  $('#diffChangesOnly').classList.add('hidden');
+
+  $('#diffViewerOverlay').classList.remove('hidden');
+}
+
+function highlightWithDiffMarkers(text, highlightFn, diff, side) {
+  let highlighted = highlightFn(escapeHtml(text));
+  const lines = highlighted.split('\n');
+  const changedKeys = new Set();
+
+  if (diff.changed_paths) {
+    diff.changed_paths.forEach(cp => {
+      const parts = cp.path.split('.');
+      changedKeys.add(parts[parts.length - 1]);
+    });
+  }
+  if (side === 'left' && diff.removed_paths) {
+    diff.removed_paths.forEach(p => {
+      const parts = p.split('.');
+      changedKeys.add(parts[parts.length - 1]);
+    });
+  }
+  if (side === 'right' && diff.added_paths) {
+    diff.added_paths.forEach(p => {
+      const parts = p.split('.');
+      changedKeys.add(parts[parts.length - 1]);
+    });
+  }
+
+  const markedLines = lines.map(line => {
+    const isChanged = Array.from(changedKeys).some(key => line.includes(key));
+    if (isChanged) {
+      const markerClass = side === 'left' ? 'diff-line-removed' : 'diff-line-added';
+      return `<span class="${markerClass}">${line}</span>`;
+    }
+    return line;
+  });
+
+  return markedLines.join('\n');
+}
+
+function renderChangesOnly(diff) {
+  const container = $('#diffChangesOnly');
+  let html = '';
+
+  if (diff.changed_paths && diff.changed_paths.length > 0) {
+    html += '<div class="diff-section"><div class="diff-section-header">Changed Fields</div>';
+    diff.changed_paths.forEach(cp => {
+      html += `<div class="diff-change-row">
+        <span class="diff-change-path">${escapeHtml(cp.path)}</span>
+        <div class="diff-change-values">
+          <span class="diff-change-left">${escapeHtml(String(cp.left ?? ''))}</span>
+          <span class="diff-change-arrow">→</span>
+          <span class="diff-change-right">${escapeHtml(String(cp.right ?? ''))}</span>
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+  }
+
+  if (diff.added_paths && diff.added_paths.length > 0) {
+    html += '<div class="diff-section"><div class="diff-section-header">Added Paths (only in Step B)</div>';
+    diff.added_paths.forEach(p => {
+      html += `<div class="diff-change-row added"><span class="diff-change-path">+ ${escapeHtml(p)}</span></div>`;
+    });
+    html += '</div>';
+  }
+
+  if (diff.removed_paths && diff.removed_paths.length > 0) {
+    html += '<div class="diff-section"><div class="diff-section-header">Removed Paths (only in Step A)</div>';
+    diff.removed_paths.forEach(p => {
+      html += `<div class="diff-change-row removed"><span class="diff-change-path">- ${escapeHtml(p)}</span></div>`;
+    });
+    html += '</div>';
+  }
+
+  if (!html) html = '<div class="diff-empty">No differences found</div>';
+  container.innerHTML = html;
+}
+
+function closeDiffViewer() {
+  $('#diffViewerOverlay').classList.add('hidden');
+}
+
+$('#diffViewerClose').addEventListener('click', closeDiffViewer);
+
+document.querySelector('.diff-viewer-tabs')?.addEventListener('click', (e) => {
+  const tab = e.target.closest('.diff-tab');
+  if (!tab) return;
+  document.querySelectorAll('.diff-tab').forEach(t => t.classList.remove('active'));
+  tab.classList.add('active');
+  const mode = tab.dataset.diffTab;
+  $('#diffSideBySide').classList.toggle('hidden', mode !== 'side-by-side');
+  $('#diffChangesOnly').classList.toggle('hidden', mode !== 'changes');
+});
+
 // --- Keyboard Shortcuts ---
 document.addEventListener('keydown', (e) => {
   // Ctrl+Enter -> Send
@@ -5303,12 +5805,16 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoomIn(); }
   else if (e.ctrlKey && e.key === '-') { e.preventDefault(); zoomOut(); }
   else if (e.ctrlKey && e.key === '0') { e.preventDefault(); zoomReset(); }
-  // Escape -> close history detail or leave history
-  if (e.key === 'Escape' && currentMode === 'history') {
-    if (!historyDetailOverlay.classList.contains('hidden')) {
-      closeHistoryDetail();
-    } else {
-      switchMode('builder');
+  // Escape -> close diff viewer, history detail, or leave history
+  if (e.key === 'Escape') {
+    if (!$('#diffViewerOverlay').classList.contains('hidden')) {
+      closeDiffViewer();
+    } else if (currentMode === 'history') {
+      if (!historyDetailOverlay.classList.contains('hidden')) {
+        closeHistoryDetail();
+      } else {
+        switchMode('builder');
+      }
     }
   }
 });
