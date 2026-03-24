@@ -25,6 +25,7 @@ let codeEditorModified = false;
 let historyCache = [];
 let historyExpandedGroups = new Set();
 let historySelectedIds = new Set();  // Selected for comparison
+let _selectedHistoryHeaders = new Set();  // Headers selected in multi-select dropdown
 // Tri-state viewed tracking: Maps key → { status, response_hash }
 // States: unseen (not in map), seen (in map, hash matches), seen-mutated (in map, hash differs)
 let viewedResults = new Map();       // "fileIdx-blockIdx" → { status, hash }
@@ -5250,10 +5251,24 @@ function createHistoryEntryRow(entry) {
     ? '<span class="hist-source-badge extension-live">📡 Live</span>'
     : '<span class="hist-source-badge manual">Manual</span>';
   const blockName = entry.block_name ? `<span class="hist-block-name">${escapeHtml(entry.block_name)}</span>` : '';
+  const stepName = entry.compare_step ? `<span class="hist-step-name">${escapeHtml(entry.compare_step)}</span>` : '';
   const timeColor = entry.response_time_ms < 200 ? 'var(--green)' : entry.response_time_ms < 500 ? 'var(--orange)' : 'var(--red)';
   const viewedIcon = viewState === 'seen' ? '<span class="hist-viewed" title="Viewed">👁</span>'
     : viewState === 'seen-mutated' ? '<span class="hist-viewed mutated" title="Changed since last viewed">👁✱</span>'
     : '';
+  // Build selected header values for this entry
+  let headerTags = '';
+  if (_selectedHistoryHeaders.size > 0) {
+    const reqMap = new Map((entry.request_headers || []).map(([k, v]) => [k.toLowerCase(), v]));
+    const respMap = new Map((entry.response_headers || []).map(([k, v]) => [k.toLowerCase(), v]));
+    _selectedHistoryHeaders.forEach(h => {
+      const key = h.toLowerCase();
+      const val = reqMap.get(key) ?? respMap.get(key);
+      if (val !== undefined) {
+        headerTags += `<span class="hist-header-tag" title="${escapeAttr(h)}: ${escapeAttr(val)}"><span class="hist-header-key">${escapeHtml(h)}:</span> ${escapeHtml(val.length > 40 ? val.substring(0, 37) + '…' : val)}</span>`;
+      }
+    });
+  }
   row.innerHTML = `
     <input type="checkbox" class="hist-entry-checkbox" data-seq="${entry.seq}" title="Select for comparison">
     <span class="hist-entry-seq">#${entry.seq}</span>
@@ -5263,8 +5278,10 @@ function createHistoryEntryRow(entry) {
     <span class="hist-entry-time" style="color:${timeColor}">${entry.response_time_ms}ms</span>
     ${sourceBadge}
     ${blockName}
+    ${stepName}
     <span class="hist-entry-timestamp">${formatHistoryTime(entry.timestamp)}</span>
     ${viewedIcon}
+    ${headerTags ? `<div class="hist-entry-headers">${headerTags}</div>` : ''}
   `;
   // Checkbox for comparison selection
   const checkbox = row.querySelector('.hist-entry-checkbox');
@@ -5593,6 +5610,80 @@ historyMethodFilter.addEventListener('change', loadHistory);
 historyStatusFilter.addEventListener('change', loadHistory);
 historySourceFilter.addEventListener('change', loadHistory);
 historyGroupBySelect.addEventListener('change', () => renderHistoryLog(historyCache));
+
+// --- Header picker multi-select ---
+const histHeaderPickerBtn = $('#histHeaderPickerBtn');
+const histHeaderPickerDropdown = $('#histHeaderPickerDropdown');
+const histHeaderPickerSearch = $('#histHeaderPickerSearch');
+const histHeaderPickerList = $('#histHeaderPickerList');
+
+histHeaderPickerBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const isHidden = histHeaderPickerDropdown.classList.contains('hidden');
+  histHeaderPickerDropdown.classList.toggle('hidden');
+  if (isHidden) {
+    populateHeaderPickerList();
+    histHeaderPickerSearch.value = '';
+    histHeaderPickerSearch.focus();
+  }
+});
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#histHeaderPicker')) {
+    histHeaderPickerDropdown.classList.add('hidden');
+  }
+});
+
+function collectAllHeaders() {
+  const reqSet = new Set();
+  const respSet = new Set();
+  historyCache.forEach(entry => {
+    (entry.request_headers || []).forEach(([k]) => reqSet.add(k));
+    (entry.response_headers || []).forEach(([k]) => respSet.add(k));
+  });
+  return { req: [...reqSet].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())),
+           resp: [...respSet].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())) };
+}
+
+function populateHeaderPickerList(filter) {
+  const { req, resp } = collectAllHeaders();
+  const f = (filter || '').toLowerCase();
+  let html = '';
+  const filteredReq = req.filter(h => !f || h.toLowerCase().includes(f));
+  const filteredResp = resp.filter(h => !f || h.toLowerCase().includes(f));
+  if (filteredReq.length > 0) {
+    html += '<div class="hhp-section">Request Headers</div>';
+    filteredReq.forEach(h => {
+      const checked = _selectedHistoryHeaders.has(h) ? 'checked' : '';
+      html += `<label class="hhp-item"><input type="checkbox" value="${escapeAttr(h)}" data-type="req" ${checked}><span>${escapeHtml(h)}</span></label>`;
+    });
+  }
+  if (filteredResp.length > 0) {
+    html += '<div class="hhp-section">Response Headers</div>';
+    filteredResp.forEach(h => {
+      const checked = _selectedHistoryHeaders.has(h) ? 'checked' : '';
+      html += `<label class="hhp-item"><input type="checkbox" value="${escapeAttr(h)}" data-type="resp" ${checked}><span>${escapeHtml(h)}</span></label>`;
+    });
+  }
+  if (!html) html = '<div class="hhp-empty">No headers found</div>';
+  histHeaderPickerList.innerHTML = html;
+}
+
+histHeaderPickerSearch.addEventListener('input', () => {
+  populateHeaderPickerList(histHeaderPickerSearch.value);
+});
+
+histHeaderPickerList.addEventListener('change', (e) => {
+  const cb = e.target;
+  if (cb.type !== 'checkbox') return;
+  const header = cb.value;
+  if (cb.checked) _selectedHistoryHeaders.add(header);
+  else _selectedHistoryHeaders.delete(header);
+  // Update button label
+  histHeaderPickerBtn.textContent = _selectedHistoryHeaders.size > 0
+    ? `Headers (${_selectedHistoryHeaders.size}) ▾` : 'Headers ▾';
+  renderHistoryLog(historyCache);
+});
 let historySearchTimeout;
 historyUrlSearch.addEventListener('input', () => {
   const value = historyUrlSearch.value.trim();

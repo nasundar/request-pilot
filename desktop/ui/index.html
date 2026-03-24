@@ -227,6 +227,13 @@
             <option value="file-group-test">File → Group → Test</option>
             <option value="compare-steps">Compare Steps</option>
           </select>
+          <div class="hist-header-picker" id="histHeaderPicker">
+            <button class="btn btn-ghost btn-xs hist-header-picker-btn" id="histHeaderPickerBtn">Headers ▾</button>
+            <div class="hist-header-picker-dropdown hidden" id="histHeaderPickerDropdown">
+              <div class="hist-header-picker-search"><input type="text" id="histHeaderPickerSearch" placeholder="Filter headers..." spellcheck="false"></div>
+              <div class="hist-header-picker-list" id="histHeaderPickerList"></div>
+            </div>
+          </div>
         </div>
         <div class="history-stats" id="historyStats"></div>
         <div class="history-log" id="historyLog"></div>
