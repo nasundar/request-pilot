@@ -4381,9 +4381,14 @@ input:focus, select:focus, textarea:focus { outline: none; }
 }
 .diff-match { color: var(--green); }
 .diff-mismatch { color: var(--orange); }
-.diff-added { color: var(--green); }
-.diff-removed { color: var(--red); }
-.diff-changed { color: var(--orange); }
+/* Diff badge colors (for stat badges, not line-level diffs) */
+.diff-stat-badge.added { color: var(--green); }
+.diff-stat-badge.removed { color: var(--red); }
+.diff-stat-badge.changed { color: var(--orange); }
+/* Diff value/path colors — scoped to avoid overriding .diff-line text */
+.diff-added:not(.diff-line) { color: var(--green); }
+.diff-removed:not(.diff-line) { color: var(--red); }
+.diff-changed:not(.diff-line) { color: var(--orange); }
 
 /* Diff paths */
 .diff-paths {

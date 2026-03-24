@@ -5781,7 +5781,7 @@ function computeLineDiff(textA, textB) {
  * Compute character-level diff within two strings.
  * Returns HTML with <span class="diff-char-rm/add"> around differing chars.
  */
-function charDiffHighlight(lineA, lineB, side) {
+function charDiffHighlight(lineA, lineB, side, hlFn) {
   const a = lineA, b = lineB;
 
   // Find common prefix and suffix, mark the middle as changed
@@ -5796,14 +5796,16 @@ function charDiffHighlight(lineA, lineB, side) {
   const start = prefixLen;
   const end = text.length - suffixLen;
 
-  if (start >= end) return escapeHtml(text);
+  if (start >= end) return hlFn(escapeHtml(text));
 
-  const prefix = escapeHtml(text.substring(0, start));
-  const changed = escapeHtml(text.substring(start, end));
-  const suffix = escapeHtml(text.substring(end));
   const cls = side === 'left' ? 'diff-char-rm' : 'diff-char-add';
 
-  return `${prefix}<span class="${cls}">${changed}</span>${suffix}`;
+  // Apply syntax highlighting to each segment, wrap changed part
+  const prefixHtml = hlFn(escapeHtml(text.substring(0, start)));
+  const changedHtml = `<span class="${cls}">${hlFn(escapeHtml(text.substring(start, end)))}</span>`;
+  const suffixHtml = hlFn(escapeHtml(text.substring(end)));
+
+  return prefixHtml + changedHtml + suffixHtml;
 }
 
 function openDiffViewer(fileIdx, blockIdx) {
@@ -5885,8 +5887,8 @@ function openDiffViewer(fileIdx, blockIdx) {
           break;
         case 'change':
           leftLineNum++; rightLineNum++;
-          const leftCharHtml = charDiffHighlight(op.left, op.right, 'left');
-          const rightCharHtml = charDiffHighlight(op.left, op.right, 'right');
+          const leftCharHtml = charDiffHighlight(op.left, op.right, 'left', highlightFn);
+          const rightCharHtml = charDiffHighlight(op.left, op.right, 'right', highlightFn);
           leftHtml += `<div class="diff-line diff-changed"><span class="diff-ln">${leftLineNum}</span>${leftCharHtml}</div>`;
           rightHtml += `<div class="diff-line diff-changed"><span class="diff-ln">${rightLineNum}</span>${rightCharHtml}</div>`;
           break;
