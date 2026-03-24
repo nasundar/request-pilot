@@ -1,4 +1,5 @@
 mod live_capture;
+pub mod perf;
 
 use request_pilot_core::{
     azure_auth, env_file, history, http_client, http_parser, test_runner, url_trie, variables,
@@ -472,6 +473,11 @@ pub fn run() {
             stop_live_capture,
             set_live_capture_mode,
             get_live_capture_status,
+            perf::format_body,
+            perf::build_json_tree,
+            perf::expand_json_node,
+            perf::compute_diff,
+            perf::sort_and_normalize,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

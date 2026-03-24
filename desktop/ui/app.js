@@ -176,6 +176,88 @@ function getFileRunStats(fileName) {
   };
 }
 
+// --- Worker Pool ---
+class WorkerPool {
+  constructor(workerUrl, poolSize = 2) {
+    this.workers = [];
+    this.queue = [];
+    this.pending = new Map();
+    this.nextId = 0;
+
+    for (let i = 0; i < poolSize; i++) {
+      const w = new Worker(workerUrl);
+      w.onmessage = (e) => this._handleMessage(e.data);
+      w.onerror = (e) => this._handleError(e);
+      w.busy = false;
+      w.currentId = null;
+      this.workers.push(w);
+    }
+  }
+
+  post(type, payload) {
+    return new Promise((resolve, reject) => {
+      const id = String(this.nextId++);
+      this.pending.set(id, { resolve, reject });
+      const worker = this.workers.find(w => !w.busy);
+      if (worker) {
+        worker.busy = true;
+        worker.currentId = id;
+        worker.postMessage({ type, id, payload });
+      } else {
+        this.queue.push({ type, id, payload });
+      }
+    });
+  }
+
+  _handleMessage(data) {
+    const { id, result, error } = data;
+    const cb = this.pending.get(id);
+    if (cb) {
+      this.pending.delete(id);
+      if (error) cb.reject(new Error(error));
+      else cb.resolve(result);
+    }
+    const worker = this.workers.find(w => w.currentId === id);
+    if (worker) {
+      worker.busy = false;
+      worker.currentId = null;
+      if (this.queue.length > 0) {
+        const next = this.queue.shift();
+        worker.busy = true;
+        worker.currentId = next.id;
+        worker.postMessage(next);
+      }
+    }
+  }
+
+  _handleError(e) {
+    console.error('Worker error:', e);
+  }
+
+  destroy() {
+    this.workers.forEach(w => w.terminate());
+    this.workers = [];
+    this.pending.forEach(cb => cb.reject(new Error('Worker pool destroyed')));
+    this.pending.clear();
+    this.queue = [];
+  }
+}
+
+let workerPool = null;
+try {
+  workerPool = new WorkerPool('worker.js', 2);
+} catch (e) {
+  console.warn('Web Workers not available, falling back to main thread:', e);
+}
+
+async function offthread(type, payload, fallback) {
+  if (workerPool) {
+    try { return await workerPool.post(type, payload); }
+    catch { return fallback(); }
+  }
+  return fallback();
+}
+
 // --- DOM Refs ---
 const methodSelect    = $('#methodSelect');
 const urlInput        = $('#urlInput');
@@ -957,44 +1039,189 @@ function renderResponseBodyInto(container, body, headers) {
   renderResponseBodyFull(container, body, contentType);
 }
 
-function renderResponseBodyFull(container, body, contentType) {
-  switch (contentType) {
-    case 'json':
+async function renderResponseBodyFull(container, body, contentType) {
+  const spinner = document.createElement('div');
+  spinner.className = 'body-loading';
+  spinner.innerHTML = '<span class="spinner-sm"></span> Rendering...';
+  container.appendChild(spinner);
+
+  try {
+    if (contentType === 'json') {
+      const treeData = await invoke('build_json_tree', { json: body, maxDepth: 3, maxChildren: 100 });
+      spinner.remove();
+      container.appendChild(renderJsonTreeFromRust(treeData, body));
+      try { container.dataset.rawJson = await invoke('sort_and_normalize', { body, contentType: 'json' }); }
+      catch { container.dataset.rawJson = body; }
+    } else if (contentType === 'xml' || contentType === 'html' || contentType === 'yaml' ||
+               contentType === 'csv' || contentType === 'protobuf') {
+      // Use Rust format_body for highlightable types
       try {
-        const parsed = JSON.parse(body);
-        container.appendChild(renderJsonTree(parsed));
-        container.dataset.rawJson = JSON.stringify(parsed, null, 2);
-      } catch {
+        const lines = await invoke('format_body', { body, contentType });
+        spinner.remove();
+        renderVirtualResponseBody(container, lines);
         container.dataset.rawJson = body;
+      } catch {
+        spinner.remove();
+        // Fallback to original JS renderers
+        switch (contentType) {
+          case 'xml': case 'html': container.appendChild(renderXmlHighlighted(body)); break;
+          case 'yaml': container.appendChild(renderYamlHighlighted(body)); break;
+          case 'csv': container.appendChild(renderCsvTable(body)); break;
+          case 'protobuf': {
+            const pre = document.createElement('pre');
+            pre.className = 'syntax-plain';
+            pre.innerHTML = `<span class="syntax-comment">// Binary protobuf response</span>\n${escapeHtml(body || '')}`;
+            container.appendChild(pre);
+            break;
+          }
+        }
+        container.dataset.rawJson = body;
+      }
+    } else {
+      // Plain text — use Rust format_body
+      try {
+        const lines = await invoke('format_body', { body, contentType: 'text' });
+        spinner.remove();
+        renderVirtualResponseBody(container, lines);
+      } catch {
+        spinner.remove();
         const pre = document.createElement('pre');
         pre.className = 'syntax-plain';
-        pre.textContent = body;
+        pre.textContent = body || '';
         container.appendChild(pre);
       }
-      break;
-    case 'xml':
-    case 'html':
-      container.appendChild(renderXmlHighlighted(body));
-      break;
-    case 'yaml':
-      container.appendChild(renderYamlHighlighted(body));
-      break;
-    case 'csv':
-      container.appendChild(renderCsvTable(body));
-      break;
-    case 'protobuf': {
-      const pre = document.createElement('pre');
-      pre.className = 'syntax-plain';
-      pre.innerHTML = `<span class="syntax-comment">// Binary protobuf response</span>\n${escapeHtml(body || '')}`;
-      container.appendChild(pre);
-      break;
+      container.dataset.rawJson = body || '';
     }
-    default: {
-      const pre = document.createElement('pre');
-      pre.className = 'syntax-plain';
-      pre.textContent = body || '';
-      container.appendChild(pre);
+  } catch (e) {
+    spinner.remove();
+    // Global fallback — render plain text
+    const pre = document.createElement('pre');
+    pre.className = 'syntax-plain';
+    pre.textContent = body || '';
+    container.appendChild(pre);
+    container.dataset.rawJson = body || '';
+  }
+}
+
+// --- Rust JSON Tree Rendering ---
+
+function renderJsonTreeFromRust(node, rawJson) {
+  const container = document.createElement('div');
+  container.className = 'json-tree';
+  container.appendChild(buildJsonNodeEl(node, rawJson));
+  return container;
+}
+
+function buildJsonNodeEl(node, rawJson) {
+  const isComplex = node.node_type === 'object' || node.node_type === 'array';
+  const line = document.createElement('div');
+  line.className = 'json-line';
+  line.style.paddingLeft = `${node.depth * 18}px`;
+
+  if (isComplex) {
+    const open = node.node_type === 'array' ? '[' : '{';
+    const close = node.node_type === 'array' ? ']' : '}';
+    const comma = node.is_last ? '' : ',';
+    const hasChildren = node.children.length > 0;
+
+    const toggle = document.createElement('span');
+    toggle.className = hasChildren ? 'json-toggle expanded' : 'json-toggle collapsed';
+    toggle.textContent = hasChildren ? '▾' : '▸';
+
+    const keySpan = node.key !== null ? `<span class="json-key">"${escapeHtml(String(node.key))}"</span><span class="json-colon">: </span>` : '';
+    line.innerHTML = `${keySpan}<span class="json-bracket">${open}</span>`;
+    line.insertBefore(toggle, line.firstChild);
+
+    const preview = document.createElement('span');
+    preview.className = hasChildren ? 'json-preview hidden' : 'json-preview';
+    preview.textContent = ` ${node.child_count} ${node.node_type === 'array' ? 'items' : 'keys'} `;
+    line.appendChild(preview);
+
+    const childContainer = document.createElement('div');
+    childContainer.className = hasChildren ? 'json-children' : 'json-children hidden';
+
+    node.children.forEach(child => {
+      childContainer.appendChild(buildJsonNodeEl(child, rawJson));
+    });
+
+    if (node.child_count > node.children.length) {
+      const more = document.createElement('div');
+      more.className = 'json-line json-load-more';
+      more.style.paddingLeft = `${(node.depth + 1) * 18}px`;
+      more.innerHTML = `<span class="json-more-btn">▸ ${node.child_count - node.children.length} more items...</span>`;
+      more.querySelector('.json-more-btn').addEventListener('click', async () => {
+        try {
+          const expanded = await invoke('expand_json_node', {
+            json: rawJson, path: node.path, maxDepth: 2, maxChildren: 200
+          });
+          childContainer.innerHTML = '';
+          expanded.children.forEach(child => {
+            childContainer.appendChild(buildJsonNodeEl(child, rawJson));
+          });
+        } catch (e) {
+          more.innerHTML = `<span class="json-error">Error expanding: ${escapeHtml(String(e))}</span>`;
+        }
+      });
+      childContainer.appendChild(more);
     }
+
+    const closeLine = document.createElement('div');
+    closeLine.className = hasChildren ? 'json-line json-close' : 'json-line json-close hidden';
+    closeLine.style.paddingLeft = `${node.depth * 18}px`;
+    closeLine.innerHTML = `<span class="json-bracket">${close}</span>${comma}`;
+
+    toggle.addEventListener('click', async () => {
+      const isExpanded = toggle.classList.contains('expanded');
+      if (isExpanded) {
+        toggle.classList.remove('expanded');
+        toggle.classList.add('collapsed');
+        toggle.textContent = '▸';
+        childContainer.classList.add('hidden');
+        closeLine.classList.add('hidden');
+        preview.classList.remove('hidden');
+      } else {
+        if (childContainer.children.length === 0 && node.child_count > 0) {
+          toggle.textContent = '⏳';
+          try {
+            const expanded = await invoke('expand_json_node', {
+              json: rawJson, path: node.path, maxDepth: 2, maxChildren: 100
+            });
+            expanded.children.forEach(child => {
+              childContainer.appendChild(buildJsonNodeEl(child, rawJson));
+            });
+          } catch (e) {
+            console.error('Failed to expand node:', e);
+          }
+        }
+        toggle.classList.add('expanded');
+        toggle.classList.remove('collapsed');
+        toggle.textContent = '▾';
+        childContainer.classList.remove('hidden');
+        closeLine.classList.remove('hidden');
+        preview.classList.add('hidden');
+      }
+    });
+
+    const wrapper = document.createDocumentFragment();
+    wrapper.appendChild(line);
+    wrapper.appendChild(childContainer);
+    wrapper.appendChild(closeLine);
+    return wrapper;
+  } else {
+    const keySpan = node.key !== null ? `<span class="json-key">"${escapeHtml(String(node.key))}"</span><span class="json-colon">: </span>` : '';
+    const comma = node.is_last ? '' : ',';
+    const val = node.value_preview || 'null';
+    let cls = 'json-null';
+    if (node.node_type === 'string') cls = 'json-string';
+    else if (node.node_type === 'number') cls = 'json-number';
+    else if (node.node_type === 'boolean') cls = 'json-boolean';
+    const displayVal = node.node_type === 'string' ? `"${escapeHtml(val)}"` : escapeHtml(val);
+
+    const spacer = document.createElement('span');
+    spacer.className = 'json-toggle-spacer';
+    line.innerHTML = `${keySpan}<span class="${cls}">${displayVal}</span>${comma}`;
+    line.insertBefore(spacer, line.firstChild);
+    return line;
   }
 }
 
@@ -6074,7 +6301,56 @@ function charDiffHighlight(lineA, lineB, side, hlFn) {
   return prefixHtml + changedHtml + suffixHtml;
 }
 
-function openDiffViewer(fileIdx, blockIdx) {
+// --- Diff Hunk Collapsing ---
+
+function buildDiffHunks(ops, contextLines = 3) {
+  const changeIndices = [];
+  ops.forEach((op, i) => { if (op.type !== 'same') changeIndices.push(i); });
+
+  if (changeIndices.length === 0) {
+    return [{ type: 'collapse', startIdx: 0, endIdx: ops.length - 1, count: ops.length }];
+  }
+
+  const ranges = [];
+  changeIndices.forEach(i => {
+    const start = Math.max(0, i - contextLines);
+    const end = Math.min(ops.length - 1, i + contextLines);
+    if (ranges.length > 0 && start <= ranges[ranges.length - 1].end + 1) {
+      ranges[ranges.length - 1].end = end;
+    } else {
+      ranges.push({ start, end });
+    }
+  });
+
+  const hunks = [];
+  let pos = 0;
+  ranges.forEach(range => {
+    if (pos < range.start) {
+      hunks.push({ type: 'collapse', startIdx: pos, endIdx: range.start - 1, count: range.start - pos });
+    }
+    hunks.push({ type: 'hunk', startIdx: range.start, endIdx: range.end });
+    pos = range.end + 1;
+  });
+  if (pos < ops.length) {
+    hunks.push({ type: 'collapse', startIdx: pos, endIdx: ops.length - 1, count: ops.length - pos });
+  }
+  return hunks;
+}
+
+function renderRustCharHighlight(text, highlights, cls, hlFn) {
+  if (!highlights || highlights.length === 0) return hlFn(escapeHtml(text));
+  let result = '';
+  let pos = 0;
+  highlights.forEach(span => {
+    if (span.start > pos) result += hlFn(escapeHtml(text.substring(pos, span.start)));
+    result += `<span class="${cls}">${hlFn(escapeHtml(text.substring(span.start, span.end)))}</span>`;
+    pos = span.end;
+  });
+  if (pos < text.length) result += hlFn(escapeHtml(text.substring(pos)));
+  return result;
+}
+
+async function openDiffViewer(fileIdx, blockIdx) {
   const file = loadedFiles[fileIdx];
   const block = file?.suite?.blocks?.[blockIdx];
   const br = file?.results?.block_results?.[blockIdx];
@@ -6128,55 +6404,161 @@ function openDiffViewer(fileIdx, blockIdx) {
   minimap.innerHTML = '';
   minimap.onclick = null;
 
-  // Performance guard: skip LCS diff for large responses (O(m*n) DP table)
-  const linesA = formattedA.split('\n');
-  const linesB = formattedB.split('\n');
-  const DIFF_LINE_LIMIT = 1500;
-  const DIFF_BYTE_LIMIT = 131072; // 128 KiB
-  if (linesA.length > DIFF_LINE_LIMIT || linesB.length > DIFF_LINE_LIMIT ||
-      formattedA.length > DIFF_BYTE_LIMIT || formattedB.length > DIFF_BYTE_LIMIT) {
-    const warnMsg = `Response too large for line diff (${linesA.length}/${linesB.length} lines, ${formatBytes(formattedA.length)}/${formatBytes(formattedB.length)}). Showing raw text.`;
-    leftCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">${warnMsg}</span></div>` + `<div class="diff-line diff-same"><span class="diff-text">${highlightFn(escapeHtml(formattedA))}</span></div>`;
-    rightCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">...</span></div>` + `<div class="diff-line diff-same"><span class="diff-text">${highlightFn(escapeHtml(formattedB))}</span></div>`;
-  } else {
-    // Compute line diff
-    const diffOps = computeLineDiff(formattedA, formattedB);
+  // Use Rust compute_diff — no JS line/byte limit needed since Rust is fast
+  const contentType = lang === 'json' ? 'json' : 'text';
+  let diffOps = null;
+  try {
+    const rustDiff = await invoke('compute_diff', { textA: formattedA, textB: formattedB, contentType });
+    diffOps = rustDiff.ops;
+  } catch {
+    // Fallback to JS diff with original performance guard
+    const linesA = formattedA.split('\n');
+    const linesB = formattedB.split('\n');
+    const DIFF_LINE_LIMIT = 1500;
+    const DIFF_BYTE_LIMIT = 131072;
+    if (linesA.length > DIFF_LINE_LIMIT || linesB.length > DIFF_LINE_LIMIT ||
+        formattedA.length > DIFF_BYTE_LIMIT || formattedB.length > DIFF_BYTE_LIMIT) {
+      const warnMsg = `Response too large for line diff (${linesA.length}/${linesB.length} lines, ${formatBytes(formattedA.length)}/${formatBytes(formattedB.length)}). Showing raw text.`;
+      leftCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">${warnMsg}</span></div>` + `<div class="diff-line diff-same"><span class="diff-text">${highlightFn(escapeHtml(formattedA))}</span></div>`;
+      rightCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">...</span></div>` + `<div class="diff-line diff-same"><span class="diff-text">${highlightFn(escapeHtml(formattedB))}</span></div>`;
+      diffOps = null; // signal: already rendered fallback
+    } else {
+      diffOps = computeLineDiff(formattedA, formattedB);
+    }
+  }
 
+  if (diffOps) {
+    const hunks = buildDiffHunks(diffOps);
     let leftHtml = '';
     let rightHtml = '';
     let leftLineNum = 0, rightLineNum = 0;
 
+    // Pre-count line numbers per op for collapsed sections
+    const lineNums = [];
+    let tmpL = 0, tmpR = 0;
     diffOps.forEach(op => {
       switch (op.type) {
-        case 'same':
+        case 'same': tmpL++; tmpR++; break;
+        case 'remove': tmpL++; break;
+        case 'add': tmpR++; break;
+        case 'change': tmpL++; tmpR++; break;
+      }
+      lineNums.push({ left: tmpL, right: tmpR });
+    });
+
+    const renderOp = (op) => {
+      let leftLine = '', rightLine = '';
+      switch (op.type) {
+        case 'same': {
           leftLineNum++; rightLineNum++;
-          const sameLine = highlightFn(escapeHtml(op.left));
-          leftHtml += `<div class="diff-line diff-same"><span class="diff-ln">${leftLineNum}</span><span class="diff-text">${sameLine}</span></div>`;
-          rightHtml += `<div class="diff-line diff-same"><span class="diff-ln">${rightLineNum}</span><span class="diff-text">${sameLine}</span></div>`;
+          const sameLine = highlightFn(escapeHtml(op.line || op.left || ''));
+          leftLine = `<div class="diff-line diff-same"><span class="diff-ln">${leftLineNum}</span><span class="diff-text">${sameLine}</span></div>`;
+          rightLine = `<div class="diff-line diff-same"><span class="diff-ln">${rightLineNum}</span><span class="diff-text">${sameLine}</span></div>`;
           break;
-        case 'remove':
+        }
+        case 'remove': {
           leftLineNum++;
-          leftHtml += `<div class="diff-line diff-removed"><span class="diff-ln">${leftLineNum}</span><span class="diff-text">${highlightFn(escapeHtml(op.left))}</span></div>`;
-          rightHtml += `<div class="diff-line diff-empty"><span class="diff-ln"></span><span class="diff-text"></span></div>`;
+          leftLine = `<div class="diff-line diff-removed"><span class="diff-ln">${leftLineNum}</span><span class="diff-text">${highlightFn(escapeHtml(op.line || op.left || ''))}</span></div>`;
+          rightLine = `<div class="diff-line diff-empty"><span class="diff-ln"></span><span class="diff-text"></span></div>`;
           break;
-        case 'add':
+        }
+        case 'add': {
           rightLineNum++;
-          leftHtml += `<div class="diff-line diff-empty"><span class="diff-ln"></span><span class="diff-text"></span></div>`;
-          rightHtml += `<div class="diff-line diff-added"><span class="diff-ln">${rightLineNum}</span><span class="diff-text">${highlightFn(escapeHtml(op.right))}</span></div>`;
+          leftLine = `<div class="diff-line diff-empty"><span class="diff-ln"></span><span class="diff-text"></span></div>`;
+          rightLine = `<div class="diff-line diff-added"><span class="diff-ln">${rightLineNum}</span><span class="diff-text">${highlightFn(escapeHtml(op.line || op.right || ''))}</span></div>`;
           break;
-        case 'change':
+        }
+        case 'change': {
           leftLineNum++; rightLineNum++;
-          const leftCharHtml = charDiffHighlight(op.left, op.right, 'left', highlightFn);
-          const rightCharHtml = charDiffHighlight(op.left, op.right, 'right', highlightFn);
-          leftHtml += `<div class="diff-line diff-changed"><span class="diff-ln">${leftLineNum}</span><span class="diff-text">${leftCharHtml}</span></div>`;
-          rightHtml += `<div class="diff-line diff-changed"><span class="diff-ln">${rightLineNum}</span><span class="diff-text">${rightCharHtml}</span></div>`;
+          // Use Rust char highlights if available, else fall back to JS charDiffHighlight
+          let leftCharHtml, rightCharHtml;
+          if (op.left_highlights || op.right_highlights) {
+            leftCharHtml = renderRustCharHighlight(op.left, op.left_highlights, 'diff-char-rm', highlightFn);
+            rightCharHtml = renderRustCharHighlight(op.right, op.right_highlights, 'diff-char-add', highlightFn);
+          } else {
+            leftCharHtml = charDiffHighlight(op.left, op.right, 'left', highlightFn);
+            rightCharHtml = charDiffHighlight(op.left, op.right, 'right', highlightFn);
+          }
+          leftLine = `<div class="diff-line diff-changed"><span class="diff-ln">${leftLineNum}</span><span class="diff-text">${leftCharHtml}</span></div>`;
+          rightLine = `<div class="diff-line diff-changed"><span class="diff-ln">${rightLineNum}</span><span class="diff-text">${rightCharHtml}</span></div>`;
           break;
+        }
+      }
+      return { leftLine, rightLine };
+    };
+
+    hunks.forEach(hunk => {
+      if (hunk.type === 'collapse') {
+        // Collapsed unchanged region
+        const collapseId = `diff-collapse-${hunk.startIdx}`;
+        const divider = `<div class="diff-line diff-collapse" data-collapse-id="${collapseId}">▸ ${hunk.count} unchanged lines</div>`;
+        leftHtml += divider;
+        rightHtml += divider;
+        // Advance line numbers through the collapsed section
+        for (let i = hunk.startIdx; i <= hunk.endIdx; i++) {
+          const op = diffOps[i];
+          if (op.type === 'same') { leftLineNum++; rightLineNum++; }
+          else if (op.type === 'remove') { leftLineNum++; }
+          else if (op.type === 'add') { rightLineNum++; }
+          else if (op.type === 'change') { leftLineNum++; rightLineNum++; }
+        }
+      } else {
+        for (let i = hunk.startIdx; i <= hunk.endIdx; i++) {
+          const { leftLine, rightLine } = renderOp(diffOps[i]);
+          leftHtml += leftLine;
+          rightHtml += rightLine;
+        }
       }
     });
 
     leftCode.innerHTML = leftHtml;
     rightCode.innerHTML = rightHtml;
 
+    // Wire up collapse/expand click handlers
+    leftCode.querySelectorAll('.diff-collapse').forEach(el => {
+      el.addEventListener('click', () => {
+        const cid = el.dataset.collapseId;
+        const hunk = hunks.find(h => h.type === 'collapse' && `diff-collapse-${h.startIdx}` === cid);
+        if (!hunk) return;
+        // Expand: replace the divider with actual lines
+        let expandLeftHtml = '';
+        let expandRightHtml = '';
+        // Recalculate line numbers from the stored pre-counted values
+        let eL = hunk.startIdx > 0 ? lineNums[hunk.startIdx - 1].left : 0;
+        let eR = hunk.startIdx > 0 ? lineNums[hunk.startIdx - 1].right : 0;
+        for (let i = hunk.startIdx; i <= hunk.endIdx; i++) {
+          const op = diffOps[i];
+          if (op.type === 'same') { eL++; eR++; }
+          else if (op.type === 'remove') { eL++; }
+          else if (op.type === 'add') { eR++; }
+          else if (op.type === 'change') { eL++; eR++; }
+          const sameLine = highlightFn(escapeHtml(op.line || op.left || ''));
+          expandLeftHtml += `<div class="diff-line diff-same"><span class="diff-ln">${eL}</span><span class="diff-text">${sameLine}</span></div>`;
+          expandRightHtml += `<div class="diff-line diff-same"><span class="diff-ln">${eR}</span><span class="diff-text">${sameLine}</span></div>`;
+        }
+        // Replace left divider
+        const tmpL = document.createElement('div');
+        tmpL.innerHTML = expandLeftHtml;
+        el.replaceWith(...tmpL.children);
+        // Replace matching right divider
+        const rightEl = rightCode.querySelector(`[data-collapse-id="${cid}"]`);
+        if (rightEl) {
+          const tmpR = document.createElement('div');
+          tmpR.innerHTML = expandRightHtml;
+          rightEl.replaceWith(...tmpR.children);
+        }
+      });
+    });
+    rightCode.querySelectorAll('.diff-collapse').forEach(el => {
+      el.addEventListener('click', () => {
+        // Delegate to the left side's handler by simulating click on matching left divider
+        const cid = el.dataset.collapseId;
+        const leftEl = leftCode.querySelector(`[data-collapse-id="${cid}"]`);
+        if (leftEl) leftEl.click();
+      });
+    });
+
+    // Minimap
     const totalLines = diffOps.length || 1;
     let marksHtml = '';
     diffOps.forEach((op, idx) => {
@@ -6186,10 +6568,8 @@ function openDiffViewer(fileIdx, blockIdx) {
       marksHtml += `<div class="mm-mark ${cls}" style="top:${pct}%"></div>`;
     });
     marksHtml += '<div class="mm-thumb" id="mmThumb"></div>';
-    // Header spacer aligns track with the pane body (below pane headers)
     minimap.innerHTML = `<div class="diff-minimap-header"></div><div class="diff-minimap-track" id="mmTrack">${marksHtml}</div>`;
 
-    // Click anywhere on track to jump proportionally
     const mmTrack = document.getElementById('mmTrack');
     mmTrack.onclick = (e) => {
       const rect = mmTrack.getBoundingClientRect();
@@ -6199,7 +6579,6 @@ function openDiffViewer(fileIdx, blockIdx) {
       leftPane.scrollTop = scrollTarget;
     };
 
-    // Sync minimap thumb with scroll position
     const updateMmThumb = () => {
       const lp = document.getElementById('diffLeftBody');
       const thumb = document.getElementById('mmThumb');
@@ -7530,3 +7909,393 @@ function updateLiveCaptureUI() {
     // Backend may not support live capture yet — silently ignore
   }
 })();
+
+/* ============================================================
+   VirtualScroll — High-performance virtual scrolling component
+   Only renders visible DOM nodes + a configurable buffer.
+   ============================================================ */
+class VirtualScroll {
+  /**
+   * @param {HTMLElement} container - The scrollable container element
+   * @param {Object} options
+   * @param {number}   [options.rowHeight=20]    - Estimated row height in px
+   * @param {number}   [options.bufferRows=20]   - Extra rows rendered above/below viewport
+   * @param {Function} options.renderRow         - (index, data) => HTMLElement
+   * @param {Function} [options.onRangeChange]   - (startIdx, endIdx) => void
+   */
+  constructor(container, options = {}) {
+    this._container = container;
+    this._rowHeight = options.rowHeight || 20;
+    this._bufferRows = options.bufferRows != null ? options.bufferRows : 20;
+    this._renderRow = options.renderRow;
+    this._onRangeChange = options.onRangeChange || null;
+    this._items = [];
+    this._renderedStart = -1;
+    this._renderedEnd = -1;
+    this._nodePool = [];       // recycled DOM nodes
+    this._activeNodes = [];    // currently displayed DOM nodes
+    this._rafId = null;
+    this._destroyed = false;
+
+    // Build DOM structure
+    this._container.classList.add('virtual-scroll-container');
+    this._spacer = document.createElement('div');
+    this._spacer.className = 'virtual-scroll-spacer';
+    this._viewport = document.createElement('div');
+    this._viewport.className = 'virtual-scroll-viewport';
+    this._container.appendChild(this._spacer);
+    this._container.appendChild(this._viewport);
+
+    // Bind handlers
+    this._onScroll = this._onScroll.bind(this);
+    this._onResize = this._onResize.bind(this);
+    this._container.addEventListener('scroll', this._onScroll, { passive: true });
+
+    this._resizeObserver = new ResizeObserver(this._onResize);
+    this._resizeObserver.observe(this._container);
+  }
+
+  /* --- Public API --- */
+
+  setData(items) {
+    this._items = items || [];
+    this._spacer.style.height = (this._items.length * this._rowHeight) + 'px';
+    this._renderedStart = -1;
+    this._renderedEnd = -1;
+    this._recycleAll();
+    this._render();
+  }
+
+  updateItem(index, newData) {
+    if (index < 0 || index >= this._items.length) return;
+    this._items[index] = newData;
+    if (index >= this._renderedStart && index < this._renderedEnd) {
+      const nodeIdx = index - this._renderedStart;
+      const node = this._activeNodes[nodeIdx];
+      if (node) {
+        const fresh = this._renderRow(index, newData);
+        fresh.style.position = 'absolute';
+        fresh.style.top = (index * this._rowHeight) + 'px';
+        fresh.style.width = '100%';
+        this._viewport.replaceChild(fresh, node);
+        this._activeNodes[nodeIdx] = fresh;
+      }
+    }
+  }
+
+  scrollToIndex(index) {
+    const clamped = Math.max(0, Math.min(index, this._items.length - 1));
+    this._container.scrollTop = clamped * this._rowHeight;
+  }
+
+  destroy() {
+    if (this._destroyed) return;
+    this._destroyed = true;
+    this._container.removeEventListener('scroll', this._onScroll);
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+      this._resizeObserver = null;
+    }
+    if (this._rafId) {
+      cancelAnimationFrame(this._rafId);
+      this._rafId = null;
+    }
+    this._viewport.remove();
+    this._spacer.remove();
+    this._container.classList.remove('virtual-scroll-container');
+    this._nodePool.length = 0;
+    this._activeNodes.length = 0;
+    this._items = [];
+  }
+
+  refresh() {
+    this._renderedStart = -1;
+    this._renderedEnd = -1;
+    this._recycleAll();
+    this._render();
+  }
+
+  getVisibleRange() {
+    const scrollTop = this._container.scrollTop;
+    const h = this._container.clientHeight;
+    const start = Math.floor(scrollTop / this._rowHeight);
+    const end = Math.min(start + Math.ceil(h / this._rowHeight), this._items.length);
+    return { start, end };
+  }
+
+  /* --- Internal --- */
+
+  _onScroll() {
+    if (this._rafId || this._destroyed) return;
+    this._rafId = requestAnimationFrame(() => {
+      this._rafId = null;
+      this._render();
+    });
+  }
+
+  _onResize() {
+    if (this._destroyed) return;
+    this._render();
+  }
+
+  _render() {
+    if (this._destroyed || !this._items.length) return;
+
+    const scrollTop = this._container.scrollTop;
+    const containerH = this._container.clientHeight;
+    if (containerH === 0) return;
+
+    const totalRows = this._items.length;
+    const visibleCount = Math.ceil(containerH / this._rowHeight);
+    const firstVisible = Math.floor(scrollTop / this._rowHeight);
+
+    let newStart = Math.max(0, firstVisible - this._bufferRows);
+    let newEnd = Math.min(totalRows, firstVisible + visibleCount + this._bufferRows);
+
+    // Skip render if range hasn't changed
+    if (newStart === this._renderedStart && newEnd === this._renderedEnd) return;
+
+    const oldStart = this._renderedStart;
+    const oldEnd = this._renderedEnd;
+    this._renderedStart = newStart;
+    this._renderedEnd = newEnd;
+
+    // Recycle nodes that left the range
+    if (oldStart >= 0) {
+      const recycleNodes = [];
+      for (let i = 0; i < this._activeNodes.length; i++) {
+        const dataIdx = oldStart + i;
+        if (dataIdx < newStart || dataIdx >= newEnd) {
+          const node = this._activeNodes[i];
+          if (node) {
+            this._viewport.removeChild(node);
+            this._nodePool.push(node);
+          }
+          recycleNodes.push(i);
+        }
+      }
+    }
+
+    // Build new active list
+    const newCount = newEnd - newStart;
+    const freshActive = new Array(newCount);
+
+    for (let i = 0; i < newCount; i++) {
+      const dataIdx = newStart + i;
+      // Reuse if already rendered
+      if (oldStart >= 0 && dataIdx >= oldStart && dataIdx < oldEnd) {
+        const oldSlot = dataIdx - oldStart;
+        freshActive[i] = this._activeNodes[oldSlot];
+      } else {
+        // Create or recycle a node
+        const el = this._renderRow(dataIdx, this._items[dataIdx]);
+        el.style.position = 'absolute';
+        el.style.top = (dataIdx * this._rowHeight) + 'px';
+        el.style.width = '100%';
+        this._viewport.appendChild(el);
+        freshActive[i] = el;
+      }
+    }
+
+    this._activeNodes = freshActive;
+
+    // Drain pool
+    this._nodePool.length = 0;
+
+    if (this._onRangeChange) {
+      this._onRangeChange(newStart, newEnd);
+    }
+  }
+
+  _recycleAll() {
+    while (this._viewport.firstChild) {
+      this._viewport.removeChild(this._viewport.firstChild);
+    }
+    this._activeNodes.length = 0;
+    this._nodePool.length = 0;
+  }
+}
+
+/* ============================================================
+   renderVirtualResponseBody — Virtual-scroll for response bodies
+   ============================================================ */
+
+/**
+ * Render a large formatted response body using virtual scrolling.
+ * @param {HTMLElement} container - The responseBody element
+ * @param {Array<{spans: Array<{class: string, text: string}>, raw: string}>} lines
+ * @returns {VirtualScroll} The VirtualScroll instance (for later cleanup)
+ */
+function renderVirtualResponseBody(container, lines) {
+  container.innerHTML = '';
+
+  const vs = new VirtualScroll(container, {
+    rowHeight: 20,
+    bufferRows: 20,
+    renderRow(index, line) {
+      const div = document.createElement('div');
+      div.className = 'vline';
+      if (line.spans && line.spans.length) {
+        for (const span of line.spans) {
+          const s = document.createElement('span');
+          if (span.class) s.className = span.class;
+          s.textContent = span.text;
+          div.appendChild(s);
+        }
+      } else {
+        div.textContent = line.raw || '';
+      }
+      return div;
+    },
+  });
+
+  vs.setData(lines);
+  return vs;
+}
+
+/* ============================================================
+   renderVirtualDiff — Synced virtual-scroll diff viewer
+   ============================================================ */
+
+/**
+ * Render two synced virtual-scroll diff panels.
+ * @param {HTMLElement} leftContainer  - Left diff panel element
+ * @param {HTMLElement} rightContainer - Right diff panel element
+ * @param {Array<{type: string, left?: string, right?: string}>} diffOps - from computeLineDiff
+ * @param {Object} [options]
+ * @param {Function} [options.highlightFn] - syntax highlight function (text) => html
+ * @returns {{left: VirtualScroll, right: VirtualScroll, destroy: Function}}
+ */
+function renderVirtualDiff(leftContainer, rightContainer, diffOps, options) {
+  const highlightFn = (options && options.highlightFn) ? options.highlightFn : (t) => t;
+
+  leftContainer.innerHTML = '';
+  rightContainer.innerHTML = '';
+
+  // Build parallel row data for left and right
+  const leftRows = [];
+  const rightRows = [];
+  let leftLn = 0;
+  let rightLn = 0;
+
+  for (const op of diffOps) {
+    switch (op.type) {
+      case 'same':
+        leftLn++;
+        rightLn++;
+        leftRows.push({ type: 'same', ln: leftLn, text: op.left || '' });
+        rightRows.push({ type: 'same', ln: rightLn, text: op.right || op.left || '' });
+        break;
+      case 'remove':
+        leftLn++;
+        leftRows.push({ type: 'removed', ln: leftLn, text: op.left || '' });
+        rightRows.push({ type: 'empty', ln: null, text: '' });
+        break;
+      case 'add':
+        rightLn++;
+        leftRows.push({ type: 'empty', ln: null, text: '' });
+        rightRows.push({ type: 'added', ln: rightLn, text: op.right || '' });
+        break;
+      case 'change':
+        leftLn++;
+        rightLn++;
+        leftRows.push({ type: 'changed', ln: leftLn, text: op.left || '', charSide: 'left', otherText: op.right || '' });
+        rightRows.push({ type: 'changed', ln: rightLn, text: op.right || '', charSide: 'right', otherText: op.left || '' });
+        break;
+    }
+  }
+
+  function makeRow(rowData) {
+    const div = document.createElement('div');
+    let cls = 'diff-line';
+    if (rowData.type === 'same') cls += ' diff-same';
+    else if (rowData.type === 'removed') cls += ' diff-removed';
+    else if (rowData.type === 'added') cls += ' diff-added';
+    else if (rowData.type === 'changed') cls += ' diff-changed';
+    else if (rowData.type === 'empty') cls += ' diff-empty';
+    div.className = cls;
+
+    const lnSpan = document.createElement('span');
+    lnSpan.className = 'diff-ln';
+    lnSpan.textContent = rowData.ln != null ? String(rowData.ln) : '';
+    div.appendChild(lnSpan);
+
+    const textSpan = document.createElement('span');
+    textSpan.className = 'diff-text';
+
+    if (rowData.type === 'changed' && rowData.charSide && rowData.otherText !== undefined) {
+      const lineA = rowData.charSide === 'left' ? rowData.text : rowData.otherText;
+      const lineB = rowData.charSide === 'left' ? rowData.otherText : rowData.text;
+      textSpan.innerHTML = charDiffHighlight(lineA, lineB, rowData.charSide, highlightFn);
+    } else {
+      textSpan.textContent = rowData.text;
+    }
+
+    div.appendChild(textSpan);
+    return div;
+  }
+
+  // Synced scroll state
+  let syncing = false;
+
+  function syncScroll(source, target) {
+    if (syncing) return;
+    syncing = true;
+    target._container.scrollTop = source._container.scrollTop;
+    target._render();
+    syncing = false;
+  }
+
+  const leftVs = new VirtualScroll(leftContainer, {
+    rowHeight: 20,
+    bufferRows: 20,
+    renderRow(_index, rowData) { return makeRow(rowData); },
+  });
+
+  const rightVs = new VirtualScroll(rightContainer, {
+    rowHeight: 20,
+    bufferRows: 20,
+    renderRow(_index, rowData) { return makeRow(rowData); },
+  });
+
+  // Wire up synced scrolling
+  leftContainer.addEventListener('scroll', () => syncScroll(leftVs, rightVs), { passive: true });
+  rightContainer.addEventListener('scroll', () => syncScroll(rightVs, leftVs), { passive: true });
+
+  leftVs.setData(leftRows);
+  rightVs.setData(rightRows);
+
+  return {
+    left: leftVs,
+    right: rightVs,
+    destroy() {
+      leftVs.destroy();
+      rightVs.destroy();
+    },
+  };
+}
+
+/* ============================================================
+   renderVirtualHistoryList — Virtual-scroll for history entries
+   ============================================================ */
+
+/**
+ * Render a virtual-scrolled history list.
+ * @param {HTMLElement} container - The historyLog element
+ * @param {Array} entries - Array of history entry objects
+ * @returns {VirtualScroll} The VirtualScroll instance
+ */
+function renderVirtualHistoryList(container, entries) {
+  container.innerHTML = '';
+
+  const vs = new VirtualScroll(container, {
+    rowHeight: 60,
+    bufferRows: 10,
+    renderRow(index, entry) {
+      return createHistoryEntryRow(entry);
+    },
+  });
+
+  vs.setData(entries);
+  return vs;
+}
