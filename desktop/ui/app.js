@@ -32,6 +32,11 @@ let viewedResults = new Map();       // "fileIdx-blockIdx" → { status, hash }
 let viewedHistoryEntries = new Map(); // seq → { status, hash }
 let runHistory = new Map(); // Map<fileName, [{timestamp, passed, failed, skipped, totalTime, blockResults: [{name, status, timeMs}]}]>
 
+// Diff cache — avoids recomputing expensive Rust diffs for same inputs
+// Key: "assert:<fileIdx>-<blockIdx>" or "hist:<seqA>-<seqB>" → { ops, similarity, ... }
+const diffCache = new Map();
+let diffCacheBytes = 0; // rough byte estimate for memory tracking
+
 // --- Logging ---
 const rpLogs = [];
 const MAX_LOGS = 2000;
@@ -3712,6 +3717,12 @@ async function runGroup(fileIdx, groupName) {
         const origIdx = unmatchedGroupIndices[matchPos];
         file.results.block_results[origIdx] = br;
         unmatchedGroupIndices.splice(matchPos, 1);
+        // Invalidate cached diff for this block (results changed)
+        const dck = `assert:${fileIdx}-${origIdx}`;
+        if (diffCache.has(dck)) {
+          diffCacheBytes -= JSON.stringify(diffCache.get(dck)).length * 2;
+          diffCache.delete(dck);
+        }
       }
     });
 
@@ -6087,6 +6098,7 @@ function estimateMemoryUsage() {
   bytes += rpLogs.length * 200;
   if (typeof liveCapturedRequests !== 'undefined') bytes += liveCapturedRequests.length * 500;
   bytes += historyCache.length * 300;
+  bytes += diffCacheBytes;
   return bytes;
 }
 
@@ -6118,6 +6130,8 @@ $('#clearHistoryAction').addEventListener('click', async () => {
     await invoke('clear_history');
     historyCache = [];
     historyExpandedGroups.clear();
+    diffCache.clear();
+    diffCacheBytes = 0;
     renderHistoryStats([]);
     renderHistoryLog([]);
     historyCountBadge.textContent = '0';
@@ -6343,26 +6357,39 @@ async function openDiffViewer(fileIdx, blockIdx) {
   rightCode.innerHTML = '';
   $('#diffViewerOverlay').classList.remove('hidden');
 
-  // Always compute diff in Rust (fast even for large inputs)
+  // Check diff cache first
+  const cacheKey = `assert:${fileIdx}-${blockIdx}`;
   const contentType = lang === 'json' ? 'json' : 'text';
   let diffOps = null;
-  try {
-    const rustDiff = await invoke('compute_diff', { textA: formattedA, textB: formattedB, contentType });
-    diffOps = rustDiff.ops;
-  } catch {
-    // Fallback to JS diff with performance guard
-    const linesA = formattedA.split('\n');
-    const linesB = formattedB.split('\n');
-    const DIFF_LINE_LIMIT = 1500;
-    const DIFF_BYTE_LIMIT = 131072;
-    if (linesA.length > DIFF_LINE_LIMIT || linesB.length > DIFF_LINE_LIMIT ||
-        formattedA.length > DIFF_BYTE_LIMIT || formattedB.length > DIFF_BYTE_LIMIT) {
-      const warnMsg = `Response too large for JS fallback diff (${linesA.length}/${linesB.length} lines). Showing raw text.`;
-      leftCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">${warnMsg}</span></div>` + `<div class="diff-line diff-same"><span class="diff-text">${highlightFn(escapeHtml(formattedA))}</span></div>`;
-      rightCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">...</span></div>` + `<div class="diff-line diff-same"><span class="diff-text">${highlightFn(escapeHtml(formattedB))}</span></div>`;
-      diffOps = null;
-    } else {
-      diffOps = computeLineDiff(formattedA, formattedB);
+
+  const cached = diffCache.get(cacheKey);
+  if (cached) {
+    diffOps = cached.ops;
+    rpLog('debug', `Diff cache hit: ${cacheKey}`);
+  } else {
+    try {
+      const rustDiff = await invoke('compute_diff', { textA: formattedA, textB: formattedB, contentType });
+      diffOps = rustDiff.ops;
+      // Cache the result
+      const entrySize = JSON.stringify(rustDiff).length * 2;
+      diffCache.set(cacheKey, rustDiff);
+      diffCacheBytes += entrySize;
+      rpLog('debug', `Diff cached: ${cacheKey} (${formatBytes(entrySize)})`);
+    } catch {
+      // Fallback to JS diff with performance guard
+      const linesA = formattedA.split('\n');
+      const linesB = formattedB.split('\n');
+      const DIFF_LINE_LIMIT = 1500;
+      const DIFF_BYTE_LIMIT = 131072;
+      if (linesA.length > DIFF_LINE_LIMIT || linesB.length > DIFF_LINE_LIMIT ||
+          formattedA.length > DIFF_BYTE_LIMIT || formattedB.length > DIFF_BYTE_LIMIT) {
+        const warnMsg = `Response too large for JS fallback diff (${linesA.length}/${linesB.length} lines). Showing raw text.`;
+        leftCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">${warnMsg}</span></div>` + `<div class="diff-line diff-same"><span class="diff-text">${highlightFn(escapeHtml(formattedA))}</span></div>`;
+        rightCode.innerHTML = `<div class="diff-line diff-same" style="color:var(--orange)"><span class="diff-text">...</span></div>` + `<div class="diff-line diff-same"><span class="diff-text">${highlightFn(escapeHtml(formattedB))}</span></div>`;
+        diffOps = null;
+      } else {
+        diffOps = computeLineDiff(formattedA, formattedB);
+      }
     }
   }
 

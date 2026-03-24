@@ -246,29 +246,25 @@ function buildResponseTabContent(entryA, entryB) {
     ${buildHeadersDiff(entryA.response_headers, entryB.response_headers)}
   </div>`;
 
-  // Response Body
-  const bodyA = formatBodyForCompare(entryA.response_body);
-  const bodyB = formatBodyForCompare(entryB.response_body);
-  html += `<div class="compare-section">
-    <div class="compare-section-title">Response Body</div>
-    <div class="compare-grid">
-      <div class="compare-column">
-        <div class="compare-column-label">Response A</div>
-        <pre class="compare-body-pre">${escapeHtml(bodyA)}</pre>
-      </div>
-      <div class="compare-column">
-        <div class="compare-column-label">Response B</div>
-        <pre class="compare-body-pre">${escapeHtml(bodyB)}</pre>
-      </div>
-    </div>
+  // Response Body — placeholder for async Rust diff rendering
+  const sizeA = entryA.response_body ? entryA.response_body.length : 0;
+  const sizeB = entryB.response_body ? entryB.response_body.length : 0;
+  const sizeLabel = typeof formatBytes === 'function'
+    ? `${formatBytes(sizeA)} / ${formatBytes(sizeB)}`
+    : `${sizeA} B / ${sizeB} B`;
+  html += `<div class="compare-section" id="compareRustDiffSection">
+    <div class="compare-section-title">Response Body Diff <span style="color:var(--text-muted); font-size:11px; font-weight:400;">(${sizeLabel})</span></div>
+    <div class="body-loading"><span class="spinner-sm"></span> Computing diff…</div>
   </div>`;
 
-  // JSON Diff for response body
-  if (entryA.response_body && entryB.response_body) {
+  // JSON field diff (lightweight key-path comparison) — only for small payloads
+  const FIELD_DIFF_LIMIT = 262144; // 256 KiB
+  if (entryA.response_body && entryB.response_body &&
+      sizeA < FIELD_DIFF_LIMIT && sizeB < FIELD_DIFF_LIMIT) {
     const jsonDiff = buildJsonDiff(entryA.response_body, entryB.response_body);
     if (jsonDiff) {
       html += `<div class="compare-section">
-        <div class="compare-section-title">Response Body — JSON Diff</div>
+        <div class="compare-section-title">Response Body — Field Diff</div>
         ${jsonDiff}
       </div>`;
     }
@@ -279,12 +275,13 @@ function buildResponseTabContent(entryA, entryB) {
 
 /**
  * Open the comparison overlay for two history entries.
+ * Computes response body diff via Rust (cached) and renders paginated hunks.
  */
-function openComparisonOverlay(entryA, entryB) {
+async function openComparisonOverlay(entryA, entryB) {
   const overlay = document.getElementById('compareOverlay');
   if (!overlay) return;
 
-  // Populate tabs
+  // Populate tabs (response body shows spinner initially)
   const reqTab = document.getElementById('compareTabRequest');
   const respTab = document.getElementById('compareTabResponse');
 
@@ -301,6 +298,246 @@ function openComparisonOverlay(entryA, entryB) {
   });
 
   overlay.classList.remove('hidden');
+
+  // Async: compute response body diff using Rust + cache
+  const bodyA = entryA.response_body || '';
+  const bodyB = entryB.response_body || '';
+  if (!bodyA && !bodyB) {
+    const section = document.getElementById('compareRustDiffSection');
+    if (section) section.innerHTML = `<div class="compare-section-title">Response Body Diff</div>
+      <p class="compare-empty">Both responses are empty</p>`;
+    return;
+  }
+
+  // Cache key uses sorted seq pair for consistency
+  const seqA = entryA.seq != null ? entryA.seq : 0;
+  const seqB = entryB.seq != null ? entryB.seq : 0;
+  const cacheKey = `hist:${Math.min(seqA, seqB)}-${Math.max(seqA, seqB)}`;
+  const invoke = window.__TAURI__?.core?.invoke;
+
+  let diffResult = null;
+  const cached = typeof diffCache !== 'undefined' && diffCache.get(cacheKey);
+  if (cached) {
+    diffResult = cached;
+    if (typeof rpLog === 'function') rpLog('debug', `Diff cache hit: ${cacheKey}`);
+  } else if (invoke) {
+    try {
+      let contentType = 'text';
+      try { JSON.parse(bodyA); JSON.parse(bodyB); contentType = 'json'; } catch {}
+      diffResult = await invoke('compute_diff', { textA: bodyA, textB: bodyB, contentType });
+      // Cache
+      if (typeof diffCache !== 'undefined') {
+        const entrySize = JSON.stringify(diffResult).length * 2;
+        diffCache.set(cacheKey, diffResult);
+        if (typeof diffCacheBytes !== 'undefined') diffCacheBytes += entrySize;
+        if (typeof rpLog === 'function') rpLog('debug', `Diff cached: ${cacheKey} (${typeof formatBytes === 'function' ? formatBytes(entrySize) : entrySize + ' B'})`);
+      }
+    } catch (err) {
+      if (typeof rpLog === 'function') rpLog('error', 'Rust compute_diff failed for comparison', String(err));
+    }
+  }
+
+  const section = document.getElementById('compareRustDiffSection');
+  if (!section) return;
+
+  if (!diffResult || !diffResult.ops || diffResult.ops.length === 0) {
+    // Fallback: show raw side-by-side
+    const fmtA = formatBodyForCompare(bodyA);
+    const fmtB = formatBodyForCompare(bodyB);
+    section.innerHTML = `<div class="compare-section-title">Response Body</div>
+      <div class="compare-grid">
+        <div class="compare-column">
+          <div class="compare-column-label">Response A</div>
+          <pre class="compare-body-pre">${escapeHtml(fmtA)}</pre>
+        </div>
+        <div class="compare-column">
+          <div class="compare-column-label">Response B</div>
+          <pre class="compare-body-pre">${escapeHtml(fmtB)}</pre>
+        </div>
+      </div>`;
+    return;
+  }
+
+  // Render paginated diff hunks (reuse buildDiffHunks from app.js)
+  const ops = diffResult.ops;
+  const similarity = diffResult.similarity != null ? (diffResult.similarity * 100).toFixed(1) : '?';
+  const HUNKS_PER_PAGE = 20;
+
+  const hunks = typeof buildDiffHunks === 'function' ? buildDiffHunks(ops) : [{ type: 'hunk', ops }];
+  let renderedCount = 0;
+  let leftLineNum = 0, rightLineNum = 0;
+
+  const highlightFn = (s) => s; // no syntax highlight in compare view
+
+  const renderOp = (op) => {
+    let leftLine = '', rightLine = '';
+    switch (op.type) {
+      case 'same': {
+        leftLineNum++; rightLineNum++;
+        const txt = escapeHtml(op.line || op.left || '');
+        leftLine = `<div class="diff-line diff-same"><span class="diff-ln">${leftLineNum}</span><span class="diff-text">${txt}</span></div>`;
+        rightLine = `<div class="diff-line diff-same"><span class="diff-ln">${rightLineNum}</span><span class="diff-text">${txt}</span></div>`;
+        break;
+      }
+      case 'remove': {
+        leftLineNum++;
+        leftLine = `<div class="diff-line diff-removed"><span class="diff-ln">${leftLineNum}</span><span class="diff-text">${escapeHtml(op.line || op.left || '')}</span></div>`;
+        rightLine = `<div class="diff-line diff-empty"><span class="diff-ln"></span><span class="diff-text"></span></div>`;
+        break;
+      }
+      case 'add': {
+        rightLineNum++;
+        leftLine = `<div class="diff-line diff-empty"><span class="diff-ln"></span><span class="diff-text"></span></div>`;
+        rightLine = `<div class="diff-line diff-added"><span class="diff-ln">${rightLineNum}</span><span class="diff-text">${escapeHtml(op.line || op.right || '')}</span></div>`;
+        break;
+      }
+      case 'change': {
+        leftLineNum++; rightLineNum++;
+        let leftCharHtml, rightCharHtml;
+        if (op.left_highlights || op.right_highlights) {
+          leftCharHtml = typeof renderRustCharHighlight === 'function'
+            ? renderRustCharHighlight(op.left, op.left_highlights, 'diff-char-rm', highlightFn)
+            : escapeHtml(op.left || '');
+          rightCharHtml = typeof renderRustCharHighlight === 'function'
+            ? renderRustCharHighlight(op.right, op.right_highlights, 'diff-char-add', highlightFn)
+            : escapeHtml(op.right || '');
+        } else {
+          leftCharHtml = typeof charDiffHighlight === 'function'
+            ? charDiffHighlight(op.left, op.right, 'left', highlightFn)
+            : escapeHtml(op.left || '');
+          rightCharHtml = typeof charDiffHighlight === 'function'
+            ? charDiffHighlight(op.left, op.right, 'right', highlightFn)
+            : escapeHtml(op.right || '');
+        }
+        leftLine = `<div class="diff-line diff-changed"><span class="diff-ln">${leftLineNum}</span><span class="diff-text">${leftCharHtml}</span></div>`;
+        rightLine = `<div class="diff-line diff-changed"><span class="diff-ln">${rightLineNum}</span><span class="diff-text">${rightCharHtml}</span></div>`;
+        break;
+      }
+    }
+    return { leftLine, rightLine };
+  };
+
+  const renderHunkBatch = (startIdx, count) => {
+    let leftHtml = '', rightHtml = '';
+    const end = Math.min(startIdx + count, hunks.length);
+    for (let i = startIdx; i < end; i++) {
+      const h = hunks[i];
+      if (h.type === 'collapse') {
+        const divider = `<div class="diff-collapse" data-hunk-idx="${i}">▸ ${h.count} unchanged lines</div>`;
+        leftHtml += divider;
+        rightHtml += divider;
+        h.ops.forEach(() => { leftLineNum++; rightLineNum++; });
+      } else {
+        h.ops.forEach(op => {
+          const { leftLine, rightLine } = renderOp(op);
+          leftHtml += leftLine;
+          rightHtml += rightLine;
+        });
+      }
+      renderedCount = i + 1;
+    }
+    return { leftHtml, rightHtml };
+  };
+
+  // Initial render
+  const { leftHtml, rightHtml } = renderHunkBatch(0, HUNKS_PER_PAGE);
+  const remaining = hunks.length - renderedCount;
+
+  section.innerHTML = `<div class="compare-section-title">Response Body Diff
+    <span class="diff-badge ${diffResult.match_exact ? 'diff-match' : 'diff-mismatch'}" style="margin-left:8px;">
+      ${diffResult.match_exact ? '✓ Match' : similarity + '% similar'}
+    </span>
+    <span style="color:var(--text-muted); font-size:11px; font-weight:400; margin-left:4px;">
+      +${diffResult.added_count || 0} −${diffResult.removed_count || 0} ~${diffResult.changed_count || 0}
+    </span>
+  </div>
+  <div class="diff-side-by-side" style="max-height:500px; overflow:auto;">
+    <div class="diff-pane diff-pane-left" id="compareDiffLeft">${leftHtml}</div>
+    <div class="diff-pane diff-pane-right" id="compareDiffRight">${rightHtml}</div>
+  </div>
+  ${remaining > 0 ? `<div class="diff-load-more-row" id="compareDiffLoadMore">
+    <div class="diff-load-more-bar">
+      <button class="btn btn-sm diff-load-next-btn" id="compareDiffLoadNext">▾ Load next ${Math.min(HUNKS_PER_PAGE, remaining)} hunks</button>
+      <button class="btn btn-sm diff-load-all-btn" id="compareDiffLoadAll">Load all (${remaining} remaining)</button>
+      <span class="diff-load-more-info">${renderedCount} of ${hunks.length} hunks shown</span>
+    </div>
+    ${remaining > 50 ? '<div class="diff-load-warn">⚠ Loading all may be slow due to DOM rendering</div>' : ''}
+  </div>` : ''}`;
+
+  // Wire collapse toggles
+  section.querySelectorAll('.diff-collapse').forEach(el => {
+    if (el.dataset.wired) return;
+    el.dataset.wired = '1';
+    el.addEventListener('click', () => {
+      const idx = parseInt(el.dataset.hunkIdx, 10);
+      const hunk = hunks[idx];
+      if (!hunk || hunk.type !== 'collapse') return;
+      let expandLeft = '', expandRight = '';
+      let tmpL = leftLineNum, tmpR = rightLineNum;
+      // Recalculate line numbers up to this hunk
+      let ln = 0, rn = 0;
+      for (let i = 0; i < idx; i++) {
+        const h = hunks[i];
+        h.ops.forEach(op => {
+          if (op.type === 'same' || op.type === 'change') { ln++; rn++; }
+          else if (op.type === 'remove') ln++;
+          else if (op.type === 'add') rn++;
+        });
+      }
+      hunk.ops.forEach(op => {
+        ln++; rn++;
+        const txt = escapeHtml(op.line || op.left || '');
+        expandLeft += `<div class="diff-line diff-same"><span class="diff-ln">${ln}</span><span class="diff-text">${txt}</span></div>`;
+        expandRight += `<div class="diff-line diff-same"><span class="diff-ln">${rn}</span><span class="diff-text">${txt}</span></div>`;
+      });
+      // Replace collapse dividers in both panes
+      const leftPane = document.getElementById('compareDiffLeft');
+      const rightPane = document.getElementById('compareDiffRight');
+      [leftPane, rightPane].forEach(pane => {
+        if (!pane) return;
+        const collapseEl = pane.querySelector(`.diff-collapse[data-hunk-idx="${idx}"]`);
+        if (collapseEl) {
+          const frag = document.createRange().createContextualFragment(pane === leftPane ? expandLeft : expandRight);
+          collapseEl.replaceWith(frag);
+        }
+      });
+    });
+  });
+
+  // Wire load more buttons
+  const loadNextBtn = document.getElementById('compareDiffLoadNext');
+  const loadAllBtn = document.getElementById('compareDiffLoadAll');
+  const loadMore = () => {
+    const { leftHtml: moreLeft, rightHtml: moreRight } = renderHunkBatch(renderedCount, HUNKS_PER_PAGE);
+    const leftPane = document.getElementById('compareDiffLeft');
+    const rightPane = document.getElementById('compareDiffRight');
+    if (leftPane) leftPane.insertAdjacentHTML('beforeend', moreLeft);
+    if (rightPane) rightPane.insertAdjacentHTML('beforeend', moreRight);
+    const rem = hunks.length - renderedCount;
+    const bar = document.getElementById('compareDiffLoadMore');
+    if (rem <= 0 && bar) { bar.remove(); return; }
+    if (bar) {
+      bar.innerHTML = `<div class="diff-load-more-bar">
+        <button class="btn btn-sm diff-load-next-btn" id="compareDiffLoadNext">▾ Load next ${Math.min(HUNKS_PER_PAGE, rem)} hunks</button>
+        <button class="btn btn-sm diff-load-all-btn" id="compareDiffLoadAll">Load all (${rem} remaining)</button>
+        <span class="diff-load-more-info">${renderedCount} of ${hunks.length} hunks shown</span>
+      </div>
+      ${rem > 50 ? '<div class="diff-load-warn">⚠ Loading all may be slow due to DOM rendering</div>' : ''}`;
+      document.getElementById('compareDiffLoadNext')?.addEventListener('click', loadMore);
+      document.getElementById('compareDiffLoadAll')?.addEventListener('click', loadAll);
+    }
+  };
+  const loadAll = () => {
+    const { leftHtml: moreLeft, rightHtml: moreRight } = renderHunkBatch(renderedCount, hunks.length - renderedCount);
+    const leftPane = document.getElementById('compareDiffLeft');
+    const rightPane = document.getElementById('compareDiffRight');
+    if (leftPane) leftPane.insertAdjacentHTML('beforeend', moreLeft);
+    if (rightPane) rightPane.insertAdjacentHTML('beforeend', moreRight);
+    const bar = document.getElementById('compareDiffLoadMore');
+    if (bar) bar.remove();
+  };
+  if (loadNextBtn) loadNextBtn.addEventListener('click', loadMore);
+  if (loadAllBtn) loadAllBtn.addEventListener('click', loadAll);
 }
 
 /**
