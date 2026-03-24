@@ -34,6 +34,15 @@ pub struct TestBlock {
     pub request: ParsedRequest,
     pub assertions: Vec<Assertion>,
     pub extracts: Vec<Extract>,
+    /// True when block has `# @compare` directive — contains multi-step comparison.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compare: bool,
+    /// Steps within a @compare block. Empty for normal blocks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<CompareStep>,
+    /// Diff directive specifying which two steps to compare.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<DiffDirective>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -47,6 +56,22 @@ pub struct Assertion {
 pub struct Extract {
     pub variable_name: String,
     pub source_path: String,
+}
+
+/// A single step within a @compare block.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CompareStep {
+    pub name: String,
+    pub request: ParsedRequest,
+    pub assertions: Vec<Assertion>,
+    pub extracts: Vec<Extract>,
+}
+
+/// Specifies which two steps to diff in a @compare block.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DiffDirective {
+    pub step_a: String,
+    pub step_b: String,
 }
 
 /// Backward-compatible parse function. Returns a flat list of requests.
@@ -154,11 +179,22 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
     let mut dev_auth: Option<String> = None;
     let mut group: Option<String> = None;
     let mut depends = Vec::new();
+    let mut is_compare = false;
+    let mut diff_directive: Option<DiffDirective> = None;
+    // Block-level assertions (used for $diff.* in compare blocks, or normal assertions)
     let mut assertions = Vec::new();
     let mut extracts = Vec::new();
     let mut request_name: Option<String> = None;
     let mut request_lines: Vec<&str> = Vec::new();
     let mut first_meaningful = true;
+
+    // Compare step tracking
+    let mut steps: Vec<CompareStep> = Vec::new();
+    let mut current_step_name: Option<String> = None;
+    let mut step_assertions: Vec<Assertion> = Vec::new();
+    let mut step_extracts: Vec<Extract> = Vec::new();
+    let mut step_request_lines: Vec<&str> = Vec::new();
+    let mut step_request_name: Option<String> = None;
 
     for line in block.lines() {
         let trimmed = line.trim();
@@ -193,6 +229,10 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
             disabled = true;
             continue;
         }
+        if trimmed == "# @compare" {
+            is_compare = true;
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix("# @mode ") {
             let m = rest.trim().to_lowercase();
             if m == "app" || m == "dev" {
@@ -221,27 +261,103 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
             }
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix("# @diff ") {
+            let parts: Vec<&str> = rest.trim().split_whitespace().collect();
+            if parts.len() >= 2 {
+                diff_directive = Some(DiffDirective {
+                    step_a: parts[0].to_string(),
+                    step_b: parts[1].to_string(),
+                });
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("# @step ") {
+            let step_name = rest.trim().to_string();
+            if !step_name.is_empty() {
+                // Finalize previous step if one was open
+                if let Some(prev_name) = current_step_name.take() {
+                    if let Some(req) = parse_request_from_lines(&step_request_lines, &step_request_name) {
+                        steps.push(CompareStep {
+                            name: prev_name,
+                            request: req,
+                            assertions: std::mem::take(&mut step_assertions),
+                            extracts: std::mem::take(&mut step_extracts),
+                        });
+                    }
+                    step_request_lines.clear();
+                    step_request_name = None;
+                }
+                current_step_name = Some(step_name);
+                is_compare = true; // auto-enable compare when steps are present
+            }
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix("# @assert ") {
             if let Some(assertion) = parse_assertion_directive(rest.trim()) {
-                assertions.push(assertion);
+                if current_step_name.is_some() && !assertion.left.starts_with("$diff.") {
+                    step_assertions.push(assertion);
+                } else {
+                    assertions.push(assertion);
+                }
             }
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("# @extract ") {
             if let Some(extract) = parse_extract_directive(rest.trim()) {
-                extracts.push(extract);
+                if current_step_name.is_some() {
+                    step_extracts.push(extract);
+                } else {
+                    extracts.push(extract);
+                }
             }
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("# @name ") {
-            request_name = Some(rest.trim().to_string());
+            if current_step_name.is_some() {
+                step_request_name = Some(rest.trim().to_string());
+            } else {
+                request_name = Some(rest.trim().to_string());
+            }
             continue;
         }
 
-        request_lines.push(line);
+        // Request/body lines
+        if current_step_name.is_some() {
+            step_request_lines.push(line);
+        } else {
+            request_lines.push(line);
+        }
     }
 
-    let request = parse_request_from_lines(&request_lines, &request_name)?;
+    // Finalize last open step
+    if let Some(prev_name) = current_step_name.take() {
+        if let Some(req) = parse_request_from_lines(&step_request_lines, &step_request_name) {
+            steps.push(CompareStep {
+                name: prev_name,
+                request: req,
+                assertions: step_assertions,
+                extracts: step_extracts,
+            });
+        }
+    }
+
+    // For compare blocks with steps, we don't require a block-level request
+    let request = if is_compare && !steps.is_empty() {
+        // Use dummy request for compare blocks — steps hold the real requests
+        if let Some(req) = parse_request_from_lines(&request_lines, &request_name) {
+            req
+        } else {
+            ParsedRequest {
+                name: request_name,
+                method: String::new(),
+                url: String::new(),
+                headers: Vec::new(),
+                body: None,
+            }
+        }
+    } else {
+        parse_request_from_lines(&request_lines, &request_name)?
+    };
 
     if block_name.is_empty() {
         if let Some(ref n) = request.name {
@@ -261,6 +377,9 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
         request,
         assertions,
         extracts,
+        compare: is_compare,
+        steps,
+        diff: diff_directive,
     })
 }
 
@@ -370,40 +489,90 @@ pub fn generate_http_content(suite: &TestSuite) -> String {
             output.push_str(&format!("# @depends {}\n", dep));
         }
 
-        // Request line
-        output.push_str(&format!("{} {}\n", block.request.method, block.request.url));
-
-        // Headers
-        for (key, value) in &block.request.headers {
-            output.push_str(&format!("{}: {}\n", key, value));
+        // Compare directive
+        if block.compare {
+            output.push_str("# @compare\n");
         }
 
-        // Body (preceded by blank line)
-        if let Some(ref body) = block.request.body {
-            output.push('\n');
-            output.push_str(body);
-            output.push('\n');
-        }
+        if block.compare && !block.steps.is_empty() {
+            // Render each step
+            for step in &block.steps {
+                output.push_str(&format!("# @step {}\n", step.name));
+                output.push_str(&format!("{} {}\n", step.request.method, step.request.url));
+                for (key, value) in &step.request.headers {
+                    output.push_str(&format!("{}: {}\n", key, value));
+                }
+                if let Some(ref body) = step.request.body {
+                    output.push('\n');
+                    output.push_str(body);
+                    output.push('\n');
+                }
+                if !step.extracts.is_empty() || !step.assertions.is_empty() {
+                    output.push('\n');
+                }
+                for extract in &step.extracts {
+                    output.push_str(&format!(
+                        "# @extract {} = {}\n",
+                        extract.variable_name, extract.source_path
+                    ));
+                }
+                for assertion in &step.assertions {
+                    output.push_str(&format!(
+                        "# @assert {} {} {}\n",
+                        assertion.left, assertion.operator, assertion.right
+                    ));
+                }
+            }
 
-        // Blank line before directives
-        if !block.extracts.is_empty() || !block.assertions.is_empty() {
-            output.push('\n');
-        }
+            // Diff directive
+            if let Some(ref diff) = block.diff {
+                output.push_str(&format!("# @diff {} {}\n", diff.step_a, diff.step_b));
+            }
 
-        // Extract directives
-        for extract in &block.extracts {
-            output.push_str(&format!(
-                "# @extract {} = {}\n",
-                extract.variable_name, extract.source_path
-            ));
-        }
+            // Block-level assertions (comparison assertions)
+            for assertion in &block.assertions {
+                output.push_str(&format!(
+                    "# @assert {} {} {}\n",
+                    assertion.left, assertion.operator, assertion.right
+                ));
+            }
+        } else {
+            // Normal (non-compare) block rendering
+            // Request line
+            output.push_str(&format!("{} {}\n", block.request.method, block.request.url));
 
-        // Assertion directives
-        for assertion in &block.assertions {
-            output.push_str(&format!(
-                "# @assert {} {} {}\n",
-                assertion.left, assertion.operator, assertion.right
-            ));
+            // Headers
+            for (key, value) in &block.request.headers {
+                output.push_str(&format!("{}: {}\n", key, value));
+            }
+
+            // Body (preceded by blank line)
+            if let Some(ref body) = block.request.body {
+                output.push('\n');
+                output.push_str(body);
+                output.push('\n');
+            }
+
+            // Blank line before directives
+            if !block.extracts.is_empty() || !block.assertions.is_empty() {
+                output.push('\n');
+            }
+
+            // Extract directives
+            for extract in &block.extracts {
+                output.push_str(&format!(
+                    "# @extract {} = {}\n",
+                    extract.variable_name, extract.source_path
+                ));
+            }
+
+            // Assertion directives
+            for assertion in &block.assertions {
+                output.push_str(&format!(
+                    "# @assert {} {} {}\n",
+                    assertion.left, assertion.operator, assertion.right
+                ));
+            }
         }
     }
 
@@ -794,6 +963,9 @@ POST https://example.com/login";
                 },
                 assertions: vec![],
                 extracts: vec![],
+                compare: false,
+                steps: Vec::new(),
+                diff: None,
             }],
             ..Default::default()
         };
@@ -826,6 +998,9 @@ POST https://example.com/login";
                 },
                 assertions: vec![],
                 extracts: vec![],
+                compare: false,
+                steps: Vec::new(),
+                diff: None,
             }],
             ..Default::default()
         };
@@ -873,6 +1048,9 @@ POST https://example.com/login";
                     variable_name: "userId".into(),
                     source_path: "response.body.0.id".into(),
                 }],
+                compare: false,
+                steps: Vec::new(),
+                diff: None,
             }],
             ..Default::default()
         };
@@ -917,6 +1095,9 @@ POST https://example.com/login";
                         variable_name: "token".into(),
                         source_path: "response.body.token".into(),
                     }],
+                    compare: false,
+                    steps: Vec::new(),
+                    diff: None,
                 },
                 TestBlock {
                     block_type: "test".into(),
@@ -947,6 +1128,9 @@ POST https://example.com/login";
                         },
                     ],
                     extracts: vec![],
+                    compare: false,
+                    steps: Vec::new(),
+                    diff: None,
                 },
                 TestBlock {
                     block_type: "teardown".into(),
@@ -966,6 +1150,9 @@ POST https://example.com/login";
                     },
                     assertions: vec![],
                     extracts: vec![],
+                    compare: false,
+                    steps: Vec::new(),
+                    diff: None,
                 },
             ],
             ..Default::default()
@@ -1014,6 +1201,9 @@ POST https://example.com/login";
                         variable_name: "token".into(),
                         source_path: "response.body.token".into(),
                     }],
+                    compare: false,
+                    steps: Vec::new(),
+                    diff: None,
                 },
                 TestBlock {
                     block_type: "test".into(),
@@ -1037,6 +1227,9 @@ POST https://example.com/login";
                         right: "200".into(),
                     }],
                     extracts: vec![],
+                    compare: false,
+                    steps: Vec::new(),
+                    diff: None,
                 },
                 TestBlock {
                     block_type: "teardown".into(),
@@ -1056,6 +1249,9 @@ POST https://example.com/login";
                     },
                     assertions: vec![],
                     extracts: vec![],
+                    compare: false,
+                    steps: Vec::new(),
+                    diff: None,
                 },
             ],
             ..Default::default()
@@ -1163,6 +1359,9 @@ POST https://example.com/login";
                 },
                 assertions: vec![],
                 extracts: vec![],
+                compare: false,
+                steps: Vec::new(),
+                diff: None,
             }],
             ..Default::default()
         };
@@ -1233,6 +1432,9 @@ grant_type=client_credentials
                 },
                 assertions: vec![],
                 extracts: vec![],
+                compare: false,
+                steps: Vec::new(),
+                diff: None,
             }],
             ..Default::default()
         };
@@ -1278,6 +1480,9 @@ grant_type=client_credentials
                 },
                 assertions: vec![],
                 extracts: vec![],
+                compare: false,
+                steps: Vec::new(),
+                diff: None,
             }],
             ..Default::default()
         };
@@ -1332,6 +1537,9 @@ grant_type=client_credentials
                 },
                 assertions: vec![],
                 extracts: vec![],
+                compare: false,
+                steps: Vec::new(),
+                diff: None,
             }],
             ..Default::default()
         };
@@ -1577,6 +1785,9 @@ Authorization: Bearer {{token}}
                 },
                 assertions: vec![],
                 extracts: vec![],
+                compare: false,
+                steps: Vec::new(),
+                diff: None,
             }],
             ..Default::default()
         };
@@ -1633,5 +1844,137 @@ Authorization: Bearer {{token}}
         assert!(output.contains("# @telemetry conn_str_var"));
         assert!(output.contains("# @telemetry_service my-e2e"));
         assert!(output.contains("# @telemetry_token arm_token"));
+    }
+
+    // ── @compare block parsing ───────────────────────
+
+    #[test]
+    fn parse_compare_block_with_two_steps() {
+        let input = r#"
+### @test Compare APIs
+# @compare
+# @description Compares v1 and v2
+# @step baseline
+GET https://api.example.com/v1/users
+Authorization: Bearer token123
+
+# @assert status == 200
+
+# @step candidate
+GET https://api.example.com/v2/users
+Authorization: Bearer token123
+
+# @assert status == 200
+
+# @diff baseline candidate
+# @assert $diff.match == true
+"#;
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.blocks.len(), 1);
+        let block = &suite.blocks[0];
+        assert!(block.compare);
+        assert_eq!(block.block_type, "test");
+        assert_eq!(block.name, "Compare APIs");
+        assert_eq!(block.steps.len(), 2);
+        assert_eq!(block.steps[0].name, "baseline");
+        assert_eq!(block.steps[0].request.method, "GET");
+        assert_eq!(block.steps[0].request.url, "https://api.example.com/v1/users");
+        assert_eq!(block.steps[0].assertions.len(), 1);
+        assert_eq!(block.steps[1].name, "candidate");
+        assert_eq!(block.steps[1].request.method, "GET");
+        assert_eq!(block.steps[1].request.url, "https://api.example.com/v2/users");
+        assert!(block.diff.is_some());
+        let diff = block.diff.as_ref().unwrap();
+        assert_eq!(diff.step_a, "baseline");
+        assert_eq!(diff.step_b, "candidate");
+        // Block-level assertions ($diff.*)
+        assert_eq!(block.assertions.len(), 1);
+        assert_eq!(block.assertions[0].left, "$diff.match");
+    }
+
+    #[test]
+    fn parse_compare_step_with_extracts() {
+        let input = r#"
+### @test Compare with extracts
+# @compare
+# @step first
+POST https://api.example.com/query
+Content-Type: application/json
+
+{"query": "test"}
+
+# @extract result_count = $.count
+# @assert status == 200
+
+# @step second
+POST https://api.example.com/query-v2
+Content-Type: application/json
+
+{"query": "test"}
+
+# @extract result_count_v2 = $.count
+# @assert status == 200
+
+# @diff first second
+# @assert $diff.changed_count == 0
+"#;
+        let suite = parse_test_suite(input);
+        let block = &suite.blocks[0];
+        assert!(block.compare);
+        assert_eq!(block.steps.len(), 2);
+        assert_eq!(block.steps[0].extracts.len(), 1);
+        assert_eq!(block.steps[0].extracts[0].variable_name, "result_count");
+        assert_eq!(block.steps[1].extracts.len(), 1);
+        assert!(block.steps[0].request.body.is_some());
+    }
+
+    #[test]
+    fn parse_compare_auto_enables_on_step() {
+        // Even without explicit # @compare, # @step auto-enables compare mode
+        let input = r#"
+### @test Auto Compare
+# @step a
+GET https://api.com/a
+# @step b
+GET https://api.com/b
+"#;
+        let suite = parse_test_suite(input);
+        let block = &suite.blocks[0];
+        assert!(block.compare);
+        assert_eq!(block.steps.len(), 2);
+    }
+
+    #[test]
+    fn parse_compare_roundtrip() {
+        let input = r#"
+### @test Compare Roundtrip
+# @description Tests generation roundtrip
+# @compare
+# @step baseline
+GET https://api.example.com/v1
+Authorization: Bearer {{token}}
+
+# @extract v1_id = $.id
+# @assert status == 200
+
+# @step candidate
+GET https://api.example.com/v2
+Authorization: Bearer {{token}}
+
+# @extract v2_id = $.id
+# @assert status == 200
+
+# @diff baseline candidate
+# @assert $diff.match == true
+"#;
+        let suite = parse_test_suite(input);
+        let generated = generate_http_content(&suite);
+        // Verify key directives survive roundtrip
+        assert!(generated.contains("# @compare"));
+        assert!(generated.contains("# @step baseline"));
+        assert!(generated.contains("# @step candidate"));
+        assert!(generated.contains("# @diff baseline candidate"));
+        assert!(generated.contains("# @assert $diff.match == true"));
+        assert!(generated.contains("# @extract v1_id = $.id"));
     }
 }

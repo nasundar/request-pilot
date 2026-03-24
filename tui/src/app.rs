@@ -280,7 +280,36 @@ impl App {
     fn record_history(&mut self, results: &TestRunResults) {
         let run_id = request_pilot_core::uuid::Uuid::new_v4().to_string();
         for br in &results.block_results {
-            if let Some(ref resp) = br.response {
+            // For compare blocks, record each step as a separate history entry
+            if !br.step_results.is_empty() {
+                for step in &br.step_results {
+                    if let Some(ref resp) = step.response {
+                        let seq = self.history.next_seq();
+                        let entry = HistoryEntry {
+                            seq,
+                            id: request_pilot_core::uuid::Uuid::new_v4().to_string(),
+                            run_id: Some(run_id.clone()),
+                            source: "tui".to_string(),
+                            file_name: None,
+                            group: br.group.clone(),
+                            block_name: Some(br.name.clone()),
+                            compare_step: Some(step.name.clone()),
+                            method: step.request_method.clone(),
+                            url: step.request_url.clone(),
+                            request_headers: step.request_headers.clone(),
+                            request_body: step.request_body.clone(),
+                            status: resp.status,
+                            response_headers: resp.headers.clone(),
+                            response_body: Some(resp.body.clone()),
+                            response_time_ms: resp.time_ms,
+                            response_size_bytes: resp.size_bytes,
+                            timestamp: request_pilot_core::chrono::Utc::now()
+                                .to_rfc3339(),
+                        };
+                        self.history.add(entry);
+                    }
+                }
+            } else if let Some(ref resp) = br.response {
                 let seq = self.history.next_seq();
                 let entry = HistoryEntry {
                     seq,
@@ -290,6 +319,7 @@ impl App {
                     file_name: None,
                     group: br.group.clone(),
                     block_name: Some(br.name.clone()),
+                    compare_step: None,
                     method: br.request_method.clone(),
                     url: br.request_url.clone(),
                     request_headers: br.request_headers.clone(),
@@ -606,6 +636,8 @@ impl App {
                         extract_results: Vec::new(),
                         error: None,
                         time_ms: 0,
+                        step_results: Vec::new(),
+                        diff_result: None,
                     });
                 }
                 if let Some(single_br) = single_results.block_results.into_iter().next() {
@@ -675,6 +707,8 @@ impl App {
                     extract_results: Vec::new(),
                     error: None,
                     time_ms: 0,
+                    step_results: Vec::new(),
+                    diff_result: None,
                 }).collect();
 
                 for (br, &orig_idx) in result_blocks.into_iter().zip(indices.iter()) {

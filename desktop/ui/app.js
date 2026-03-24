@@ -1743,7 +1743,7 @@ function createBlockItem(file, fileIdx, block, blockIdx) {
   item.innerHTML = `
     <input type="checkbox" class="block-toggle" title="Enable/disable this step" ${isDisabled ? '' : 'checked'}>
     <span class="block-status ${statusClass}"></span>
-    <span class="block-icon">${getBlockIcon(block.block_type)}</span>
+    <span class="block-icon">${block.compare ? '\u21C4' : getBlockIcon(block.block_type)}</span>
     <span class="block-name-group">
       <span class="block-name" title="${escapeAttr(block.name)}">${escapeHtml(block.name || block.block_type)}</span>
       ${modeBadgeHtml}
@@ -1788,6 +1788,26 @@ function createBlockItem(file, fileIdx, block, blockIdx) {
   item.addEventListener('mouseleave', () => {
     hideBlockTooltip();
   });
+
+  // Add compare step sub-items
+  if (block.compare && block.steps && block.steps.length > 0) {
+    const br = file.results?.block_results?.[blockIdx];
+    const stepsContainer = document.createElement('div');
+    stepsContainer.className = 'compare-steps';
+    block.steps.forEach((step, si) => {
+      const stepEl = document.createElement('div');
+      stepEl.className = 'compare-step-item';
+      const sr = br?.step_results?.[si];
+      const stepStatus = sr ? (sr.error ? 'error' : sr.assertion_results?.every(a => a.passed) !== false ? 'passed' : 'failed') : '';
+      stepEl.innerHTML = `
+        <span class="block-status ${stepStatus ? 'status-' + stepStatus : ''}"></span>
+        <span class="step-label">${escapeHtml(step.name)}</span>
+        <span class="step-method">${escapeHtml(step.request?.method || '')}</span>
+      `;
+      stepsContainer.appendChild(stepEl);
+    });
+    item.appendChild(stepsContainer);
+  }
 
   return item;
 }
@@ -1870,7 +1890,13 @@ function selectBlock(fileIdx, blockIdx) {
 
   // Show response if block has been run
   const br = file.results?.block_results?.[blockIdx];
-  if (br) {
+  if (block.compare && br?.step_results?.length > 0) {
+    const firstStepResp = br.step_results[0].response;
+    if (firstStepResp) {
+      displayResponse(firstStepResp);
+      lastResponse = firstStepResp;
+    }
+  } else if (br) {
     if (br.response) {
       displayResponse(br.response);
       lastResponse = br.response;
@@ -1881,7 +1907,8 @@ function selectBlock(fileIdx, blockIdx) {
   }
 
   // Show assertions tab if block has assertions, extracts, or run results
-  const hasDirectives = (block.assertions && block.assertions.length > 0) || (block.extracts && block.extracts.length > 0);
+  const isCompare = block.compare && block.steps && block.steps.length > 0;
+  const hasDirectives = isCompare || (block.assertions && block.assertions.length > 0) || (block.extracts && block.extracts.length > 0);
   const hasResults = br && (br.assertion_results?.length > 0 || br.extract_results?.length > 0 || br.error);
   if (hasDirectives || hasResults) {
     assertionsTab.style.display = '';
@@ -1905,6 +1932,131 @@ function renderAssertions(fileIdx, blockIdx) {
   const br = file.results?.block_results?.[blockIdx];
 
   let html = '';
+
+  // Compare block: render per-step + diff
+  if (block.compare && block.steps && block.steps.length > 0) {
+    // Per-step results
+    block.steps.forEach((step, si) => {
+      const sr = br?.step_results?.[si];
+      const stepStatus = sr ? (sr.error ? 'error' : 'done') : 'pending';
+      html += `<div class="assertion-group compare-step-group">
+        <div class="assertion-group-header">Step: ${escapeHtml(step.name)} <span class="step-badge ${stepStatus}">${stepStatus}</span></div>`;
+
+      // Step assertions
+      if (step.assertions && step.assertions.length > 0) {
+        step.assertions.forEach((assertion, i) => {
+          const assertionText = `${assertion.left} ${assertion.operator} ${assertion.right}`;
+          const ar = sr?.assertion_results?.[i];
+          const passed = ar ? ar.passed : null;
+          const statusClass = passed === true ? 'passed' : passed === false ? 'failed' : '';
+          const icon = passed === true ? '\u2713' : passed === false ? '\u2717' : '\u25CB';
+          let detail = '';
+          if (ar && !ar.passed && ar.actual != null) {
+            detail = `<span class="assert-detail">got: ${escapeHtml(ar.actual)}</span>`;
+          }
+          html += `<div class="assertion-row ${statusClass}"><span class="assert-icon">${icon}</span><span class="assert-text">${escapeHtml(assertionText)}</span>${detail}</div>`;
+        });
+      }
+
+      // Step extracts
+      if (step.extracts && step.extracts.length > 0) {
+        step.extracts.forEach((extract, i) => {
+          const er = sr?.extract_results?.[i];
+          const success = er ? er.success : null;
+          const stateClass = success === true ? 'extract-success' : success === false ? 'extract-failed' : '';
+          const icon = success === true ? '\u2713' : success === false ? '\u2717' : '\u26A1';
+          const val = er?.value ?? '\u2014';
+          html += `<div class="extract-row ${stateClass}"><span class="extract-icon">${icon}</span><span class="extract-var">${escapeHtml(extract.variable_name)}</span><span class="var-sep">=</span><span class="extract-val">${escapeHtml(val)}</span></div>`;
+        });
+      }
+
+      // Step error
+      if (sr?.error) {
+        html += `<div class="assertion-row failed"><span class="assert-icon">\u2717</span><span class="assert-text">${escapeHtml(sr.error)}</span></div>`;
+      }
+
+      html += '</div>';
+    });
+
+    // Diff summary
+    const diff = br?.diff_result;
+    if (diff) {
+      html += `<div class="assertion-group diff-summary-group">
+        <div class="assertion-group-header">\u21C4 Comparison Result</div>
+        <div class="diff-summary">
+          <div class="diff-stat"><span class="diff-label">Match:</span><span class="diff-value ${diff.match_exact ? 'diff-match' : 'diff-mismatch'}">${diff.match_exact ? 'Exact Match \u2713' : 'Differences Found'}</span></div>
+          <div class="diff-stat"><span class="diff-label">Similarity:</span><span class="diff-value">${(diff.similarity * 100).toFixed(1)}%</span></div>
+          <div class="diff-stat"><span class="diff-label">Type:</span><span class="diff-value">${diff.is_json ? 'JSON' : 'Text'}</span></div>
+          ${diff.added_count ? `<div class="diff-stat"><span class="diff-label">Added:</span><span class="diff-value diff-added">+${diff.added_count}</span></div>` : ''}
+          ${diff.removed_count ? `<div class="diff-stat"><span class="diff-label">Removed:</span><span class="diff-value diff-removed">-${diff.removed_count}</span></div>` : ''}
+          ${diff.changed_count ? `<div class="diff-stat"><span class="diff-label">Changed:</span><span class="diff-value diff-changed">\u0394${diff.changed_count}</span></div>` : ''}
+        </div>`;
+
+      // Changed paths detail
+      if (diff.changed_paths && diff.changed_paths.length > 0) {
+        html += `<div class="diff-paths"><div class="diff-paths-header">Changed Paths</div>`;
+        diff.changed_paths.slice(0, 50).forEach(cp => {
+          html += `<div class="diff-path-row">
+            <span class="diff-path-name">${escapeHtml(cp.path)}</span>
+            <span class="diff-path-left" title="Step A">${escapeHtml(String(cp.left ?? ''))}</span>
+            <span class="diff-path-arrow">\u2192</span>
+            <span class="diff-path-right" title="Step B">${escapeHtml(String(cp.right ?? ''))}</span>
+          </div>`;
+        });
+        if (diff.changed_paths.length > 50) {
+          html += `<div class="diff-path-row">... and ${diff.changed_paths.length - 50} more</div>`;
+        }
+        html += '</div>';
+      }
+
+      // Added/removed paths
+      if (diff.added_paths && diff.added_paths.length > 0) {
+        html += `<div class="diff-paths"><div class="diff-paths-header">Added Paths</div>`;
+        diff.added_paths.slice(0, 20).forEach(p => {
+          html += `<div class="diff-path-row"><span class="diff-path-name diff-added">+ ${escapeHtml(p)}</span></div>`;
+        });
+        html += '</div>';
+      }
+      if (diff.removed_paths && diff.removed_paths.length > 0) {
+        html += `<div class="diff-paths"><div class="diff-paths-header">Removed Paths</div>`;
+        diff.removed_paths.slice(0, 20).forEach(p => {
+          html += `<div class="diff-path-row"><span class="diff-path-name diff-removed">- ${escapeHtml(p)}</span></div>`;
+        });
+        html += '</div>';
+      }
+
+      html += '</div>';
+    }
+
+    // Comparison assertions (from diff directive)
+    if (block.diff && block.diff.comparison_assertions && block.diff.comparison_assertions.length > 0) {
+      html += '<div class="assertion-group"><div class="assertion-group-header">Comparison Assertions</div>';
+      const totalStepAsserts = block.steps.reduce((sum, s) => sum + (s.assertions?.length || 0), 0);
+      block.diff.comparison_assertions.forEach((assertion, i) => {
+        const assertionText = `${assertion.left} ${assertion.operator} ${assertion.right}`;
+        const ar = br?.assertion_results?.[totalStepAsserts + i];
+        const passed = ar ? ar.passed : null;
+        const statusClass = passed === true ? 'passed' : passed === false ? 'failed' : '';
+        const icon = passed === true ? '\u2713' : passed === false ? '\u2717' : '\u25CB';
+        let detail = '';
+        if (ar && !ar.passed && ar.actual != null) {
+          detail = `<span class="assert-detail">got: ${escapeHtml(ar.actual)}</span>`;
+        }
+        html += `<div class="assertion-row ${statusClass}"><span class="assert-icon">${icon}</span><span class="assert-text">${escapeHtml(assertionText)}</span>${detail}</div>`;
+      });
+      html += '</div>';
+    }
+
+    // Block-level error
+    if (br?.error) {
+      html += `<div class="assertion-group"><div class="assertion-group-header">Error</div>
+        <div class="assertion-row failed"><span class="assert-icon">\u2717</span><span class="assert-text">${escapeHtml(br.error)}</span></div></div>`;
+    }
+
+    if (!html) html = '<div class="sidebar-empty" style="padding:20px">No assertions or extractions</div>';
+    assertionsContent.innerHTML = html;
+    return;
+  }
 
   // Assertions
   if (block.assertions && block.assertions.length > 0) {
@@ -2320,6 +2472,10 @@ function showTestResults(passed, failed, skipped, timeMs, blockResults, pendingB
     const extractOk = br.extract_results?.filter(e => e.success).length || 0;
     const extractText = extractCount > 0 ? `${extractOk}/${extractCount} vars` : '';
 
+    const stepCount = br.step_results?.length || 0;
+    const stepText = stepCount > 0 ? `${stepCount} steps` : '';
+    const diffMatch = br.diff_result ? (br.diff_result.match_exact ? '\u2713 match' : `${(br.diff_result.similarity * 100).toFixed(0)}% similar`) : '';
+
     // Determine failure reason
     let failReasonHtml = '';
     if (br.status === 'failed' || br.status === 'error') {
@@ -2350,6 +2506,8 @@ function showTestResults(passed, failed, skipped, timeMs, blockResults, pendingB
       ${failReasonHtml}
       ${assertText ? `<span class="detail-assertions ${assertClass}">${assertText}</span>` : ''}
       ${extractText ? `<span class="detail-extracts">${extractText}</span>` : ''}
+      ${stepText ? `<span class="detail-steps">${stepText}</span>` : ''}
+      ${diffMatch ? `<span class="detail-diff ${br.diff_result?.match_exact ? 'diff-match' : 'diff-mismatch'}">${diffMatch}</span>` : ''}
       <span class="detail-time">${br.time_ms} ms</span>
       ${viewedIcon}
     `;
@@ -4175,7 +4333,73 @@ function renderHistoryLog(entries) {
     case 'status': renderGroupedByStatus(entries); break;
     case 'source': renderGroupedBySource(entries); break;
     case 'file-group-test': renderGroupedByFileGroupTest(entries); break;
+    case 'compare-steps': renderGroupedByCompareStep(entries); break;
     default: renderFlatList(entries); break;
+  }
+}
+
+function renderGroupedByCompareStep(entries) {
+  const compareEntries = entries.filter(e => e.compare_step);
+  const regularEntries = entries.filter(e => !e.compare_step);
+
+  // Group compare entries by block_name
+  const blocks = new Map();
+  compareEntries.forEach(entry => {
+    const key = entry.block_name || 'Unknown Compare';
+    if (!blocks.has(key)) blocks.set(key, new Map());
+    const steps = blocks.get(key);
+    const stepKey = entry.compare_step;
+    if (!steps.has(stepKey)) steps.set(stepKey, []);
+    steps.get(stepKey).push(entry);
+  });
+
+  // Render compare groups
+  blocks.forEach((steps, blockName) => {
+    const group = document.createElement('div');
+    group.className = 'hist-group';
+    const key = `compare:${blockName}`;
+    group.dataset.groupKey = key;
+    const isExpanded = historyExpandedGroups.has(key);
+    if (isExpanded) group.classList.add('expanded');
+
+    const totalEntries = Array.from(steps.values()).reduce((sum, arr) => sum + arr.length, 0);
+    const header = document.createElement('div');
+    header.className = 'hist-group-header';
+    header.innerHTML = `
+      <span class="hist-group-toggle">\u25B6</span>
+      <span class="hist-group-icon">\u21C4</span>
+      <span class="hist-group-label">${escapeHtml(blockName)}</span>
+      <span class="hist-group-count">${totalEntries} requests across ${steps.size} steps</span>
+    `;
+    header.addEventListener('click', () => {
+      group.classList.toggle('expanded');
+      if (group.classList.contains('expanded')) historyExpandedGroups.add(key);
+      else historyExpandedGroups.delete(key);
+    });
+    group.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'hist-group-body';
+
+    steps.forEach((stepEntries, stepName) => {
+      const stepHeader = document.createElement('div');
+      stepHeader.className = 'hist-step-header';
+      stepHeader.innerHTML = `<span class="step-label">\u2500 ${escapeHtml(stepName)}</span> <span class="hist-group-count">${stepEntries.length}</span>`;
+      body.appendChild(stepHeader);
+      stepEntries.forEach(entry => body.appendChild(createHistoryEntryRow(entry)));
+    });
+
+    group.appendChild(body);
+    historyLog.appendChild(group);
+  });
+
+  // Render remaining non-compare entries as flat
+  if (regularEntries.length > 0) {
+    const sep = document.createElement('div');
+    sep.className = 'hist-group-header';
+    sep.innerHTML = `<span class="hist-group-label">Regular Requests</span> <span class="hist-group-count">${regularEntries.length}</span>`;
+    historyLog.appendChild(sep);
+    regularEntries.forEach(entry => historyLog.appendChild(createHistoryEntryRow(entry)));
   }
 }
 

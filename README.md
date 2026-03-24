@@ -57,7 +57,7 @@ A cross-platform HTTP client and **E2E integration test framework** — author r
 
 | Feature | Description |
 |---|---|
-| **Enhanced `.http` Format** | `@variables`, `@setup`/`@test`/`@teardown` blocks, `@assert`/`@extract`/`@description`/`@disabled`/`@group`/`@depends`/`@mode`/`@dev_auth` directives, `{{variable}}` interpolation |
+| **Enhanced `.http` Format** | `@variables`, `@setup`/`@test`/`@teardown` blocks, `@assert`/`@extract`/`@description`/`@disabled`/`@group`/`@depends`/`@mode`/`@dev_auth`/`@compare`/`@step`/`@diff` directives, `{{variable}}` interpolation |
 | **Test Runner** | Setup → Test → Teardown lifecycle; parallel execution via `tokio::JoinSet` with `@group`/`@depends` dependency graph (topological wave scheduling), skip-on-failure |
 | **Variables System** | Static definitions, `.env` file integration, dynamic `@extract` from responses, built-in generators (`$timestamp`, `$uuid`, `$randomInt`) |
 | **Assertions** | `# @assert status == 200`, `# @assert $.field != null`, `# @assert $.items.length > 0` — 7 operators with JSON path support |
@@ -180,6 +180,60 @@ The telemetry variable can be:
 **Desktop indicator:** The toolbar shows a 📡 OTEL button with states: configured (gray), sending (pulsing cyan), active (green ✓), error (red ✗). Hover for endpoint, per-file stats, and export errors. Toggle switch to pause telemetry without removing configuration.
 
 **Zero new dependencies** — OTLP protobuf payloads are hand-encoded and sent via `reqwest` (already in the core crate). Telemetry never fails the test run — errors are captured in stats.
+
+### Response Comparison (`@compare`)
+
+Compare responses from two API endpoints within a single test block — ideal for API migration testing, A/B testing, and version parity checks. The `@compare` directive enables multi-step mode where named steps execute sequentially and a `@diff` directive computes a structured comparison between their responses.
+
+**Syntax:**
+```http
+### @test API Migration Parity
+# @compare
+
+# @step baseline
+GET {{base_url}}/api/v1/users/{{user_id}}
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+
+# @step candidate
+GET {{base_url}}/api/v2/users/{{user_id}}
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+
+# @diff baseline candidate
+# @assert $diff.match == true
+# @assert $diff.similarity >= 0.95
+# @assert $diff.changed_count == 0
+```
+
+**How it works:**
+- `# @compare` — modifier on a `@test` block that enables multi-step comparison mode
+- `# @step <name>` — defines a named step; each step has its own request, assertions, and extracts
+- `# @diff <step_a> <step_b>` — triggers comparison between two named steps
+- Steps execute sequentially; each step's assertions and extracts evaluate immediately
+- Comparison assertions (`$diff.*`) evaluate after all steps complete
+- JSON deep comparison with path-level diffs; text fallback with character-level similarity for non-JSON responses
+
+**`$diff` variable reference:**
+
+| Path | Type | Description |
+|------|------|-------------|
+| `$diff.match` | bool | `true` if responses are identical |
+| `$diff.similarity` | float | 0.0–1.0 similarity score |
+| `$diff.is_json` | bool | `true` if both responses are valid JSON |
+| `$diff.added_count` | int | Number of paths only in step B |
+| `$diff.removed_count` | int | Number of paths only in step A |
+| `$diff.changed_count` | int | Number of paths with different values |
+| `$diff.added_paths.length` | int | Length of added paths array |
+| `$diff.removed_paths.length` | int | Length of removed paths array |
+| `$diff.changed_paths.length` | int | Length of changed paths array |
+| `$diff.changed_paths[N].path` | string | Path of Nth changed field |
+| `$diff.changed_paths[N].left` | string | Step A value |
+| `$diff.changed_paths[N].right` | string | Step B value |
+
+**Use case — API migration testing:** When migrating from v1 to v2 of an API, use `@compare` to verify response parity. Each test run confirms the new endpoint returns equivalent data, and `$diff.similarity` lets you set a threshold for acceptable drift during incremental rollouts.
 
 ### Building & Running
 
@@ -304,7 +358,7 @@ The Rust library powering all three frontends — **223 unit tests**, zero warni
 
 | Module | Description |
 |---|---|
-| **`http_parser`** | Parse and generate `.http` files — `@variables`, block types, all directives (`@assert`, `@extract`, `@group`, `@depends`, `@mode`, `@dev_auth`, `@disabled`, `@telemetry`), HTTP request syntax |
+| **`http_parser`** | Parse and generate `.http` files — `@variables`, block types, all directives (`@assert`, `@extract`, `@group`, `@depends`, `@mode`, `@dev_auth`, `@disabled`, `@telemetry`, `@compare`, `@step`, `@diff`), HTTP request syntax |
 | **`test_runner`** | Execute test suites — setup → parallel tests (topological wave scheduling via `@group`/`@depends`) → teardown, with streaming progress events and OTEL telemetry export |
 | **`http_client`** | reqwest-based async HTTP with variable interpolation, smart URL encoding |
 | **`assertions`** | Evaluate `@assert` directives — 7 operators (`==`, `!=`, `>`, `<`, `>=`, `<=`, `contains`), JSON path selectors, status/header/body targets |

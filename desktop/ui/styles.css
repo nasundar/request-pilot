@@ -4159,3 +4159,135 @@ input:focus, select:focus, textarea:focus { outline: none; }
   background: var(--accent-dim); color: var(--accent);
 }
 .live-capture-actions .btn-sm:disabled { opacity: 0.4; cursor: default; }
+
+/* Compare step items in sidebar */
+.compare-steps {
+  margin-left: 28px;
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+}
+.compare-step-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.compare-step-item .step-method {
+  font-size: 10px;
+  opacity: 0.6;
+}
+
+/* Diff summary */
+.diff-summary {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  padding: 8px 0;
+}
+.diff-stat {
+  display: contents;
+}
+.diff-label {
+  font-weight: 500;
+  color: var(--text-dim);
+}
+.diff-value {
+  font-family: var(--font-mono);
+}
+.diff-match { color: var(--green); }
+.diff-mismatch { color: var(--orange); }
+.diff-added { color: var(--green); }
+.diff-removed { color: var(--red); }
+.diff-changed { color: var(--orange); }
+
+/* Diff paths */
+.diff-paths {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+.diff-paths-header {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.diff-path-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+.diff-path-name {
+  color: var(--text);
+  min-width: 120px;
+}
+.diff-path-left {
+  color: var(--red);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diff-path-arrow {
+  color: var(--text-dim);
+}
+.diff-path-right {
+  color: var(--green);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Compare step group */
+.compare-step-group {
+  border-left: 3px solid var(--accent);
+  padding-left: 8px;
+}
+.step-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-left: 6px;
+}
+.step-badge.done { background: var(--green); color: #fff; }
+.step-badge.error { background: var(--red); color: #fff; }
+.step-badge.pending { background: var(--border); color: var(--text-dim); }
+
+/* Test results: steps & diff badges */
+.detail-steps {
+  font-size: 10px;
+  color: var(--accent);
+  padding: 1px 5px;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+}
+.detail-diff {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.detail-diff.diff-match {
+  background: color-mix(in srgb, var(--green) 20%, transparent);
+  color: var(--green);
+}
+.detail-diff.diff-mismatch {
+  background: color-mix(in srgb, var(--orange) 20%, transparent);
+  color: var(--orange);
+}
+
+/* History compare step header */
+.hist-step-header {
+  padding: 4px 12px 4px 24px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

@@ -218,6 +218,252 @@ fn numeric_cmp(left: &Option<String>, right: &str, cmp: fn(f64, f64) -> bool) ->
     false
 }
 
+// ── Diff engine ──────────────────────────────────────────────────────
+
+const MAX_DIFF_PATHS: usize = 1000;
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct DiffResult {
+    pub match_exact: bool,
+    pub similarity: f64,
+    pub is_json: bool,
+    pub added_paths: Vec<String>,
+    pub removed_paths: Vec<String>,
+    pub changed_paths: Vec<ChangedField>,
+    pub added_count: usize,
+    pub removed_count: usize,
+    pub changed_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ChangedField {
+    pub path: String,
+    pub left: String,
+    pub right: String,
+}
+
+/// Recursively collect all leaf paths and their string representations.
+pub fn collect_json_paths(
+    value: &serde_json::Value,
+    prefix: &str,
+    paths: &mut Vec<(String, String)>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.is_empty() {
+                paths.push((prefix.to_string(), "{}".to_string()));
+            }
+            for (k, v) in map {
+                let p = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{}.{}", prefix, k)
+                };
+                collect_json_paths(v, &p, paths);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                paths.push((prefix.to_string(), "[]".to_string()));
+            }
+            for (i, v) in arr.iter().enumerate() {
+                let p = format!("{}[{}]", prefix, i);
+                collect_json_paths(v, &p, paths);
+            }
+        }
+        _ => {
+            paths.push((prefix.to_string(), json_value_to_string(value)));
+        }
+    }
+}
+
+/// Compare two response bodies and produce a structured diff.
+pub fn compute_diff(body_a: &str, body_b: &str) -> DiffResult {
+    let json_a = serde_json::from_str::<serde_json::Value>(body_a);
+    let json_b = serde_json::from_str::<serde_json::Value>(body_b);
+
+    if let (Ok(va), Ok(vb)) = (json_a, json_b) {
+        compute_json_diff(&va, &vb)
+    } else {
+        compute_text_diff(body_a, body_b)
+    }
+}
+
+fn compute_json_diff(va: &serde_json::Value, vb: &serde_json::Value) -> DiffResult {
+    let mut paths_a: Vec<(String, String)> = Vec::new();
+    let mut paths_b: Vec<(String, String)> = Vec::new();
+    collect_json_paths(va, "", &mut paths_a);
+    collect_json_paths(vb, "", &mut paths_b);
+
+    let map_a: std::collections::HashMap<&str, &str> =
+        paths_a.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let map_b: std::collections::HashMap<&str, &str> =
+        paths_b.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+    let mut added: Vec<String> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
+    let mut changed: Vec<ChangedField> = Vec::new();
+
+    for (path, val_a) in &map_a {
+        match map_b.get(path) {
+            Some(val_b) if val_a != val_b => {
+                if changed.len() < MAX_DIFF_PATHS {
+                    changed.push(ChangedField {
+                        path: path.to_string(),
+                        left: val_a.to_string(),
+                        right: val_b.to_string(),
+                    });
+                }
+            }
+            None => {
+                if removed.len() < MAX_DIFF_PATHS {
+                    removed.push(path.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for path in map_b.keys() {
+        if !map_a.contains_key(path) && added.len() < MAX_DIFF_PATHS {
+            added.push(path.to_string());
+        }
+    }
+
+    added.sort();
+    removed.sort();
+    changed.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let added_count = added.len();
+    let removed_count = removed.len();
+    let changed_count = changed.len();
+
+    let total_max = paths_a.len().max(paths_b.len()).max(1) as f64;
+    let diff_count = (changed_count + added_count + removed_count) as f64;
+    let similarity = (1.0 - diff_count / total_max).max(0.0);
+
+    DiffResult {
+        match_exact: added_count == 0 && removed_count == 0 && changed_count == 0,
+        similarity,
+        is_json: true,
+        added_paths: added,
+        removed_paths: removed,
+        changed_paths: changed,
+        added_count,
+        removed_count,
+        changed_count,
+    }
+}
+
+fn compute_text_diff(body_a: &str, body_b: &str) -> DiffResult {
+    let match_exact = body_a == body_b;
+    let similarity = if match_exact {
+        1.0
+    } else {
+        let chars_a: std::collections::HashSet<char> = body_a.chars().collect();
+        let chars_b: std::collections::HashSet<char> = body_b.chars().collect();
+        let intersection = chars_a.intersection(&chars_b).count() as f64;
+        let union = chars_a.union(&chars_b).count() as f64;
+        if union == 0.0 {
+            1.0
+        } else {
+            intersection / union
+        }
+    };
+
+    DiffResult {
+        match_exact,
+        similarity,
+        is_json: false,
+        ..Default::default()
+    }
+}
+
+/// Resolve a `$diff.*` path against a DiffResult.
+pub fn resolve_diff_value(path: &str, diff: &DiffResult) -> Option<String> {
+    let key = path.strip_prefix("$diff.")?;
+
+    match key {
+        "match" => Some(diff.match_exact.to_string()),
+        "similarity" => Some(format!("{:.4}", diff.similarity)),
+        "is_json" => Some(diff.is_json.to_string()),
+        "added_count" => Some(diff.added_count.to_string()),
+        "removed_count" => Some(diff.removed_count.to_string()),
+        "changed_count" => Some(diff.changed_count.to_string()),
+        "added_paths" => Some(serde_json::to_string(&diff.added_paths).unwrap_or_default()),
+        "removed_paths" => Some(serde_json::to_string(&diff.removed_paths).unwrap_or_default()),
+        "changed_paths" => {
+            let paths: Vec<&str> = diff.changed_paths.iter().map(|c| c.path.as_str()).collect();
+            Some(serde_json::to_string(&paths).unwrap_or_default())
+        }
+        "added_paths.length" => Some(diff.added_paths.len().to_string()),
+        "removed_paths.length" => Some(diff.removed_paths.len().to_string()),
+        "changed_paths.length" => Some(diff.changed_paths.len().to_string()),
+        _ => resolve_changed_path_index(key, diff),
+    }
+}
+
+fn resolve_changed_path_index(key: &str, diff: &DiffResult) -> Option<String> {
+    let rest = key.strip_prefix("changed_paths[")?;
+    let bracket_end = rest.find(']')?;
+    let idx: usize = rest[..bracket_end].parse().ok()?;
+    let field = &rest[bracket_end + 1..];
+
+    let entry = diff.changed_paths.get(idx)?;
+    match field {
+        ".path" => Some(entry.path.clone()),
+        ".left" => Some(entry.left.clone()),
+        ".right" => Some(entry.right.clone()),
+        _ => None,
+    }
+}
+
+/// Evaluate an assertion whose left side references `$diff.*`.
+pub fn evaluate_with_diff(assertion: &Assertion, diff: &DiffResult) -> AssertionResult {
+    let left_value = resolve_diff_value(&assertion.left, diff);
+    let right_clean = assertion.right.trim_matches('"').to_string();
+    let right_is_null = right_clean == "null";
+
+    let passed = match assertion.operator.as_str() {
+        "==" => {
+            if right_is_null {
+                left_value.is_none() || left_value.as_deref() == Some("null")
+            } else {
+                match &left_value {
+                    Some(l) => l == &right_clean || numeric_eq(l, &right_clean),
+                    None => false,
+                }
+            }
+        }
+        "!=" => {
+            if right_is_null {
+                left_value.is_some() && left_value.as_deref() != Some("null")
+            } else {
+                match &left_value {
+                    Some(l) => l != &right_clean && !numeric_eq(l, &right_clean),
+                    None => true,
+                }
+            }
+        }
+        ">" => numeric_cmp(&left_value, &right_clean, |a, b| a > b),
+        "<" => numeric_cmp(&left_value, &right_clean, |a, b| a < b),
+        ">=" => numeric_cmp(&left_value, &right_clean, |a, b| a >= b),
+        "<=" => numeric_cmp(&left_value, &right_clean, |a, b| a <= b),
+        "contains" => match &left_value {
+            Some(l) => l.contains(&right_clean),
+            None => false,
+        },
+        _ => false,
+    };
+
+    AssertionResult {
+        assertion: format!("{} {} {}", assertion.left, assertion.operator, assertion.right),
+        passed,
+        actual: left_value,
+        expected: Some(assertion.right.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,5 +682,186 @@ mod tests {
         let body = r#"{"items":[{"id":"a"},{"id":"b"}]}"#;
         let val = resolve_response_value("$.items[0].id", 200, &[], body);
         assert_eq!(val, Some("a".to_string()));
+    }
+
+    // ── compute_diff tests ──────────────────────────
+
+    #[test]
+    fn diff_identical_json() {
+        let body = r#"{"name":"Alice","age":30}"#;
+        let result = compute_diff(body, body);
+        assert!(result.match_exact);
+        assert!(result.is_json);
+        assert_eq!(result.similarity, 1.0);
+        assert_eq!(result.added_count, 0);
+        assert_eq!(result.removed_count, 0);
+        assert_eq!(result.changed_count, 0);
+    }
+
+    #[test]
+    fn diff_json_with_added_field() {
+        let a = r#"{"name":"Alice"}"#;
+        let b = r#"{"name":"Alice","age":30}"#;
+        let result = compute_diff(a, b);
+        assert!(!result.match_exact);
+        assert!(result.is_json);
+        assert_eq!(result.added_count, 1);
+        assert!(result.added_paths.contains(&"age".to_string()));
+        assert_eq!(result.removed_count, 0);
+        assert_eq!(result.changed_count, 0);
+    }
+
+    #[test]
+    fn diff_json_with_removed_field() {
+        let a = r#"{"name":"Alice","age":30}"#;
+        let b = r#"{"name":"Alice"}"#;
+        let result = compute_diff(a, b);
+        assert!(!result.match_exact);
+        assert_eq!(result.removed_count, 1);
+        assert!(result.removed_paths.contains(&"age".to_string()));
+        assert_eq!(result.added_count, 0);
+    }
+
+    #[test]
+    fn diff_json_with_changed_value() {
+        let a = r#"{"name":"Alice","age":30}"#;
+        let b = r#"{"name":"Bob","age":30}"#;
+        let result = compute_diff(a, b);
+        assert!(!result.match_exact);
+        assert_eq!(result.changed_count, 1);
+        assert_eq!(result.changed_paths[0].path, "name");
+        assert_eq!(result.changed_paths[0].left, "Alice");
+        assert_eq!(result.changed_paths[0].right, "Bob");
+    }
+
+    #[test]
+    fn diff_nested_json() {
+        let a = r#"{"user":{"name":"Alice","address":{"city":"NYC"}}}"#;
+        let b = r#"{"user":{"name":"Alice","address":{"city":"LA"}}}"#;
+        let result = compute_diff(a, b);
+        assert!(!result.match_exact);
+        assert_eq!(result.changed_count, 1);
+        assert_eq!(result.changed_paths[0].path, "user.address.city");
+    }
+
+    #[test]
+    fn diff_json_arrays_order_sensitive() {
+        let a = r#"{"items":[1,2,3]}"#;
+        let b = r#"{"items":[1,3,2]}"#;
+        let result = compute_diff(a, b);
+        assert!(!result.match_exact);
+        assert!(result.changed_count >= 1); // at least items[1] or items[2] differ
+    }
+
+    #[test]
+    fn diff_identical_text() {
+        let body = "Hello World";
+        let result = compute_diff(body, body);
+        assert!(result.match_exact);
+        assert!(!result.is_json);
+        assert_eq!(result.similarity, 1.0);
+    }
+
+    #[test]
+    fn diff_different_text() {
+        let a = "Hello World";
+        let b = "Goodbye World";
+        let result = compute_diff(a, b);
+        assert!(!result.match_exact);
+        assert!(!result.is_json);
+        assert!(result.similarity > 0.0);
+        assert!(result.similarity < 1.0);
+    }
+
+    #[test]
+    fn diff_empty_bodies() {
+        let result = compute_diff("", "");
+        assert!(result.match_exact);
+        assert_eq!(result.similarity, 1.0);
+    }
+
+    // ── resolve_diff_value tests ────────────────────
+
+    #[test]
+    fn resolve_diff_match_true() {
+        let diff = DiffResult {
+            match_exact: true,
+            similarity: 1.0,
+            is_json: true,
+            ..Default::default()
+        };
+        assert_eq!(resolve_diff_value("$diff.match", &diff), Some("true".to_string()));
+        assert_eq!(resolve_diff_value("$diff.similarity", &diff), Some("1.0000".to_string()));
+        assert_eq!(resolve_diff_value("$diff.is_json", &diff), Some("true".to_string()));
+    }
+
+    #[test]
+    fn resolve_diff_counts() {
+        let diff = DiffResult {
+            added_count: 2,
+            removed_count: 1,
+            changed_count: 3,
+            added_paths: vec!["a".into(), "b".into()],
+            removed_paths: vec!["c".into()],
+            changed_paths: vec![
+                ChangedField { path: "x".into(), left: "1".into(), right: "2".into() },
+                ChangedField { path: "y".into(), left: "a".into(), right: "b".into() },
+                ChangedField { path: "z".into(), left: "old".into(), right: "new".into() },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(resolve_diff_value("$diff.added_count", &diff), Some("2".to_string()));
+        assert_eq!(resolve_diff_value("$diff.removed_count", &diff), Some("1".to_string()));
+        assert_eq!(resolve_diff_value("$diff.changed_count", &diff), Some("3".to_string()));
+        assert_eq!(resolve_diff_value("$diff.added_paths.length", &diff), Some("2".to_string()));
+        assert_eq!(resolve_diff_value("$diff.changed_paths.length", &diff), Some("3".to_string()));
+        assert_eq!(resolve_diff_value("$diff.changed_paths[0].path", &diff), Some("x".to_string()));
+        assert_eq!(resolve_diff_value("$diff.changed_paths[1].left", &diff), Some("a".to_string()));
+        assert_eq!(resolve_diff_value("$diff.changed_paths[2].right", &diff), Some("new".to_string()));
+    }
+
+    #[test]
+    fn resolve_diff_unknown_path_returns_none() {
+        let diff = DiffResult::default();
+        assert_eq!(resolve_diff_value("$diff.nonexistent", &diff), None);
+        assert_eq!(resolve_diff_value("$something.else", &diff), None);
+    }
+
+    // ── evaluate_with_diff tests ────────────────────
+
+    #[test]
+    fn evaluate_diff_assertion_match_true() {
+        let diff = DiffResult { match_exact: true, ..Default::default() };
+        let assertion = Assertion {
+            left: "$diff.match".to_string(),
+            operator: "==".to_string(),
+            right: "true".to_string(),
+        };
+        let result = evaluate_with_diff(&assertion, &diff);
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn evaluate_diff_assertion_changed_count() {
+        let diff = DiffResult { changed_count: 3, ..Default::default() };
+        let assertion = Assertion {
+            left: "$diff.changed_count".to_string(),
+            operator: "==".to_string(),
+            right: "3".to_string(),
+        };
+        let result = evaluate_with_diff(&assertion, &diff);
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn evaluate_diff_assertion_similarity_gte() {
+        let diff = DiffResult { similarity: 0.95, ..Default::default() };
+        let assertion = Assertion {
+            left: "$diff.similarity".to_string(),
+            operator: ">=".to_string(),
+            right: "0.9".to_string(),
+        };
+        let result = evaluate_with_diff(&assertion, &diff);
+        assert!(result.passed);
     }
 }

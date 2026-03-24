@@ -61,6 +61,27 @@ pub struct BlockResult {
     pub extract_results: Vec<ExtractResult>,
     pub error: Option<String>,
     pub time_ms: u64,
+    /// Per-step results for @compare blocks. Empty for normal blocks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub step_results: Vec<StepResult>,
+    /// Diff result for @compare blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_result: Option<assertions::DiffResult>,
+}
+
+/// Result of executing a single step within a @compare block.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StepResult {
+    pub name: String,
+    pub request_method: String,
+    pub request_url: String,
+    pub request_headers: Vec<(String, String)>,
+    pub request_body: Option<String>,
+    pub response: Option<http_client::HttpResponse>,
+    pub assertion_results: Vec<AssertionResult>,
+    pub extract_results: Vec<ExtractResult>,
+    pub time_ms: u64,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -155,6 +176,8 @@ fn make_skipped_result(block: &TestBlock, reason: &str) -> BlockResult {
         extract_results: Vec::new(),
         error: Some(reason.to_string()),
         time_ms: 0,
+        step_results: Vec::new(),
+        diff_result: None,
     }
 }
 
@@ -226,6 +249,8 @@ async fn execute_block(block: TestBlock, var_store: VariableStore, extra_headers
                 extract_results,
                 error: None,
                 time_ms,
+                step_results: Vec::new(),
+                diff_result: None,
             }
         }
         Err(err) => BlockResult {
@@ -243,7 +268,166 @@ async fn execute_block(block: TestBlock, var_store: VariableStore, extra_headers
             extract_results: Vec::new(),
             error: Some(err),
             time_ms,
+            step_results: Vec::new(),
+            diff_result: None,
         },
+    }
+}
+
+/// Execute a @compare block: run steps sequentially, compute diff, evaluate comparison assertions.
+async fn execute_compare_block(
+    block: TestBlock,
+    mut var_store: VariableStore,
+    extra_headers: Vec<(String, String)>,
+) -> BlockResult {
+    let block_start = std::time::Instant::now();
+    let mut step_results: Vec<StepResult> = Vec::new();
+    let mut all_step_assertions_passed = true;
+    let mut step_responses: HashMap<String, http_client::HttpResponse> = HashMap::new();
+
+    for step in &block.steps {
+        let url = var_store.interpolate(&step.request.url);
+        let mut headers: Vec<(String, String)> = step
+            .request
+            .headers
+            .iter()
+            .map(|(k, v)| (k.clone(), var_store.interpolate(v)))
+            .collect();
+        for (k, v) in &extra_headers {
+            headers.push((k.clone(), var_store.interpolate(v)));
+        }
+        let body = step.request.body.as_ref().map(|b| var_store.interpolate(b));
+
+        let start = std::time::Instant::now();
+        let result =
+            http_client::execute_request(&step.request.method, &url, &headers, body.as_deref())
+                .await;
+        let time_ms = start.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(response) => {
+                // Process extracts
+                let extract_results: Vec<ExtractResult> = step
+                    .extracts
+                    .iter()
+                    .map(|extract| {
+                        let value = assertions::resolve_response_value(
+                            &extract.source_path,
+                            response.status,
+                            &response.headers,
+                            &response.body,
+                        );
+                        ExtractResult {
+                            variable: extract.variable_name.clone(),
+                            success: value.is_some(),
+                            value,
+                        }
+                    })
+                    .collect();
+
+                // Merge extracted variables
+                for er in &extract_results {
+                    if let Some(ref v) = er.value {
+                        var_store.set(&er.variable, v);
+                    }
+                }
+
+                // Evaluate step assertions
+                let assertion_results: Vec<AssertionResult> = step
+                    .assertions
+                    .iter()
+                    .map(|a| {
+                        assertions::evaluate(a, response.status, &response.headers, &response.body)
+                    })
+                    .collect();
+                if !assertion_results.iter().all(|r| r.passed) {
+                    all_step_assertions_passed = false;
+                }
+
+                step_responses.insert(step.name.clone(), response.clone());
+
+                step_results.push(StepResult {
+                    name: step.name.clone(),
+                    request_method: step.request.method.clone(),
+                    request_url: url,
+                    request_headers: headers,
+                    request_body: body,
+                    response: Some(response),
+                    assertion_results,
+                    extract_results,
+                    time_ms,
+                    error: None,
+                });
+            }
+            Err(err) => {
+                all_step_assertions_passed = false;
+                step_results.push(StepResult {
+                    name: step.name.clone(),
+                    request_method: step.request.method.clone(),
+                    request_url: url,
+                    request_headers: headers,
+                    request_body: body,
+                    response: None,
+                    assertion_results: Vec::new(),
+                    extract_results: Vec::new(),
+                    time_ms,
+                    error: Some(err),
+                });
+            }
+        }
+    }
+
+    // Compute diff if @diff directive is present
+    let diff_result = if let Some(ref diff) = block.diff {
+        let body_a = step_responses
+            .get(&diff.step_a)
+            .map(|r| r.body.as_str())
+            .unwrap_or("");
+        let body_b = step_responses
+            .get(&diff.step_b)
+            .map(|r| r.body.as_str())
+            .unwrap_or("");
+        Some(assertions::compute_diff(body_a, body_b))
+    } else {
+        None
+    };
+
+    // Evaluate comparison assertions ($diff.* assertions)
+    let comparison_assertions: Vec<AssertionResult> = if let Some(ref diff) = diff_result {
+        block
+            .assertions
+            .iter()
+            .map(|a| assertions::evaluate_with_diff(a, diff))
+            .collect()
+    } else {
+        // Non-diff assertions — evaluate against last step's response if any
+        Vec::new()
+    };
+
+    let all_comparison_passed = comparison_assertions.iter().all(|r| r.passed);
+    let total_time_ms = block_start.elapsed().as_millis() as u64;
+    let overall_passed = all_step_assertions_passed && all_comparison_passed;
+
+    // Use first step's request info for the block-level fields
+    let first_step = step_results.first();
+
+    BlockResult {
+        seq: None,
+        name: block.name.clone(),
+        block_type: block.block_type.clone(),
+        group: block.group.clone(),
+        request_method: first_step.map(|s| s.request_method.clone()).unwrap_or_default(),
+        request_url: first_step.map(|s| s.request_url.clone()).unwrap_or_default(),
+        request_headers: Vec::new(),
+        request_body: None,
+        status: if overall_passed { "passed" } else { "failed" }.to_string(),
+        response: None,
+        assertion_results: comparison_assertions,
+        extract_results: Vec::new(),
+        error: None,
+        time_ms: total_time_ms,
+        step_results,
+        diff_result,
     }
 }
 
@@ -396,7 +580,11 @@ async fn run_tests_with_groups(
                     let eh = extra_headers.to_vec();
                     join_set.spawn(async move {
                         emit_start(&h, &block.name, &block.block_type);
-                        let result = execute_block(block, vs, eh).await;
+                        let result = if block.compare && !block.steps.is_empty() {
+                            execute_compare_block(block, vs, eh).await
+                        } else {
+                            execute_block(block, vs, eh).await
+                        };
                         emit_completed(&h, &result);
                         (idx, result)
                     });
@@ -573,7 +761,11 @@ async fn run_suite_inner(
     // ── Phase 1: Setup — sequential ──
     for block in &setups {
         emit_start(&handler, &block.name, &block.block_type);
-        let result = execute_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await;
+        let result = if block.compare && !block.steps.is_empty() {
+            execute_compare_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
+        } else {
+            execute_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
+        };
         // Merge extracts into var_store
         for er in &result.extract_results {
             if er.success {
@@ -618,7 +810,11 @@ async fn run_suite_inner(
     // ── Phase 3: Teardown — sequential (always runs) ──
     for block in &teardowns {
         emit_start(&handler, &block.name, &block.block_type);
-        let result = execute_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await;
+        let result = if block.compare && !block.steps.is_empty() {
+            execute_compare_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
+        } else {
+            execute_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
+        };
         for er in &result.extract_results {
             if er.success {
                 if let Some(ref v) = er.value {
@@ -811,6 +1007,8 @@ mod tests {
             extract_results: Vec::new(),
             error: None,
             time_ms: 0,
+            step_results: Vec::new(),
+            diff_result: None,
         };
         assert_eq!(result.status, "passed");
         assert!(result.error.is_none());
@@ -855,6 +1053,9 @@ mod tests {
             },
             assertions: Vec::new(),
             extracts,
+            compare: false,
+            steps: Vec::new(),
+            diff: None,
         }
     }
 

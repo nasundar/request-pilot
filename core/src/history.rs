@@ -13,6 +13,7 @@ pub struct HistoryFilter {
     pub file_name: Option<String>,
     pub group: Option<String>,
     pub block_name: Option<String>,
+    pub compare_step: Option<String>,
     pub limit: Option<usize>,
 }
 
@@ -26,6 +27,9 @@ pub struct HistoryEntry {
     pub file_name: Option<String>,
     pub group: Option<String>,
     pub block_name: Option<String>,
+    /// For @compare blocks, the step name within the comparison (e.g., "baseline", "candidate").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compare_step: Option<String>,
     pub method: String,
     pub url: String,
     pub request_headers: Vec<(String, String)>,
@@ -146,6 +150,12 @@ impl HistoryStore {
                         _ => return false,
                     }
                 }
+                if let Some(ref cs) = f.compare_step {
+                    match &e.compare_step {
+                        Some(s) if s == cs => {}
+                        _ => return false,
+                    }
+                }
                 true
             })
             .take(f.limit.unwrap_or(usize::MAX))
@@ -194,6 +204,7 @@ mod tests {
             file_name: None,
             group: None,
             block_name: None,
+            compare_step: None,
             method: "GET".to_string(),
             url: "https://example.com".to_string(),
             request_headers: Vec::new(),
@@ -265,6 +276,7 @@ mod tests {
             file_name: Some("api-tests.http".to_string()),
             group: Some("auth".to_string()),
             block_name: Some("create user".to_string()),
+            compare_step: None,
             method: "POST".to_string(),
             url: "https://api.test.com/data".to_string(),
             request_headers: vec![("Content-Type".to_string(), "application/json".to_string())],
@@ -329,6 +341,7 @@ mod tests {
             file_name: None,
             group: None,
             block_name: None,
+            compare_step: None,
             method: method.to_string(),
             url: url.to_string(),
             request_headers: Vec::new(),
@@ -517,6 +530,7 @@ mod tests {
             file_name: file_name.map(|s| s.to_string()),
             group: group.map(|s| s.to_string()),
             block_name: block_name.map(|s| s.to_string()),
+            compare_step: None,
             method: method.to_string(),
             url: url.to_string(),
             request_headers: Vec::new(),

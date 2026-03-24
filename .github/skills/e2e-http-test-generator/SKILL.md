@@ -79,6 +79,10 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 # @extract var_name = $.json.path     — save response value for later blocks
 # @mode app|dev                    — restrict to app mode or dev mode (mutually exclusive auth)
 # @dev_auth <scope>               — Azure scope for user auth (used with @mode app)
+# @compare                            — enable multi-step comparison mode
+# @step <name>                        — define a named request step
+# @diff <step_a> <step_b>             — compare responses of two steps
+# @assert $diff.match == true          — diff assertion example
 # @telemetry <var>                 — (file-level) enable OTEL telemetry export; var holds an App Insights resource ID or connection string
 # @telemetry_token <var>           — (file-level) variable holding a Bearer token with ARM access (required for resource ID mode)
 # @telemetry_service <name>        — (file-level) override the service.name resource attribute (defaults to filename)
@@ -574,6 +578,65 @@ Authorization: Bearer {{access_token}}
 - Telemetry export never fails the test run — errors are captured in stats
 - The desktop app shows a 📡 indicator when telemetry is configured
 
+### Pattern 10: Response Comparison (`@compare`)
+
+When an API is being migrated, versioned, or A/B tested, use `@compare` to execute two requests within a single test block and diff their responses. This is useful for:
+- **API migration parity** — verify v1 and v2 return equivalent data
+- **A/B testing** — compare responses from two backends or feature flag states
+- **Version comparison** — ensure a refactored endpoint matches the original
+
+```http
+### @test API v1 vs v2 Parity — User Endpoint
+# @compare
+# @description Compares v1 and v2 user responses to ensure migration parity
+
+# @step baseline
+GET {{base_url}}/api/v1/users/{{user_id}}
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @extract v1_user_name = $.name
+
+# @step candidate
+GET {{base_url}}/api/v2/users/{{user_id}}
+Authorization: Bearer {{access_token}}
+
+# @assert status == 200
+# @extract v2_user_name = $.name
+
+# @diff baseline candidate
+# @assert $diff.match == true
+# @assert $diff.similarity >= 0.95
+# @assert $diff.changed_count == 0
+```
+
+**`$diff` variable reference:**
+
+| Path | Type | Description |
+|------|------|-------------|
+| `$diff.match` | bool | `true` if responses are identical |
+| `$diff.similarity` | float | 0.0–1.0 similarity score |
+| `$diff.is_json` | bool | `true` if both responses are valid JSON |
+| `$diff.added_count` | int | Number of paths only in step B |
+| `$diff.removed_count` | int | Number of paths only in step A |
+| `$diff.changed_count` | int | Number of paths with different values |
+| `$diff.added_paths.length` | int | Length of added paths array |
+| `$diff.removed_paths.length` | int | Length of removed paths array |
+| `$diff.changed_paths.length` | int | Length of changed paths array |
+| `$diff.changed_paths[N].path` | string | Path of Nth changed field |
+| `$diff.changed_paths[N].left` | string | Step A value |
+| `$diff.changed_paths[N].right` | string | Step B value |
+
+**Rules:**
+- `# @compare` is a modifier on a `@test` (or `@setup`/`@teardown`) block — place it on the line after the block header
+- `# @step <name>` defines a named step within the compare block; each step has its own request line, headers, body, assertions, and extracts
+- `# @diff <step_a> <step_b>` triggers comparison between two named steps — place it after all steps
+- Steps execute sequentially; each step's `@assert` and `@extract` directives evaluate immediately after that step's HTTP request completes
+- Comparison assertions using `$diff.*` paths evaluate after ALL steps complete
+- JSON responses get deep comparison with path-level diffs (e.g., `user.address.city`); non-JSON responses use character-level similarity scoring
+- Use `$diff.similarity >= 0.95` to allow small acceptable drift during incremental migration rollouts
+- Use `$diff.changed_count == 0` for strict parity checks where no field differences are allowed
+
 ## Common Pitfalls
 
 ### Comments leaking into request body
@@ -642,6 +705,7 @@ access_token =
 - **Use `# @mode app` on client-credentials auth blocks** — marks them as app-mode-only so dev mode can skip them and use Azure CLI user auth instead. Add `# @dev_auth <scope>` to specify the Azure scope for user auth.
 - **Use `# @dev_auth <scope>` on `@mode app` token-fetch blocks** — specifies the Azure scope for user auth. When the user authenticates via device code flow, the app fetches a user token with this scope and injects it into the block's `@extract` variable.
 - **Add `# @telemetry` for E2E observability** — when the test file should export OTEL telemetry (traces, metrics, logs), add `# @telemetry <var>` as a file-level directive before `@variables`. The variable can hold an App Insights ARM resource ID (recommended — the system fetches dedicated OTLP endpoints via ARM) or a connection string (`InstrumentationKey=...`), or a plain OTLP endpoint URL. When using a resource ID, also add `# @telemetry_token <var>` pointing to the ARM Bearer token (from the auth setup block). Keep resource IDs and connection strings in `.env` files. Optionally add `# @telemetry_service <name>` to set the `service.name` resource attribute (defaults to filename).
+- **Use `# @compare` for API migration and comparison scenarios** — when the code change involves versioned endpoints, A/B testing, or endpoint migration, generate a `@compare` test block with `# @step` for each endpoint and `# @diff` to assert response parity. Use `$diff.match`, `$diff.similarity`, and `$diff.changed_count` assertions to validate equivalence (see Pattern 10).
 - **Comments explain non-obvious logic** — especially complex assertions or why a specific test exists
 - **Always start with a Test Plan header comment** — a structured comment block listing all test scenarios, grouped by type and group name, with prerequisites and assertion summary (see Pattern 7)
 - **Section decoration comments MUST be placed AFTER `###`, not before**— the parser splits the file at `###` boundaries, so any comments between blocks that appear before the next `###` become part of the previous block's request body. Put section headers, group labels, and decorative separators immediately after a `###` line:

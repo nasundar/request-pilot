@@ -41,6 +41,7 @@ async fn send_request(
         file_name: None,
         group: None,
         block_name: None,
+        compare_step: None,
         method,
         url,
         request_headers: headers,
@@ -97,7 +98,35 @@ async fn run_test_suite(
     // Add each executed request to history with seq numbers
     let mut s = store.lock().map_err(|e| e.to_string())?;
     for block_result in &mut results.block_results {
-        if let Some(ref resp) = block_result.response {
+        // For compare blocks, record each step as a separate history entry
+        if !block_result.step_results.is_empty() {
+            for step in &block_result.step_results {
+                if let Some(ref resp) = step.response {
+                    let seq = s.next_seq();
+                    let entry = history::HistoryEntry {
+                        seq,
+                        id: request_pilot_core::uuid::Uuid::new_v4().to_string(),
+                        run_id: Some(run_id.clone()),
+                        source: "test-run".to_string(),
+                        file_name: file_name.clone(),
+                        group: block_result.group.clone(),
+                        block_name: Some(block_result.name.clone()),
+                        compare_step: Some(step.name.clone()),
+                        method: step.request_method.clone(),
+                        url: step.request_url.clone(),
+                        request_headers: step.request_headers.clone(),
+                        request_body: step.request_body.clone(),
+                        status: resp.status,
+                        response_headers: resp.headers.clone(),
+                        response_body: Some(resp.body.clone()),
+                        response_time_ms: resp.time_ms,
+                        response_size_bytes: resp.size_bytes,
+                        timestamp: request_pilot_core::chrono::Utc::now().to_rfc3339(),
+                    };
+                    s.add(entry);
+                }
+            }
+        } else if let Some(ref resp) = block_result.response {
             let seq = s.next_seq();
             block_result.seq = Some(seq);
             let entry = history::HistoryEntry {
@@ -108,6 +137,7 @@ async fn run_test_suite(
                 file_name: file_name.clone(),
                 group: block_result.group.clone(),
                 block_name: Some(block_result.name.clone()),
+                compare_step: None,
                 method: block_result.request_method.clone(),
                 url: block_result.request_url.clone(),
                 request_headers: block_result.request_headers.clone(),
