@@ -10,6 +10,19 @@ use crate::components;
 use crate::toolbar;
 use request_pilot_core::history::HistoryFilter;
 
+/// Truncate text to fit within max_width chars, adding ellipsis if needed.
+pub(crate) fn truncate_to(text: &str, max_width: usize) -> String {
+    if max_width == 0 { return String::new(); }
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_width {
+        text.to_string()
+    } else {
+        let mut s: String = chars[..max_width.saturating_sub(1)].iter().collect();
+        s.push('…');
+        s
+    }
+}
+
 // Runtime-switchable color palettes
 #[allow(non_snake_case)]
 pub mod theme {
@@ -307,6 +320,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width < 10 {
+        frame.render_widget(Paragraph::new("").style(Style::default().bg(theme::BG_BASE())), area);
+        return;
+    }
     let mode_style = |m: Mode, current: Mode| {
         if m == current {
             Style::default().fg(theme::BG_DARK()).bg(theme::BLUE()).add_modifier(Modifier::BOLD)
@@ -448,8 +465,8 @@ fn draw_history_detail(frame: &mut Frame, app: &App, area: Rect, idx: usize) {
     if w < 10 || h < 3 { return; }
     let popup_width = w.min(100);
     let popup_height = h.min(40);
-    let x = (area.width - popup_width) / 2;
-    let y = (area.height - popup_height) / 2;
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
 
     frame.render_widget(ratatui::widgets::Clear, popup_area);
@@ -553,7 +570,7 @@ fn get_keyhints(app: &App) -> String {
                 if app.sidebar_tab == SidebarTab::Variables {
                     " \u{2191}\u{2193}=nav  a=add  e=edit  d=delete  V=files  Esc=quit ".to_string()
                 } else {
-                    " \u{2191}\u{2193}=nav  Enter=select  o=open  r=run  R=RunAll  t=toggle  V=vars  Esc=quit ".to_string()
+                    " \u{2191}\u{2193}=nav  Enter=select  e=code  o=open  r=run  R=RunAll  t=toggle  V=vars  Esc=quit ".to_string()
                 }
             }
             Focus::Variables => " \u{2191}\u{2193}=nav  a=add  e=edit  d=delete  V=files  Esc=quit ".to_string(),
@@ -614,7 +631,10 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     if let Some((ref msg, _)) = app.status_message {
         if spans.is_empty() {
-            spans.push(Span::styled(format!(" {} ", msg), Style::default().fg(theme::TEXT_DIM())));
+            let hints_len = get_keyhints(app).len();
+            let max_msg = (area.width as usize).saturating_sub(hints_len + 4);
+            let display = truncate_to(msg, max_msg);
+            spans.push(Span::styled(format!(" {} ", display), Style::default().fg(theme::TEXT_DIM())));
         }
     }
 
@@ -635,6 +655,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_test_progress_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width < 20 || area.height < 5 { return; }
     let width = (area.width / 2).max(40).min(area.width);
     let height = 10u16.min(area.height);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
@@ -697,9 +718,11 @@ fn render_test_progress_overlay(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 theme::YELLOW()
             };
+            let max_name = inner.width.saturating_sub(5) as usize;
+            let display_name = truncate_to(name, max_name);
             lines.push(Line::from(vec![
                 Span::styled(format!(" {} ", icon), Style::default().fg(color)),
-                Span::styled(name.as_str(), Style::default().fg(theme::TEXT())),
+                Span::styled(display_name, Style::default().fg(theme::TEXT())),
             ]));
         }
     }

@@ -764,6 +764,39 @@ impl App {
         }
     }
 
+    /// Enter code editor and jump cursor to the line where block_idx starts.
+    pub fn enter_code_editor_at_block(&mut self, block_idx: usize) {
+        if let Some(fi) = self.active_file_idx {
+            if let Some(file) = self.loaded_files.get(fi) {
+                self.code_editor_content = file.content.clone();
+                self.code_editor_modified = false;
+                self.mode = Mode::Code;
+
+                // Find the line number for this block by counting ### separators
+                let target_line = self.find_block_start_line(block_idx);
+                let total_lines = self.code_editor_content.split('\n').count();
+                self.code_editor_cursor_line = target_line.min(total_lines.saturating_sub(1));
+                self.code_editor_cursor_col = 0;
+                // Center the block in view
+                self.code_editor_scroll = self.code_editor_cursor_line.saturating_sub(5) as u16;
+            }
+        }
+    }
+
+    /// Find the starting line number of the Nth block (0-indexed).
+    fn find_block_start_line(&self, block_idx: usize) -> usize {
+        let mut sep_count = 0;
+        for (i, line) in self.code_editor_content.split('\n').enumerate() {
+            if line.trim_start().starts_with("###") {
+                if sep_count == block_idx {
+                    return i;
+                }
+                sep_count += 1;
+            }
+        }
+        0
+    }
+
     pub fn save_code_editor(&mut self) {
         if let Some(fi) = self.active_file_idx {
             let content = self.code_editor_content.clone();

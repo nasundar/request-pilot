@@ -457,6 +457,16 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
         content_area,
     );
 
+    // Show native blinking cursor at the editor cursor position
+    let cursor_visible_line = app.code_editor_cursor_line as i32 - scroll as i32;
+    if cursor_visible_line >= 0 && (cursor_visible_line as usize) < visible_height {
+        let cursor_x = content_area.x + gutter_width + app.code_editor_cursor_col as u16;
+        let cursor_y = content_area.y + cursor_visible_line as u16;
+        if cursor_x < content_area.x + content_area.width {
+            frame.set_cursor_position(ratatui::layout::Position::new(cursor_x, cursor_y));
+        }
+    }
+
     // Search/goto bar or hints bar at the bottom
     let bottom_area = Rect {
         x: area.x,

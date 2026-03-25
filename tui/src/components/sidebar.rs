@@ -8,6 +8,7 @@ use ratatui::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::{App, Focus, SidebarTab, TreeNode, InputMode, InputPurpose, ConfirmPurpose, LoadedFile};
 use crate::ui::theme;
+use crate::ui::truncate_to;
 
 // ΓöÇΓöÇ Rendering ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
@@ -74,9 +75,12 @@ pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     style
                 };
+                let prefix_chars: usize = prefix.chars().count();
+                let max_label = (area.width as usize).saturating_sub(prefix_chars + 3);
+                let display_label = truncate_to(&label, max_label);
                 ListItem::new(Line::from(vec![
                     Span::raw(prefix),
-                    Span::styled(label, final_style),
+                    Span::styled(display_label, final_style),
                 ]))
             }).collect();
 
@@ -289,6 +293,24 @@ pub fn handle_file_tree_keys(app: &mut App, key: KeyEvent) {
                     app.rebuild_tree();
                 }
                 _ => {}
+            }
+        }
+        KeyCode::Char('e') => {
+            // Jump to code editor at the selected block
+            let node = app.tree_nodes[app.tree_cursor].clone();
+            match node {
+                TreeNode::Block { file_idx, block_idx } => {
+                    app.select_block(file_idx, block_idx);
+                    app.enter_code_editor_at_block(block_idx);
+                }
+                TreeNode::File { file_idx } => {
+                    app.active_file_idx = Some(file_idx);
+                    app.enter_code_editor();
+                }
+                TreeNode::Group { file_idx, .. } => {
+                    app.active_file_idx = Some(file_idx);
+                    app.enter_code_editor();
+                }
             }
         }
         _ => {}
