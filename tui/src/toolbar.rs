@@ -12,6 +12,7 @@ use ratatui::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::{App, AzureAuthState, HeaderEditField, HeaderEditMode, RunnerMessage};
 use crate::ui::theme;
+use crate::ui::truncate_to;
 
 fn centered_popup(area: Rect, w: u16, h: u16) -> Rect {
     let pw = w.min(area.width.saturating_sub(4));
@@ -50,6 +51,7 @@ pub fn toolbar_badges(app: &App) -> Vec<Span<'static>> {
 
 pub fn render_extra_headers_popup(frame: &mut Frame, app: &App, area: Rect) {
     let popup = centered_popup(area, 64, 22);
+    if popup.width < 10 || popup.height < 5 { return; }
     frame.render_widget(Clear, popup);
     let mut lines: Vec<Line<'_>> = Vec::new();
     lines.push(Line::from(Span::styled("Extra Headers", Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD))));
@@ -65,10 +67,13 @@ pub fn render_extra_headers_popup(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 Style::default().fg(theme::TEXT())
             };
+            let prefix_len = marker.len() + 3 + key.len() + 2;
+            let max_val = (popup.width as usize).saturating_sub(prefix_len + 4);
+            let display_val = truncate_to(val, max_val);
             lines.push(Line::from(vec![
                 Span::styled(format!("{}{} ", marker, check), style),
                 Span::styled(format!("{}: ", key), Style::default().fg(theme::PEACH())),
-                Span::styled(val.clone(), Style::default().fg(theme::TEXT_DIM())),
+                Span::styled(display_val, Style::default().fg(theme::TEXT_DIM())),
             ]));
         }
     }
@@ -140,6 +145,7 @@ pub fn render_extra_headers_popup(frame: &mut Frame, app: &App, area: Rect) {
 
 pub fn render_azure_popup(frame: &mut Frame, app: &App, area: Rect) {
     let popup = centered_popup(area, 56, 16);
+    if popup.width < 10 || popup.height < 5 { return; }
     frame.render_widget(Clear, popup);
     let mut lines: Vec<Line<'_>> = Vec::new();
     lines.push(Line::from(Span::styled("Azure Authentication", Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD))));
@@ -153,11 +159,11 @@ pub fn render_azure_popup(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("  Status: ", Style::default().fg(theme::TEXT_DIM())),
         Span::styled(state_label, state_style),
     ]));
-    let cli_ok = request_pilot_core::azure_auth::is_az_cli_available();
+    let cli_ok = app.az_cli_available.unwrap_or(false);
     lines.push(Line::from(vec![
         Span::styled("  Az CLI: ", Style::default().fg(theme::TEXT_DIM())),
         if cli_ok { Span::styled("Available", Style::default().fg(theme::GREEN())) }
-        else { Span::styled("Not found", Style::default().fg(theme::RED())) },
+        else { Span::styled("Not found (checking...)", Style::default().fg(theme::YELLOW())) },
     ]));
     if let Some(ref token) = app.azure_token {
         lines.push(Line::from(""));
@@ -191,6 +197,7 @@ pub fn render_azure_popup(frame: &mut Frame, app: &App, area: Rect) {
 
 pub fn render_otel_popup(frame: &mut Frame, app: &App, area: Rect) {
     let popup = centered_popup(area, 52, 16);
+    if popup.width < 10 || popup.height < 5 { return; }
     frame.render_widget(Clear, popup);
     let mut lines: Vec<Line<'_>> = Vec::new();
     lines.push(Line::from(Span::styled("OpenTelemetry Status", Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD))));
@@ -205,9 +212,11 @@ pub fn render_otel_popup(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(el, es),
     ]));
     if let Some(ref stats) = app.otel_stats {
+        let max_ep = (popup.width as usize).saturating_sub(16);
+        let display_ep = truncate_to(&stats.endpoint, max_ep);
         lines.push(Line::from(vec![
             Span::styled("  Endpoint: ", Style::default().fg(theme::TEXT_DIM())),
-            Span::styled(stats.endpoint.clone(), Style::default().fg(theme::TEXT())),
+            Span::styled(display_ep, Style::default().fg(theme::TEXT())),
         ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
@@ -380,17 +389,20 @@ pub fn handle_azure_keys(app: &mut App, key: KeyEvent) -> bool {
     match key.code {
         KeyCode::Esc => { app.azure_popup_open = false; }
         KeyCode::Enter => {
-            if !app.azure_loading && request_pilot_core::azure_auth::is_az_cli_available() {
+            let cli_ok = *app.az_cli_available.get_or_insert_with(|| {
+                request_pilot_core::azure_auth::is_az_cli_available()
+            });
+            if !app.azure_loading && cli_ok {
                 app.azure_loading = true;
                 app.set_status("⏳ Fetching Azure token...".to_string());
                 let tx = app.runner_tx();
                 tokio::spawn(async move {
                     let result = tokio::task::spawn_blocking(|| {
-                        request_pilot_core::azure_auth::fetch_token("https://management.azure.com/.default")
+                        request_pilot_core::azure_auth::fetch_token("https://management.azure.com")
                     }).await;
                     let msg = match result {
                         Ok(Ok(token)) => RunnerMessage::AzureAuthResult(Ok(token)),
-                        Ok(Err(e)) => RunnerMessage::AzureAuthResult(Err(e.to_string())),
+                        Ok(Err(e)) => RunnerMessage::AzureAuthResult(Err(e)),
                         Err(e) => RunnerMessage::AzureAuthResult(Err(format!("Task panicked: {}", e))),
                     };
                     let _ = tx.send(msg);
@@ -434,6 +446,16 @@ pub fn handle_toolbar_shortcuts(app: &mut App, key: KeyEvent) -> bool {
             if app.azure_popup_open {
                 app.extra_headers_open = false;
                 app.otel_popup_open = false;
+                // Check CLI availability async on first open
+                if app.az_cli_available.is_none() {
+                    let tx = app.runner_tx();
+                    tokio::spawn(async move {
+                        let available = tokio::task::spawn_blocking(|| {
+                            request_pilot_core::azure_auth::is_az_cli_available()
+                        }).await.unwrap_or(false);
+                        let _ = tx.send(RunnerMessage::AzureCliCheck(available));
+                    });
+                }
             }
             true
         }

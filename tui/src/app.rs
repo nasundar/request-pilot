@@ -178,6 +178,7 @@ pub enum RunnerMessage {
         results: TestRunResults,
     },
     AzureAuthResult(Result<request_pilot_core::azure_auth::AzureToken, String>),
+    AzureCliCheck(bool),
 }
 
 /// A loaded .http file with parsed suite and optional results.
@@ -275,6 +276,7 @@ pub struct App {
     pub azure_token: Option<AzureToken>,
     pub azure_popup_open: bool,
     pub azure_loading: bool,
+    pub az_cli_available: Option<bool>,
 
     // Toolbar: OTEL
     pub otel_enabled: bool,
@@ -389,6 +391,7 @@ impl App {
             azure_token: None,
             azure_popup_open: false,
             azure_loading: false,
+            az_cli_available: None,
             otel_enabled: false,
             otel_stats: None,
             otel_popup_open: false,
@@ -1182,6 +1185,9 @@ impl App {
                                 self.set_status(format!("Azure auth failed: {}", e));
                             }
                         }
+                    }
+                    RunnerMessage::AzureCliCheck(available) => {
+                        self.az_cli_available = Some(available);
                     }
                 }
             }
