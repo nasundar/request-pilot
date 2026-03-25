@@ -339,18 +339,24 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
         vec![("     ", c_smoke, false), ("·▪·", c_smoke, false)],
     ];
 
-    let title = "R  E  Q  U  E  S  T     P  I  L  O  T";
-    let subtitle = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+    // Unicode block-letter title — 3 rows tall
+    let c_title = Color::Rgb(120, 170, 255);
+    let title_art: Vec<Vec<ArtSpan>> = vec![
+        vec![("█▀▀▄ █▀▀ █▀▀█ █ █ █▀▀ █▀▀ ▀█▀   █▀▀▄ ▀█▀ █   █▀▀█ ▀█▀", c_title, true)],
+        vec![("█▄▄▀ █▀▀ █ ▄▄ █ █ █▀▀ ▀▀█  █    █▀▀  █  █   █  █  █ ", c_title, true)],
+        vec![("█  █ ▀▀▀  ▀▀▀  ▀▀  ▀▀▀ ▀▀▀  ▀    █    ▀▀▀ ▀▀▀ ▀▀▀▀  ▀ ", c_title, true)],
+    ];
+    let title_h = title_art.len() as i32;
     let tagline = "Wishing you safe passage across all endpoints ✦";
     let version = env!("CARGO_PKG_VERSION");
     let ver_line = format!("v{}", version);
 
     let area = terminal.size()?;
     let rocket_h = rocket_closed.len() as i32;
-    let text_landing_y_offset = rocket_h + 4; // where text lands below rocket
+    let text_landing_y_offset = rocket_h + 3; // where text lands below rocket
 
     // Center Y for the rocket (text will be below)
-    let center_y = (area.height as i32 - (rocket_h + text_landing_y_offset + 6)) / 2;
+    let center_y = (area.height as i32 - (rocket_h + text_landing_y_offset + title_h + 5)) / 2;
     let start_y = area.height as i32 + 5; // off-screen bottom
     let frame_ms = 50u64;
 
@@ -419,66 +425,56 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
     }
 
     // ── Phase 3: Text flies out from window and lands below (30 frames = 1.5s) ──
-    // Window is at rocket line index 4 (center of window), rocket is at center_y
     let window_y = center_y + 4;
     let title_land_y = center_y + text_landing_y_offset;
-    let sub_land_y = title_land_y + 1;
-    let tag_land_y = title_land_y + 3;
-    let ver_land_y = title_land_y + 4;
+    let tag_land_y = title_land_y + title_h + 1;
+    let ver_land_y = tag_land_y + 1;
 
     for fi in 0..30u32 {
         let t = fi as f64 / 30.0;
 
-        // Each text line starts from the window and moves to its landing position
-        // Stagger: title first, then subtitle, then tagline, then version
         let title_t = (t * 1.8).min(1.0);
-        let sub_t = ((t - 0.1).max(0.0) * 1.8).min(1.0);
-        let tag_t = ((t - 0.25).max(0.0) * 1.8).min(1.0);
-        let ver_t = ((t - 0.35).max(0.0) * 1.8).min(1.0);
+        let tag_t = ((t - 0.2).max(0.0) * 2.0).min(1.0);
+        let ver_t = ((t - 0.35).max(0.0) * 2.0).min(1.0);
 
         let ease = |tt: f64| -> f64 { 1.0 - (1.0 - tt).powi(3) };
 
         let ty = window_y + ((title_land_y - window_y) as f64 * ease(title_t)) as i32;
-        let sy = window_y + ((sub_land_y - window_y) as f64 * ease(sub_t)) as i32;
         let tgy = window_y + ((tag_land_y - window_y) as f64 * ease(tag_t)) as i32;
         let vy = window_y + ((ver_land_y - window_y) as f64 * ease(ver_t)) as i32;
 
-        // Color fades in
         let title_alpha = title_t.min(1.0);
-        let sub_alpha = sub_t.min(1.0);
         let tag_alpha = tag_t.min(1.0);
         let ver_alpha = ver_t.min(1.0);
 
-        // Window glows brighter when text is emerging, then dims
         let glow = if t < 0.5 { 1.0 } else { 1.0 - ((t - 0.5) * 2.0).min(1.0) * 0.7 };
 
         terminal.draw(|frame| {
             let a = frame.area();
             frame.render_widget(Paragraph::new("").style(Style::default().bg(c_bg)), a);
 
-            // Rocket with glowing window
             let win_color = Color::Rgb(
                 (255.0 * glow) as u8,
                 (220.0 * glow + 80.0 * (1.0 - glow)) as u8,
                 (100.0 * glow + 200.0 * (1.0 - glow)) as u8,
             );
             let mut rocket_frame = rocket_open.clone();
-            // Update window color (lines 3,4,5)
             rocket_frame[3] = vec![(" ▐", c_body, false), ("█", c_body, true), ("▄▄", win_color, true), ("█", c_body, true), ("▌", c_body, false)];
             rocket_frame[4] = vec![(" ▐", c_body, false), ("█", c_body, true), ("░░", win_color, true), ("█", c_body, true), ("▌", c_body, false)];
             rocket_frame[5] = vec![(" ▐", c_body, false), ("█", c_body, true), ("▀▀", win_color, true), ("█", c_body, true), ("▌", c_body, false)];
             render_art(frame, &rocket_frame, center_y, a);
 
-            // Render text lines flying down
+            // Title art flying down
             if title_t > 0.0 {
-                render_text_at(frame, title, ty, Color::Rgb(
-                    (120.0 * title_alpha) as u8, (170.0 * title_alpha) as u8, 255
-                ), true, a);
-            }
-            if sub_t > 0.0 {
-                render_text_at(frame, subtitle, sy, Color::Rgb(
-                    (60.0 * sub_alpha) as u8, (65.0 * sub_alpha) as u8, (80.0 * sub_alpha) as u8
-                ), false, a);
+                let tc = Color::Rgb(
+                    (120.0 * title_alpha) as u8,
+                    (170.0 * title_alpha) as u8,
+                    (200.0 + 55.0 * title_alpha) as u8,
+                );
+                let alpha_art: Vec<Vec<ArtSpan>> = title_art.iter().map(|line| {
+                    line.iter().map(|(text, _, bold)| (*text, tc, *bold)).collect()
+                }).collect();
+                render_art(frame, &alpha_art, ty, a);
             }
             if tag_t > 0.0 {
                 render_text_at(frame, tagline, tgy, Color::Rgb(
@@ -498,9 +494,8 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
     terminal.draw(|frame| {
         let a = frame.area();
         frame.render_widget(Paragraph::new("").style(Style::default().bg(c_bg)), a);
-        render_art(frame, &rocket_closed, center_y, a); // window closes
-        render_text_at(frame, title, title_land_y, Color::Rgb(120, 170, 255), true, a);
-        render_text_at(frame, subtitle, sub_land_y, Color::Rgb(60, 65, 80), false, a);
+        render_art(frame, &rocket_closed, center_y, a);
+        render_art(frame, &title_art, title_land_y, a);
         render_text_at(frame, tagline, tag_land_y, Color::Rgb(140, 150, 170), false, a);
         render_text_at(frame, &ver_line, ver_land_y, Color::Rgb(60, 65, 80), false, a);
     })?;
