@@ -315,7 +315,7 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
     let title_text = "R E Q U E S T   P I L O T";
     let title_h = 1i32;
 
-    let tagline = "Wishing you safe passage across all endpoints ✦";
+    let tagline = "✦ Wishing you safe passage across all endpoints ✦";
     let version = env!("CARGO_PKG_VERSION");
     let ver_line = format!("v{}", version);
 
@@ -331,7 +331,7 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
     // Text positions relative to rocket top
     let title_y_off = rocket_h + exhaust_h + 2;
     let tag_y_off = title_y_off + title_h + 1;
-    let ver_y_off = tag_y_off + 1;
+    let ver_y_off = tag_y_off + 2;
 
     let render_art = |frame: &mut Frame, art: &[Vec<ArtSpan>], base_y: i32, area: Rect| {
         for (i, spans_def) in art.iter().enumerate() {
