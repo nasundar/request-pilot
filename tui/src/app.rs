@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use request_pilot_core::http_parser::{TestSuite, parse_test_suite, generate_http_content};
 use request_pilot_core::test_runner::{BlockProgress, ProgressHandler, TestRunResults, BlockResult};
@@ -196,6 +196,13 @@ pub struct App {
     pub otel_stats: Option<TelemetryStats>,
     pub otel_popup_open: bool,
 
+    // JSON tree view state (response panel)
+    pub json_tree_nodes: Vec<crate::components::response::JsonTreeNode>,
+    pub json_expanded: HashSet<String>,
+    pub json_cursor: usize,
+    pub body_fully_loaded: bool,
+    pub response_body_full: Option<String>,
+
     // Channel receiver (set up in run())
     runner_rx: Option<mpsc::UnboundedReceiver<RunnerMessage>>,
     runner_tx: mpsc::UnboundedSender<RunnerMessage>,
@@ -247,6 +254,11 @@ impl App {
             otel_enabled: false,
             otel_stats: None,
             otel_popup_open: false,
+            json_tree_nodes: Vec::new(),
+            json_expanded: HashSet::new(),
+            json_cursor: 0,
+            body_fully_loaded: false,
+            response_body_full: None,
             runner_rx: Some(rx),
             runner_tx: tx,
         }
@@ -324,6 +336,11 @@ impl App {
         self.active_block_idx = Some(block_idx);
         self.code_scroll = 0;
         self.response_scroll = 0;
+        self.json_cursor = 0;
+        self.body_fully_loaded = false;
+        self.response_body_full = None;
+        self.json_expanded.clear();
+        crate::components::response::try_rebuild_json_tree(self);
     }
 
     /// Record block results into history.

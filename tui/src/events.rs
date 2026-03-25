@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use crate::app::{App, Focus, Mode, SidebarTab, TreeNode, InputMode, InputPurpose, ConfirmPurpose, ResponseTab};
+use crate::app::{App, Focus, Mode, SidebarTab, TreeNode, InputMode, InputPurpose, ConfirmPurpose};
 use crate::toolbar;
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
@@ -234,45 +234,7 @@ fn handle_code_scroll(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_response(app: &mut App, key: KeyEvent) {
-    match key.code {
-        // Scroll
-        KeyCode::Char('j') | KeyCode::Down => {
-            app.response_scroll = app.response_scroll.saturating_add(1);
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.response_scroll = app.response_scroll.saturating_sub(1);
-        }
-        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.response_scroll = app.response_scroll.saturating_add(10);
-        }
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.response_scroll = app.response_scroll.saturating_sub(10);
-        }
-        KeyCode::Char('g') => {
-            app.response_scroll = 0;
-        }
-        KeyCode::Char('G') => {
-            app.response_scroll = u16::MAX;
-        }
-        // Response sub-tabs
-        KeyCode::Char('b') => {
-            app.response_tab = ResponseTab::Body;
-            app.response_scroll = 0;
-        }
-        KeyCode::Char('h') => {
-            app.response_tab = ResponseTab::Headers;
-            app.response_scroll = 0;
-        }
-        KeyCode::Char('a') => {
-            app.response_tab = ResponseTab::Assertions;
-            app.response_scroll = 0;
-        }
-        // Copy response body
-        KeyCode::Char('y') => {
-            app.set_status("Copy not available in this terminal".to_string());
-        }
-        _ => {}
-    }
+    crate::components::response::handle_response_keys(app, key);
 }
 
 fn handle_variables(app: &mut App, key: KeyEvent) {
