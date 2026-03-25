@@ -311,14 +311,9 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
         ],
     ];
 
-    // Block-letter title — each row is exactly the same char width
     let c_title = Color::Rgb(120, 170, 255);
-    let title_art: Vec<Vec<ArtSpan>> = vec![
-        vec![("█▀▀▄ █▀▀▀ █▀▀█ █  █ █▀▀▀ ▄▀▀▄ ▀██▀   █▀▀▄ ▐██▌ █    ▄▀▀▄ ▀██▀", c_title, true)],
-        vec![("█▄▄▀ █▀▀  █ ▀█ █  █ █▀▀   ▀▀▄  ██    █▄▄▀ ▐██▌ █    █  █  ██ ", c_title, true)],
-        vec![("█  █ ▀▀▀▀  ▀▀▄  ▀▀  ▀▀▀▀ ▀▀▀   ▀▀    █    ▐██▌ ▀▀▀▀  ▀▀   ▀▀ ", c_title, true)],
-    ];
-    let title_h = title_art.len() as i32;
+    let title_text = "R E Q U E S T   P I L O T";
+    let title_h = 1i32;
 
     let tagline = "Wishing you safe passage across all endpoints ✦";
     let version = env!("CARGO_PKG_VERSION");
@@ -379,7 +374,7 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
             frame.render_widget(Paragraph::new("").style(Style::default().bg(c_bg)), a);
             render_art(frame, &rocket, ry, a);
             render_art(frame, &exhaust[exi], ry + rocket_h, a);
-            render_art(frame, &title_art, ry + title_y_off, a);
+            render_text_at(frame, title_text, ry + title_y_off, c_title, true, a);
             render_text_at(frame, tagline, ry + tag_y_off, Color::Rgb(140, 150, 170), false, a);
             render_text_at(frame, &ver_line, ry + ver_y_off, Color::Rgb(60, 65, 80), false, a);
         })?;
@@ -395,7 +390,7 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
             frame.render_widget(Paragraph::new("").style(Style::default().bg(c_bg)), a);
             render_art(frame, &rocket, center_y, a);
             render_art(frame, &exhaust[exi], center_y + rocket_h, a);
-            render_art(frame, &title_art, center_y + title_y_off, a);
+            render_text_at(frame, title_text, center_y + title_y_off, c_title, true, a);
             render_text_at(frame, tagline, center_y + tag_y_off, Color::Rgb(140, 150, 170), false, a);
             render_text_at(frame, &ver_line, center_y + ver_y_off, Color::Rgb(60, 65, 80), false, a);
         })?;
