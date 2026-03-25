@@ -1,1 +1,7 @@
+pub mod builder;
+pub mod diff_viewer;
+pub mod history;
+pub mod logs;
+pub mod overlays;
 pub mod response;
+pub mod sidebar;

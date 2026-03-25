@@ -9,6 +9,7 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 use request_pilot_core::azure_auth::AzureToken;
 use request_pilot_core::telemetry::TelemetryStats;
+use crate::components::diff_viewer::DiffViewerData;
 
 // === Input mode system ===
 
@@ -49,6 +50,7 @@ pub enum Mode {
     Files,
     History,
     Code,
+    Logs,
 }
 
 /// Which pane has keyboard focus.
@@ -60,6 +62,7 @@ pub enum Focus {
     Variables,
     HistoryList,
     FilterInput,
+    Builder,
 }
 
 /// Sidebar sub-tab.
@@ -67,6 +70,81 @@ pub enum Focus {
 pub enum SidebarTab {
     Files,
     Variables,
+}
+
+// --- History grouping/filter types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryGroupBy {
+    Flat,
+    Domain,
+    Status,
+    Source,
+    FileGroupTest,
+}
+
+impl HistoryGroupBy {
+    pub fn label(&self) -> &'static str {
+        match self {
+            HistoryGroupBy::Flat => "Flat",
+            HistoryGroupBy::Domain => "Domain",
+            HistoryGroupBy::Status => "Status",
+            HistoryGroupBy::Source => "Source",
+            HistoryGroupBy::FileGroupTest => "File/Group",
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            HistoryGroupBy::Flat => HistoryGroupBy::Domain,
+            HistoryGroupBy::Domain => HistoryGroupBy::Status,
+            HistoryGroupBy::Status => HistoryGroupBy::Source,
+            HistoryGroupBy::Source => HistoryGroupBy::FileGroupTest,
+            HistoryGroupBy::FileGroupTest => HistoryGroupBy::Flat,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum HistoryPopup {
+    MethodFilter { cursor: usize },
+    StatusFilter { cursor: usize },
+}
+
+// --- Builder types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuilderFocus {
+    Method,
+    Url,
+    Headers,
+    Body,
+}
+
+// --- Logs types ---
+
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub timestamp: String,
+    pub level: LogLevel,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFilter {
+    All,
+    Debug,
+    Info,
+    Warn,
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +289,31 @@ pub struct App {
     pub code_editor_scroll: u16,
     pub code_editor_modified: bool,
 
+    // History enhanced state
+    pub history_group_by: HistoryGroupBy,
+    pub history_method_filter: Option<String>,
+    pub history_status_filter: Option<String>,
+    pub history_popup: Option<HistoryPopup>,
+    pub history_groups_collapsed: HashSet<String>,
+    pub history_selected_seqs: Vec<u64>,
+    pub history_detail_scroll: u16,
+
+    // Diff viewer state
+    pub diff_viewer_open: bool,
+    pub diff_viewer_data: Option<DiffViewerData>,
+
+    // Builder state
+    pub builder_focus: BuilderFocus,
+    pub builder_url_cursor: usize,
+    pub builder_body_scroll: u16,
+    pub builder_header_cursor: usize,
+
+    // Logs state
+    pub log_entries: Vec<LogEntry>,
+    pub log_scroll: usize,
+    pub log_filter: LogFilter,
+    pub log_auto_scroll: bool,
+
     // Channel receiver (set up in run())
     runner_rx: Option<mpsc::UnboundedReceiver<RunnerMessage>>,
     runner_tx: mpsc::UnboundedSender<RunnerMessage>,
@@ -272,6 +375,23 @@ impl App {
             code_editor_cursor_col: 0,
             code_editor_scroll: 0,
             code_editor_modified: false,
+            history_group_by: HistoryGroupBy::Flat,
+            history_method_filter: None,
+            history_status_filter: None,
+            history_popup: None,
+            history_groups_collapsed: HashSet::new(),
+            history_selected_seqs: Vec::new(),
+            history_detail_scroll: 0,
+            diff_viewer_open: false,
+            diff_viewer_data: None,
+            builder_focus: BuilderFocus::Method,
+            builder_url_cursor: 0,
+            builder_body_scroll: 0,
+            builder_header_cursor: 0,
+            log_entries: Vec::new(),
+            log_scroll: 0,
+            log_filter: LogFilter::All,
+            log_auto_scroll: true,
             runner_rx: Some(rx),
             runner_tx: tx,
         }

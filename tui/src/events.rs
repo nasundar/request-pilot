@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::{App, Focus, Mode, SidebarTab, TreeNode, InputMode, InputPurpose, ConfirmPurpose};
 use crate::toolbar;
+use crate::components;
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
     // Code editor mode priority
@@ -30,12 +31,24 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // 3. Toolbar popup key consumption
+    // 3. Diff viewer overlay
+    if app.diff_viewer_open {
+        components::diff_viewer::handle_diff_keys(app, key);
+        return;
+    }
+
+    // 4. Toolbar popup key consumption
     if toolbar::handle_extra_headers_keys(app, key) { return; }
     if toolbar::handle_azure_keys(app, key) { return; }
     if toolbar::handle_otel_keys(app, key) { return; }
 
-    // 4. History detail overlay
+    // 5. History popup
+    if app.history_popup.is_some() {
+        components::history::handle_history_popup_keys(app, key);
+        return;
+    }
+
+    // 6. History detail overlay
     if app.history_detail_idx.is_some() {
         if matches!(key.code, KeyCode::Esc | KeyCode::Backspace) {
             app.history_detail_idx = None;
@@ -43,7 +56,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // 4. Global keybinds
+    // 7. Global keybinds
     let in_text_input = matches!(app.focus, Focus::FilterInput);
 
     match key.code {
@@ -53,6 +66,22 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('?') if !in_text_input => {
             app.show_help = !app.show_help;
+            return;
+        }
+        // Mode switching
+        KeyCode::Char('f') if !in_text_input && app.mode != Mode::Files => {
+            app.mode = Mode::Files;
+            app.focus = Focus::FileTree;
+            return;
+        }
+        KeyCode::Char('h') if !in_text_input && app.mode != Mode::History
+            && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.mode = Mode::History;
+            app.focus = Focus::HistoryList;
+            return;
+        }
+        KeyCode::Char('l') if !in_text_input && app.mode != Mode::Logs => {
+            app.mode = Mode::Logs;
             return;
         }
         KeyCode::F(1) => {
@@ -77,7 +106,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             app.enter_code_editor();
             return;
         }
-        KeyCode::Tab => {
+        KeyCode::Tab if app.mode != Mode::Logs && app.focus != Focus::Builder => {
             cycle_focus(app);
             return;
         }
@@ -126,11 +155,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         _ => {}
     }
 
-    // 6. Mode-specific keybinds
+    // 8. Mode-specific keybinds
     match app.mode {
         Mode::Files => handle_files_mode(app, key),
-        Mode::History => handle_history_mode(app, key),
+        Mode::History => components::history::handle_history_keys(app, key),
         Mode::Code => crate::code_editor::handle_editor_keys(app, key),
+        Mode::Logs => components::logs::handle_logs_keys(app, key),
     }
 }
 
@@ -184,10 +214,11 @@ fn cycle_focus(app: &mut App) {
             if app.sidebar_tab == SidebarTab::Variables {
                 app.focus = Focus::Variables;
             } else {
-                app.focus = Focus::CodeView;
+                app.focus = Focus::Builder;
             }
         }
-        Focus::Variables => app.focus = Focus::CodeView,
+        Focus::Variables => app.focus = Focus::Builder,
+        Focus::Builder => app.focus = Focus::Response,
         Focus::CodeView => app.focus = Focus::Response,
         Focus::Response => app.focus = Focus::FileTree,
         Focus::HistoryList => app.focus = Focus::FilterInput,
@@ -216,6 +247,7 @@ fn handle_files_mode(app: &mut App, key: KeyEvent) {
         Focus::CodeView => handle_code_scroll(app, key),
         Focus::Response => handle_response(app, key),
         Focus::Variables => handle_variables(app, key),
+        Focus::Builder => components::builder::handle_builder_keys(app, key),
         _ => {}
     }
 }
@@ -457,78 +489,6 @@ fn handle_file_tree(app: &mut App, key: KeyEvent) {
                         .or_insert(true);
                     *expanded = !*expanded;
                     app.rebuild_tree();
-                }
-                _ => {}
-            }
-        }
-        _ => {}
-    }
-}
-
-fn handle_history_mode(app: &mut App, key: KeyEvent) {
-    match app.focus {
-        Focus::HistoryList => {
-            match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    app.history_cursor = app.history_cursor.saturating_sub(1);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if app.history_cursor < app.filtered_history_len.saturating_sub(1) {
-                        app.history_cursor += 1;
-                    }
-                }
-                KeyCode::Char('g') => {
-                    app.history_cursor = 0;
-                }
-                KeyCode::Char('G') => {
-                    app.history_cursor = app.filtered_history_len.saturating_sub(1);
-                }
-                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    app.history_cursor = (app.history_cursor + 10)
-                        .min(app.filtered_history_len.saturating_sub(1));
-                }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    app.history_cursor = app.history_cursor.saturating_sub(10);
-                }
-                KeyCode::Char('/') => {
-                    app.focus = Focus::FilterInput;
-                }
-                // Clear history
-                KeyCode::Char('C') => {
-                    app.input_mode = InputMode::Confirm {
-                        prompt: "Clear all history? (y/n)".to_string(),
-                        purpose: ConfirmPurpose::ClearHistory,
-                    };
-                }
-                // View entry details
-                KeyCode::Enter => {
-                    if app.filtered_history_len > 0 {
-                        app.history_detail_idx = Some(app.history_cursor);
-                    }
-                }
-                // Export history
-                KeyCode::Char('E') => {
-                    app.input_mode = InputMode::Input {
-                        prompt: "Export history to: ".to_string(),
-                        purpose: InputPurpose::ExportHistory,
-                        buffer: "history.json".to_string(),
-                    };
-                }
-                _ => {}
-            }
-        }
-        Focus::FilterInput => {
-            match key.code {
-                KeyCode::Esc | KeyCode::Enter => {
-                    app.focus = Focus::HistoryList;
-                }
-                KeyCode::Char(c) => {
-                    app.filter_text.push(c);
-                    app.history_cursor = 0;
-                }
-                KeyCode::Backspace => {
-                    app.filter_text.pop();
-                    app.history_cursor = 0;
                 }
                 _ => {}
             }

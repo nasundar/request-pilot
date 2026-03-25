@@ -6,6 +6,8 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 use crate::app::{App, Focus, Mode, SidebarTab, TreeNode, InputMode};
+use crate::components;
+use crate::components::sidebar::get_block_status;
 use crate::toolbar;
 use request_pilot_core::history::HistoryFilter;
 
@@ -81,11 +83,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 
     if app.show_help {
-        draw_help_popup(frame, frame.area());
+        components::overlays::render_help_popup(frame, frame.area());
     }
 
     if let Some(idx) = app.history_detail_idx {
         draw_history_detail(frame, app, frame.area(), idx);
+    }
+
+    // Diff viewer overlay
+    if app.diff_viewer_open {
+        components::diff_viewer::render_diff_overlay(frame, app, frame.area());
     }
 
     // Toolbar popup overlays
@@ -110,15 +117,17 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let mut spans = vec![
-        Span::styled(" \u{2708} Request Pilot ", Style::default().fg(theme::BLUE).add_modifier(Modifier::BOLD)),
+        Span::styled(" ✈ Request Pilot ", Style::default().fg(theme::BLUE).add_modifier(Modifier::BOLD)),
         Span::raw(" "),
-        Span::styled(" F1 Files ", mode_style(Mode::Files, app.mode)),
+        Span::styled(" f Files ", mode_style(Mode::Files, app.mode)),
         Span::raw(" "),
-        Span::styled(" F3 History ", mode_style(Mode::History, app.mode)),
+        Span::styled(" h History ", mode_style(Mode::History, app.mode)),
         Span::raw(" "),
         Span::styled(" c Code ", mode_style(Mode::Code, app.mode)),
+        Span::raw(" "),
+        Span::styled(" l Logs ", mode_style(Mode::Logs, app.mode)),
         Span::raw("  "),
-        Span::styled("F5 Run All", Style::default().fg(theme::GREEN)),
+        Span::styled("R Run All", Style::default().fg(theme::GREEN)),
         Span::raw("  "),
         Span::styled("? Help", Style::default().fg(theme::TEXT_FAINT)),
         Span::raw("  "),
@@ -131,8 +140,9 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
     match app.mode {
         Mode::Files => draw_files_mode(frame, app, area),
-        Mode::History => draw_history_mode(frame, app, area),
+        Mode::History => components::history::render_history_mode(frame, app, area),
         Mode::Code => crate::code_editor::render_editor(frame, app, area),
+        Mode::Logs => components::logs::render_logs_mode(frame, app, area),
     }
 }
 
@@ -173,7 +183,8 @@ fn draw_files_mode(frame: &mut Frame, app: &App, area: Rect) {
         ])
         .split(h_chunks[1]);
 
-    draw_code_view(frame, app, v_chunks[0]);
+    // Show builder panel (top) and response (bottom)
+    components::builder::render_builder(frame, app, v_chunks[0]);
     draw_response_view(frame, app, v_chunks[1]);
 }
 
@@ -288,317 +299,8 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn draw_code_view(frame: &mut Frame, app: &App, area: Rect) {
-    let border_style = if app.focus == Focus::CodeView {
-        Style::default().fg(theme::BLUE)
-    } else {
-        Style::default().fg(theme::TEXT_FAINT)
-    };
-
-    let block = Block::default()
-        .title(" Code ")
-        .borders(Borders::ALL)
-        .border_style(border_style);
-
-    if let (Some(fi), Some(bi)) = (app.active_file_idx, app.active_block_idx) {
-        if let Some(file) = app.loaded_files.get(fi) {
-            if let Some(blk) = file.suite.blocks.get(bi) {
-                let mut lines = Vec::new();
-
-                let type_color = match blk.block_type.as_str() {
-                    "setup" => theme::BLUE,
-                    "test" => theme::GREEN,
-                    "teardown" => theme::RED,
-                    _ => theme::TEXT,
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(format!("@{}", blk.block_type), Style::default().fg(type_color).add_modifier(Modifier::BOLD)),
-                    Span::raw(" "),
-                    Span::styled(&blk.name, Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)),
-                    if blk.disabled {
-                        Span::styled(" [disabled]", Style::default().fg(theme::TEXT_FAINT))
-                    } else {
-                        Span::raw("")
-                    },
-                ]));
-
-                if !blk.description.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        format!("# @description {}", blk.description),
-                        Style::default().fg(theme::TEXT_FAINT),
-                    )));
-                }
-
-                lines.push(Line::from(""));
-
-                let method_color = match blk.request.method.as_str() {
-                    "GET" => theme::GREEN,
-                    "POST" => theme::BLUE,
-                    "PUT" => theme::YELLOW,
-                    "PATCH" => theme::PINK,
-                    "DELETE" => theme::RED,
-                    _ => theme::TEXT,
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(&blk.request.method, Style::default().fg(method_color).add_modifier(Modifier::BOLD)),
-                    Span::raw(" "),
-                    Span::styled(&blk.request.url, Style::default().fg(theme::TEXT)),
-                ]));
-
-                for (k, v) in &blk.request.headers {
-                    lines.push(Line::from(vec![
-                        Span::styled(k, Style::default().fg(theme::LAVENDER)),
-                        Span::raw(": "),
-                        Span::styled(v, Style::default().fg(theme::TEXT)),
-                    ]));
-                }
-
-                if let Some(ref body) = blk.request.body {
-                    lines.push(Line::from(""));
-                    for line in body.lines() {
-                        lines.push(Line::from(Span::styled(line, Style::default().fg(theme::TEXT))));
-                    }
-                }
-
-                if !blk.assertions.is_empty() {
-                    lines.push(Line::from(""));
-                    for a in &blk.assertions {
-                        lines.push(Line::from(Span::styled(
-                            format!("# @assert {} {} {}", a.left, a.operator, a.right),
-                            Style::default().fg(theme::YELLOW),
-                        )));
-                    }
-                }
-
-                if !blk.extracts.is_empty() {
-                    for e in &blk.extracts {
-                        lines.push(Line::from(Span::styled(
-                            format!("# @extract {} = {}", e.variable_name, e.source_path),
-                            Style::default().fg(theme::MAUVE),
-                        )));
-                    }
-                }
-
-                let paragraph = Paragraph::new(lines)
-                    .block(block)
-                    .wrap(Wrap { trim: false })
-                    .scroll((app.code_scroll, 0));
-                frame.render_widget(paragraph, area);
-                return;
-            }
-        }
-    }
-
-    let msg = Paragraph::new("Select a block from the file tree")
-        .block(block)
-        .style(Style::default().fg(theme::TEXT_FAINT));
-    frame.render_widget(msg, area);
-}
-
 fn draw_response_view(frame: &mut Frame, app: &App, area: Rect) {
     crate::components::response::render_response(frame, app, area);
-}
-
-fn draw_history_mode(frame: &mut Frame, app: &App, area: Rect) {
-    let v_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5),
-            Constraint::Length(3),
-            Constraint::Min(5),
-        ])
-        .split(area);
-
-    draw_history_stats(frame, app, v_chunks[0]);
-    draw_history_filter(frame, app, v_chunks[1]);
-    draw_history_list(frame, app, v_chunks[2]);
-}
-
-fn draw_history_stats(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .title(" \u{1f4ca} Stats ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BLUE));
-
-    let entries = &app.history.entries;
-    let total = entries.len();
-
-    if total == 0 {
-        let msg = Paragraph::new("No history entries yet. Run some tests!")
-            .block(block)
-            .style(Style::default().fg(theme::TEXT_FAINT));
-        frame.render_widget(msg, area);
-        return;
-    }
-
-    let success_count = entries.iter().filter(|e| e.status < 400).count();
-    let pass_rate = if total > 0 {
-        (success_count as f64 / total as f64) * 100.0
-    } else {
-        0.0
-    };
-    let avg_time = if total > 0 {
-        entries.iter().map(|e| e.response_time_ms).sum::<u64>() / total as u64
-    } else {
-        0
-    };
-
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("  Total runs: ", Style::default().fg(theme::TEXT_DIM)),
-            Span::styled(format!("{}", total), Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)),
-            Span::raw("    "),
-            Span::styled("Pass rate: ", Style::default().fg(theme::TEXT_DIM)),
-            Span::styled(
-                format!("{:.1}%", pass_rate),
-                Style::default().fg(if pass_rate >= 80.0 { theme::GREEN } else if pass_rate >= 50.0 { theme::YELLOW } else { theme::RED }).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("    "),
-            Span::styled("Avg time: ", Style::default().fg(theme::TEXT_DIM)),
-            Span::styled(format!("{}ms", avg_time), Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(vec![
-            Span::styled("  \u{2713} ", Style::default().fg(theme::GREEN)),
-            Span::styled(format!("{} succeeded", success_count), Style::default().fg(theme::GREEN)),
-            Span::raw("  "),
-            Span::styled("\u{2717} ", Style::default().fg(theme::RED)),
-            Span::styled(format!("{} failed", total - success_count), Style::default().fg(theme::RED)),
-        ]),
-    ];
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, area);
-}
-
-fn draw_history_filter(frame: &mut Frame, app: &App, area: Rect) {
-    let border_style = if app.focus == Focus::FilterInput {
-        Style::default().fg(theme::BLUE)
-    } else {
-        Style::default().fg(theme::TEXT_FAINT)
-    };
-
-    let block = Block::default()
-        .title(" \u{1f50d} Filter (/ to search) ")
-        .borders(Borders::ALL)
-        .border_style(border_style);
-
-    let text = if app.filter_text.is_empty() {
-        if app.focus == Focus::FilterInput {
-            "Type to filter..."
-        } else {
-            "Press / to filter"
-        }
-    } else {
-        &app.filter_text
-    };
-
-    let style = if app.filter_text.is_empty() {
-        Style::default().fg(theme::TEXT_FAINT)
-    } else {
-        Style::default().fg(theme::TEXT)
-    };
-
-    let paragraph = Paragraph::new(Span::styled(text, style)).block(block);
-    frame.render_widget(paragraph, area);
-}
-
-fn draw_history_list(frame: &mut Frame, app: &App, area: Rect) {
-    let border_style = if app.focus == Focus::HistoryList {
-        Style::default().fg(theme::BLUE)
-    } else {
-        Style::default().fg(theme::TEXT_FAINT)
-    };
-
-    let block = Block::default()
-        .title(" History Entries ")
-        .borders(Borders::ALL)
-        .border_style(border_style);
-
-    let filter = if app.filter_text.is_empty() {
-        HistoryFilter::default()
-    } else {
-        HistoryFilter {
-            url_contains: Some(app.filter_text.clone()),
-            ..Default::default()
-        }
-    };
-
-    let filtered: Vec<_> = app.history.filter(&filter);
-
-    if filtered.is_empty() {
-        let msg = if app.filter_text.is_empty() {
-            "No history entries. Run tests to populate."
-        } else {
-            "No matching entries."
-        };
-        let paragraph = Paragraph::new(msg)
-            .block(block)
-            .style(Style::default().fg(theme::TEXT_FAINT));
-        frame.render_widget(paragraph, area);
-        return;
-    }
-
-    let mut sorted_entries = filtered;
-    sorted_entries.reverse();
-
-    let items: Vec<ListItem> = sorted_entries.iter().enumerate().map(|(i, entry)| {
-        let is_selected = i == app.history_cursor;
-
-        let status_color = if entry.status < 300 {
-            theme::GREEN
-        } else if entry.status < 400 {
-            theme::YELLOW
-        } else {
-            theme::RED
-        };
-
-        let method_color = match entry.method.as_str() {
-            "GET" => theme::GREEN,
-            "POST" => theme::BLUE,
-            "PUT" => theme::YELLOW,
-            "PATCH" => theme::PINK,
-            "DELETE" => theme::RED,
-            _ => theme::TEXT,
-        };
-
-        let bg = if is_selected {
-            theme::BG_HIGHLIGHT
-        } else {
-            Color::Reset
-        };
-
-        let time_str = if entry.timestamp.len() >= 19 {
-            &entry.timestamp[11..19]
-        } else {
-            &entry.timestamp
-        };
-
-        ListItem::new(Line::from(vec![
-            Span::styled(
-                format!(" {} ", entry.status),
-                Style::default().fg(theme::BG_DARK).bg(status_color),
-            ),
-            Span::styled(" ", Style::default().bg(bg)),
-            Span::styled(
-                format!("{:<7}", entry.method),
-                Style::default().fg(method_color).bg(bg),
-            ),
-            Span::styled(&entry.url, Style::default().fg(theme::TEXT).bg(bg)),
-            Span::styled("  ", Style::default().bg(bg)),
-            Span::styled(
-                format!("{}ms", entry.response_time_ms),
-                Style::default().fg(theme::TEXT_FAINT).bg(bg),
-            ),
-            Span::styled("  ", Style::default().bg(bg)),
-            Span::styled(
-                time_str,
-                Style::default().fg(theme::TEXT_FAINT).bg(bg),
-            ),
-        ]))
-    }).collect();
-
-    let list = List::new(items).block(block);
-    frame.render_widget(list, area);
 }
 
 fn draw_history_detail(frame: &mut Frame, app: &App, area: Rect, idx: usize) {
@@ -778,88 +480,4 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(line).style(Style::default().bg(theme::BG_BASE)),
         area,
     );
-}
-
-fn draw_help_popup(frame: &mut Frame, area: Rect) {
-    let popup_width = 60.min(area.width - 4);
-    let popup_height = 38.min(area.height - 4);
-    let x = (area.width - popup_width) / 2;
-    let y = (area.height - popup_height) / 2;
-    let popup_area = Rect::new(x, y, popup_width, popup_height);
-
-    frame.render_widget(ratatui::widgets::Clear, popup_area);
-
-    let kb = Style::default().fg(theme::PEACH);
-    let dim = Style::default().fg(theme::TEXT_FAINT);
-
-    let help_text = vec![
-        Line::from(Span::styled("Keybindings", Style::default().fg(theme::BLUE).add_modifier(Modifier::BOLD))),
-        Line::from(""),
-        Line::from(Span::styled("\u{2500}\u{2500} Navigation \u{2500}\u{2500}", dim)),
-        Line::from(vec![Span::styled("j/k \u{2191}\u{2193}       ", kb), Span::styled("Navigate / scroll", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("g / G         ", kb), Span::styled("Jump to top / bottom", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("Ctrl+u/d      ", kb), Span::styled("Half-page up / down", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("1-9           ", kb), Span::styled("Quick jump to file", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("Tab           ", kb), Span::styled("Cycle focus", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("Enter         ", kb), Span::styled("Select / expand / detail", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("Space         ", kb), Span::styled("Toggle expand", Style::default().fg(theme::TEXT))]),
-        Line::from(""),
-        Line::from(Span::styled("\u{2500}\u{2500} File Operations \u{2500}\u{2500}", dim)),
-        Line::from(vec![Span::styled("o / Ctrl+O    ", kb), Span::styled("Open file", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("n / Ctrl+N    ", kb), Span::styled("New file", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("s / Ctrl+S    ", kb), Span::styled("Save file", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("x             ", kb), Span::styled("Close file", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("Ctrl+E        ", kb), Span::styled("Load .env file", Style::default().fg(theme::TEXT))]),
-        Line::from(""),
-        Line::from(Span::styled("\u{2500}\u{2500} Execution \u{2500}\u{2500}", dim)),
-        Line::from(vec![Span::styled("r             ", kb), Span::styled("Run selected (block/group/file)", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("R / F5        ", kb), Span::styled("Run all tests", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("t             ", kb), Span::styled("Toggle block enabled/disabled", Style::default().fg(theme::TEXT))]),
-        Line::from(""),
-        Line::from(Span::styled("\u{2500}\u{2500} Variables \u{2500}\u{2500}", dim)),
-        Line::from(vec![Span::styled("Ctrl+V        ", kb), Span::styled("Toggle sidebar tab", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("a             ", kb), Span::styled("Add variable", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("e             ", kb), Span::styled("Edit variable", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("d             ", kb), Span::styled("Delete variable", Style::default().fg(theme::TEXT))]),
-        Line::from(""),
-        Line::from(Span::styled("\u{2500}\u{2500} Response \u{2500}\u{2500}", dim)),
-        Line::from(vec![Span::styled("b / h / a     ", kb), Span::styled("Body / Headers / Assertions tab", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("y             ", kb), Span::styled("Copy response body", Style::default().fg(theme::TEXT))]),
-        Line::from(""),
-        Line::from(Span::styled("\u{2500}\u{2500} History \u{2500}\u{2500}", dim)),
-        Line::from(vec![Span::styled("/             ", kb), Span::styled("Filter", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("C             ", kb), Span::styled("Clear history", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("E             ", kb), Span::styled("Export history", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("Enter         ", kb), Span::styled("View details", Style::default().fg(theme::TEXT))]),
-        Line::from(""),
-        Line::from(Span::styled("\u{2500}\u{2500} General \u{2500}\u{2500}", dim)),
-        Line::from(vec![Span::styled("F1            ", kb), Span::styled("Files mode", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("F3            ", kb), Span::styled("History mode", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("?             ", kb), Span::styled("Toggle help", Style::default().fg(theme::TEXT))]),
-        Line::from(vec![Span::styled("q             ", kb), Span::styled("Quit", Style::default().fg(theme::TEXT))]),
-    ];
-
-    let block = Block::default()
-        .title(" \u{2708} Help ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BLUE))
-        .style(Style::default().bg(theme::BG_OVERLAY));
-
-    let paragraph = Paragraph::new(help_text).block(block);
-    frame.render_widget(paragraph, popup_area);
-}
-
-fn get_block_status(file: &crate::app::LoadedFile, block_idx: usize) -> &'static str {
-    if let Some(ref results) = file.results {
-        if let Some(br) = results.block_results.get(block_idx) {
-            return match br.status.as_str() {
-                "passed" => "\u{2713}",
-                "failed" | "error" => "\u{2717}",
-                "skipped" => "\u{2298}",
-                "running" => "\u{2800}",
-                _ => "\u{00b7}",
-            };
-        }
-    }
-    "\u{00b7}"
 }
