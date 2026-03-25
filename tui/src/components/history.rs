@@ -445,7 +445,33 @@ pub fn handle_history_keys(app: &mut App, key: KeyEvent) {
             }
             KeyCode::Char('d') => {
                 if app.history_selected_seqs.len() == 2 {
-                    app.set_status("Compare: placeholder \u{2014} will be implemented by tui2-comparison".to_string());
+                    let seqs = &app.history_selected_seqs;
+                    let mut found: Vec<(&str, &str, &str)> = Vec::new(); // (method, url, body)
+                    for entry in &app.history.entries {
+                        if seqs.contains(&entry.seq) {
+                            found.push((
+                                &entry.method,
+                                &entry.url,
+                                entry.response_body.as_deref().unwrap_or(""),
+                            ));
+                        }
+                    }
+                    if found.len() == 2 {
+                        let format_body = |body: &str| -> String {
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+                                serde_json::to_string_pretty(&val).unwrap_or_else(|_| body.to_string())
+                            } else {
+                                body.to_string()
+                            }
+                        };
+                        let text_a = format_body(found[0].2);
+                        let text_b = format_body(found[1].2);
+                        let label_a = format!("{} {}", found[0].0, found[0].1);
+                        let label_b = format!("{} {}", found[1].0, found[1].1);
+                        app.open_diff_viewer(&text_a, &text_b, label_a, label_b);
+                    } else {
+                        app.set_status("Could not find both selected entries".to_string());
+                    }
                 } else {
                     app.set_status("Select 2 entries with Space to compare".to_string());
                 }

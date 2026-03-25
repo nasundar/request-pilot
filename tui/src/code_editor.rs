@@ -15,7 +15,7 @@ const DIRECTIVES: &[&str] = &[
     "# @name", "# @description", "# @assert", "# @extract",
     "# @setup", "# @test", "# @teardown", "# @group",
     "# @depends", "# @mode", "# @dev_auth", "# @disabled",
-    "# @type",
+    "# @type", "# @compare", "# @step", "# @diff",
 ];
 
 const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
@@ -292,6 +292,11 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
         for (i, line) in raw_lines.iter().enumerate() {
             let trimmed = line.trim();
             if trimmed.starts_with("###") {
+                had_method = false;
+                had_empty_after_headers = false;
+                in_body_flags[i] = false;
+            } else if trimmed.starts_with("# @step ") || trimmed == "# @compare" || trimmed.starts_with("# @diff ") {
+                // Compare directives reset body state (act like sub-block separators)
                 had_method = false;
                 had_empty_after_headers = false;
                 in_body_flags[i] = false;
