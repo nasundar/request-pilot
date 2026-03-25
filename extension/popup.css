@@ -193,30 +193,30 @@ body::-webkit-scrollbar-thumb {
   align-items: center;
   gap: 6px;
   padding: 4px 12px;
-  background: var(--bg-secondary, #161b22);
+  background: var(--bg-input);
   border-bottom: 1px solid var(--border);
   font-size: 11px;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
 }
 .desktop-dot {
   width: 7px; height: 7px; border-radius: 50%;
-  background: var(--text-muted, #6e7681);
+  background: var(--text-muted);
   flex-shrink: 0;
 }
-.desktop-dot.connected { background: #3fb950; }
-.desktop-dot.capturing { background: #3fb950; animation: desktop-pulse 1.5s infinite; }
-.desktop-dot.disconnected { background: var(--text-muted, #6e7681); }
-.desktop-dot.disabled { background: var(--text-muted, #6e7681); opacity: 0.5; }
-.desktop-dot.connecting { background: #d29922; animation: desktop-pulse 1s infinite; }
+.desktop-dot.connected { background: var(--success); }
+.desktop-dot.capturing { background: var(--success); animation: desktop-pulse 1.5s infinite; }
+.desktop-dot.disconnected { background: var(--text-muted); }
+.desktop-dot.disabled { background: var(--text-muted); opacity: 0.5; }
+.desktop-dot.connecting { background: var(--warning); animation: desktop-pulse 1s infinite; }
 .desktop-mode-label {
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 3px;
   font-weight: 600;
 }
-.desktop-mode-label.mode-all { background: rgba(63,185,80,.15); color: #3fb950; }
-.desktop-mode-label.mode-filtered { background: rgba(88,166,255,.15); color: #58a6ff; }
-.desktop-mode-label.mode-off { background: rgba(139,148,158,.1); color: var(--text-muted, #6e7681); }
+.desktop-mode-label.mode-all { background: rgba(63,185,80,.15); color: var(--success); }
+.desktop-mode-label.mode-filtered { background: rgba(88,166,255,.15); color: var(--accent); }
+.desktop-mode-label.mode-off { background: rgba(139,148,158,.1); color: var(--text-muted); }
 @keyframes desktop-pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
 
 /* Live capture toggle switch */
@@ -237,7 +237,7 @@ body::-webkit-scrollbar-thumb {
 .live-toggle-slider {
   position: absolute;
   inset: 0;
-  background: var(--text-muted, #6e7681);
+  background: var(--text-muted);
   border-radius: 8px;
   transition: background 0.2s;
 }
@@ -253,7 +253,7 @@ body::-webkit-scrollbar-thumb {
   transition: transform 0.2s;
 }
 .live-toggle input:checked + .live-toggle-slider {
-  background: #3fb950;
+  background: var(--success);
 }
 .live-toggle input:checked + .live-toggle-slider::before {
   transform: translateX(12px);
