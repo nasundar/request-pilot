@@ -10,10 +10,11 @@ use std::collections::HashSet;
 use crate::app::{App, Focus, ResponseTab};
 use crate::ui::theme;
 use crate::ui::truncate_to;
+use crate::components::sidebar::find_block_result;
 
 const LARGE_BODY_THRESHOLD: usize = 262_144;
 const PREVIEW_SIZE: usize = 8_192;
-const DEFAULT_EXPAND_DEPTH: usize = 3;
+pub const DEFAULT_EXPAND_DEPTH: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JsonNodeType {
@@ -98,7 +99,7 @@ fn format_size(bytes: usize) -> String {
     }
 }
 
-fn build_json_tree(
+pub fn build_json_tree(
     value: &serde_json::Value,
     path: &str,
     key: &str,
@@ -215,7 +216,7 @@ pub fn rebuild_json_tree(app: &mut App, body: &str) {
     }
 }
 
-fn collect_all_paths(value: &serde_json::Value, path: &str, paths: &mut HashSet<String>) {
+pub fn collect_all_paths(value: &serde_json::Value, path: &str, paths: &mut HashSet<String>) {
     match value {
         serde_json::Value::Object(map) => {
             paths.insert(path.to_string());
@@ -368,7 +369,8 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
     if let (Some(fi), Some(bi)) = (app.active_file_idx, app.active_block_idx) {
         if let Some(file) = app.loaded_files.get(fi) {
             if let Some(ref results) = file.results {
-                if let Some(br) = results.block_results.get(bi) {
+                let block_name = file.suite.blocks.get(bi).map(|b| b.name.as_str()).unwrap_or("");
+                if let Some(br) = find_block_result(&results.block_results, block_name) {
                     if br.status == "pending" {
                         let msg = Paragraph::new("Run tests to see responses here")
                             .block(block_widget)
@@ -829,23 +831,32 @@ fn copy_body(app: &mut App) {
     }
 }
 
-fn get_current_body(app: &App) -> Option<String> {
+fn get_active_block_name(app: &App) -> Option<String> {
     let fi = app.active_file_idx?;
     let bi = app.active_block_idx?;
     let file = app.loaded_files.get(fi)?;
+    Some(file.suite.blocks.get(bi)?.name.clone())
+}
+
+fn get_current_body(app: &App) -> Option<String> {
+    let fi = app.active_file_idx?;
+    let file = app.loaded_files.get(fi)?;
     let results = file.results.as_ref()?;
-    let br = results.block_results.get(bi)?;
+    let block_name = get_active_block_name(app)?;
+    let br = find_block_result(&results.block_results, &block_name)?;
     let resp = br.response.as_ref()?;
     Some(resp.body.clone())
 }
 
 fn get_current_headers(app: &App) -> Vec<(String, String)> {
-    if let (Some(fi), Some(bi)) = (app.active_file_idx, app.active_block_idx) {
+    if let (Some(fi), Some(_bi)) = (app.active_file_idx, app.active_block_idx) {
         if let Some(file) = app.loaded_files.get(fi) {
             if let Some(ref results) = file.results {
-                if let Some(br) = results.block_results.get(bi) {
-                    if let Some(ref resp) = br.response {
-                        return resp.headers.clone();
+                if let Some(block_name) = get_active_block_name(app) {
+                    if let Some(br) = find_block_result(&results.block_results, &block_name) {
+                        if let Some(ref resp) = br.response {
+                            return resp.headers.clone();
+                        }
                     }
                 }
             }

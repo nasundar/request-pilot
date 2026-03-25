@@ -63,17 +63,16 @@ pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                             _ => "\u{1f4e4}",
                         };
                         let status = get_block_status(f, *block_idx);
-                        let disabled_mark = if blk.disabled { " \u{d8}" } else { "" };
                         // Show @mode app blocks as dimmed/skipped when dev mode is on
                         let dev_skip = app.dev_mode && blk.mode.as_deref() == Some("app");
-                        let dev_mark = if dev_skip { " [skip:dev]" } else { "" };
+                        let disabled_mark = if blk.disabled { " \u{d8}" } else if dev_skip { " \u{d8}" } else { "" };
                         let indent = if blk.group.is_some() { "      " } else { "    " };
-                        let style = if dev_skip {
+                        let style = if dev_skip || blk.disabled {
                             Style::default().fg(theme::TEXT_FAINT())
                         } else {
                             Style::default().fg(theme::TEXT())
                         };
-                        (format!("{}{} {} ", indent, status, icon), format!("{}{}{}", blk.name, disabled_mark, dev_mark), style)
+                        (format!("{}{} {} ", indent, status, icon), format!("{}{}", blk.name, disabled_mark), style)
                     }
                 };
 
@@ -136,7 +135,8 @@ pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 
 pub fn get_block_status(file: &LoadedFile, block_idx: usize) -> &'static str {
     if let Some(ref results) = file.results {
-        if let Some(br) = results.block_results.get(block_idx) {
+        let block_name = &file.suite.blocks[block_idx].name;
+        if let Some(br) = find_block_result(&results.block_results, block_name) {
             return match br.status.as_str() {
                 "passed" => "\u{2713}",
                 "failed" | "error" => "\u{2717}",
@@ -147,6 +147,14 @@ pub fn get_block_status(file: &LoadedFile, block_idx: usize) -> &'static str {
         }
     }
     "\u{00b7}"
+}
+
+/// Look up a block result by name (avoids index mismatch when mode-filtered blocks are skipped).
+pub fn find_block_result<'a>(
+    block_results: &'a [request_pilot_core::test_runner::BlockResult],
+    name: &str,
+) -> Option<&'a request_pilot_core::test_runner::BlockResult> {
+    block_results.iter().find(|br| br.name == name)
 }
 
 // ΓöÇΓöÇ Event handling ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ

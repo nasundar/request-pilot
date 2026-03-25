@@ -50,17 +50,83 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 
     // 6. History detail overlay
     if app.history_detail_idx.is_some() {
+        let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Esc | KeyCode::Backspace => { app.history_detail_idx = None; }
+            KeyCode::Esc | KeyCode::Backspace => {
+                app.history_detail_idx = None;
+                app.history_json_nodes.clear();
+                app.history_json_cursor = 0;
+                app.history_json_built = false;
+                app.history_json_expanded.clear();
+            }
             KeyCode::Tab | KeyCode::BackTab => {
                 app.history_detail_tab = if app.history_detail_tab == 0 { 1 } else { 0 };
                 app.history_detail_scroll = 0;
+                app.history_json_built = false;
+                app.history_json_cursor = 0;
             }
+            // Ctrl+Up/Down for page scroll
+            KeyCode::Up if is_ctrl => {
+                app.history_detail_scroll = app.history_detail_scroll.saturating_sub(5);
+            }
+            KeyCode::Down if is_ctrl => {
+                app.history_detail_scroll = app.history_detail_scroll.saturating_add(5);
+            }
+            // Up/Down for JSON tree cursor navigation (response tab with JSON) or scroll
             KeyCode::Up | KeyCode::Char('k') => {
-                app.history_detail_scroll = app.history_detail_scroll.saturating_sub(1);
+                if app.history_detail_tab == 1 && !app.history_json_nodes.is_empty() {
+                    app.history_json_cursor = app.history_json_cursor.saturating_sub(1);
+                } else {
+                    app.history_detail_scroll = app.history_detail_scroll.saturating_sub(1);
+                }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                app.history_detail_scroll = app.history_detail_scroll.saturating_add(1);
+                if app.history_detail_tab == 1 && !app.history_json_nodes.is_empty() {
+                    let max = app.history_json_nodes.len().saturating_sub(1);
+                    if app.history_json_cursor < max {
+                        app.history_json_cursor += 1;
+                    }
+                } else {
+                    app.history_detail_scroll = app.history_detail_scroll.saturating_add(1);
+                }
+            }
+            // Enter to toggle expand/collapse individual node
+            KeyCode::Enter => {
+                if app.history_detail_tab == 1 && !app.history_json_nodes.is_empty() {
+                    let cursor = app.history_json_cursor;
+                    if let Some(node) = app.history_json_nodes.get(cursor) {
+                        if node.is_expandable {
+                            let path = node.path.clone();
+                            if node.is_expanded {
+                                app.history_json_expanded.remove(&path);
+                                app.history_json_expanded.insert(format!("!{}", path));
+                            } else {
+                                app.history_json_expanded.remove(&format!("!{}", path));
+                                app.history_json_expanded.insert(path);
+                            }
+                            app.history_json_built = false; // trigger rebuild
+                        }
+                    }
+                }
+            }
+            // E to expand all
+            KeyCode::Char('E') => {
+                if app.history_detail_tab == 1 {
+                    history_expand_all(app);
+                }
+            }
+            // C to collapse all
+            KeyCode::Char('C') => {
+                if app.history_detail_tab == 1 {
+                    history_collapse_all(app);
+                }
+            }
+            // 1-9 to expand to specific depth
+            KeyCode::Char(c @ '1'..='9') => {
+                if app.history_detail_tab == 1 {
+                    let depth = (c as usize) - ('0' as usize);
+                    history_expand_to_depth(app, depth);
+                }
             }
             _ => {}
         }
@@ -417,6 +483,94 @@ fn handle_code_scroll(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('G') => {
             app.code_scroll = u16::MAX;
+        }
+        _ => {}
+    }
+}
+
+fn get_history_response_body(app: &App) -> Option<String> {
+    let idx = app.history_detail_idx?;
+    let filter = if app.filter_text.is_empty() {
+        request_pilot_core::history::HistoryFilter::default()
+    } else {
+        request_pilot_core::history::HistoryFilter {
+            url_contains: Some(app.filter_text.clone()),
+            ..Default::default()
+        }
+    };
+    let mut filtered = app.history.filter(&filter);
+    filtered.reverse();
+    let entry = filtered.get(idx)?;
+    entry.response_body.clone()
+}
+
+fn history_expand_all(app: &mut App) {
+    if let Some(body) = get_history_response_body(app) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
+            let mut paths = std::collections::HashSet::new();
+            components::response::collect_all_paths(&value, "root", &mut paths);
+            app.history_json_expanded.retain(|p| !p.starts_with('!'));
+            for p in paths {
+                app.history_json_expanded.insert(p);
+            }
+            app.history_json_built = false;
+        }
+    }
+}
+
+fn history_collapse_all(app: &mut App) {
+    if let Some(body) = get_history_response_body(app) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
+            let mut paths = std::collections::HashSet::new();
+            components::response::collect_all_paths(&value, "root", &mut paths);
+            app.history_json_expanded.clear();
+            for p in paths {
+                app.history_json_expanded.insert(format!("!{}", p));
+            }
+            app.history_json_built = false;
+            app.history_json_cursor = 0;
+        }
+    }
+}
+
+fn history_expand_to_depth(app: &mut App, max_depth: usize) {
+    if let Some(body) = get_history_response_body(app) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
+            app.history_json_expanded.clear();
+            expand_paths_to_depth(&value, "root", 0, max_depth, &mut app.history_json_expanded);
+            app.history_json_built = false;
+        }
+    }
+}
+
+fn expand_paths_to_depth(
+    value: &serde_json::Value,
+    path: &str,
+    depth: usize,
+    max_depth: usize,
+    expanded: &mut std::collections::HashSet<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if depth < max_depth {
+                expanded.insert(path.to_string());
+                for (k, v) in map {
+                    let cp = if path.is_empty() { k.clone() } else { format!("{}.{}", path, k) };
+                    expand_paths_to_depth(v, &cp, depth + 1, max_depth, expanded);
+                }
+            } else {
+                expanded.insert(format!("!{}", path));
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            if depth < max_depth {
+                expanded.insert(path.to_string());
+                for (i, v) in arr.iter().enumerate() {
+                    expand_paths_to_depth(v, &format!("{}[{}]", path, i), depth + 1, max_depth, expanded);
+                }
+            } else {
+                expanded.insert(format!("!{}", path));
+            }
         }
         _ => {}
     }

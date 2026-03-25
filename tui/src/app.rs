@@ -309,6 +309,10 @@ pub struct App {
     pub history_selected_seqs: Vec<u64>,
     pub history_detail_scroll: u16,
     pub history_detail_tab: u8, // 0 = Request, 1 = Response
+    pub history_json_nodes: Vec<crate::components::response::JsonTreeNode>,
+    pub history_json_cursor: usize,
+    pub history_json_built: bool, // true when tree was built for current body
+    pub history_json_expanded: HashSet<String>,
 
     // Diff viewer state
     pub diff_viewer_open: bool,
@@ -457,6 +461,10 @@ impl App {
             history_selected_seqs: Vec::new(),
             history_detail_scroll: 0,
             history_detail_tab: 0,
+            history_json_nodes: Vec::new(),
+            history_json_cursor: 0,
+            history_json_built: false,
+            history_json_expanded: HashSet::new(),
             diff_viewer_open: false,
             diff_viewer_data: None,
             builder_focus: BuilderFocus::Method,
@@ -655,6 +663,41 @@ impl App {
             }
         };
         self.filtered_history_len = self.history.filter(&filter).len();
+    }
+
+    fn build_history_json_tree(&mut self) {
+        use request_pilot_core::history::HistoryFilter;
+        self.history_json_built = true;
+        self.history_json_nodes.clear();
+
+        let idx = match self.history_detail_idx {
+            Some(i) => i,
+            None => return,
+        };
+        let filter = if self.filter_text.is_empty() {
+            HistoryFilter::default()
+        } else {
+            HistoryFilter {
+                url_contains: Some(self.filter_text.clone()),
+                ..Default::default()
+            }
+        };
+        let mut filtered = self.history.filter(&filter);
+        filtered.reverse();
+        let body = match filtered.get(idx).and_then(|e| e.response_body.as_ref()) {
+            Some(b) if !b.is_empty() => b.clone(),
+            _ => return,
+        };
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
+            crate::components::response::build_json_tree(
+                &value,
+                "root",
+                "root",
+                0,
+                &self.history_json_expanded,
+                &mut self.history_json_nodes,
+            );
+        }
     }
 
     /// Rebuild the flat tree node list from loaded files.
@@ -1220,6 +1263,11 @@ impl App {
 
         loop {
             self.update_filtered_history_len();
+
+            // Build history JSON tree if needed (lazy — only when response tab shown)
+            if self.history_detail_idx.is_some() && self.history_detail_tab == 1 && !self.history_json_built {
+                self.build_history_json_tree();
+            }
 
             terminal.draw(|frame| ui::draw(frame, self))?;
 

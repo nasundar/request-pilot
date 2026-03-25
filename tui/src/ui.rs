@@ -344,9 +344,13 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("R Run All", Style::default().fg(theme::GREEN())),
         Span::raw("  "),
         Span::styled(
-            "⚡OTEL",
+            "⚡",
+            Style::default().fg(if app.otel_enabled { theme::SKY() } else { theme::TEXT_FAINT() }),
+        ),
+        Span::styled(
+            "OTEL",
             if app.otel_enabled {
-                Style::default().fg(theme::BG_DARK()).bg(theme::SKY()).add_modifier(Modifier::BOLD)
+                Style::default().fg(theme::BG_DARK()).bg(theme::PEACH()).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme::TEXT_FAINT())
             },
@@ -667,7 +671,7 @@ fn draw_history_detail(frame: &mut Frame, app: &App, area: Rect, idx: usize) {
         Span::raw("    "),
         Span::styled("Tab", Style::default().fg(theme::PEACH())),
         Span::styled("=switch  ", Style::default().fg(theme::TEXT_FAINT())),
-        Span::styled("↑↓", Style::default().fg(theme::PEACH())),
+        Span::styled("Ctrl+↑↓", Style::default().fg(theme::PEACH())),
         Span::styled("=scroll  ", Style::default().fg(theme::TEXT_FAINT())),
         Span::styled("Esc", Style::default().fg(theme::PEACH())),
         Span::styled("=close", Style::default().fg(theme::TEXT_FAINT())),
@@ -702,7 +706,61 @@ fn draw_history_detail(frame: &mut Frame, app: &App, area: Rect, idx: usize) {
         lines.push(Line::from(""));
         render_history_headers("Response Headers", &entry.response_headers, &mut lines);
         lines.push(Line::from(""));
-        render_history_body("Response Body", &entry.response_body, &mut lines);
+        lines.push(Line::from(Span::styled(
+            "─── Response Body ───",
+            Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        // Use JSON tree if nodes exist
+        if !app.history_json_nodes.is_empty() {
+            for (idx, node) in app.history_json_nodes.iter().enumerate() {
+                let indent = "  ".repeat(node.depth);
+                let toggle = if node.is_expandable {
+                    if node.is_expanded { "\u{25bc} " } else { "\u{25b6} " }
+                } else {
+                    "  "
+                };
+                let is_cursor = idx == app.history_json_cursor;
+                let ks = Style::default().fg(theme::BLUE());
+                let vs = match node.node_type {
+                    components::response::JsonNodeType::String => Style::default().fg(theme::GREEN()),
+                    components::response::JsonNodeType::Number => Style::default().fg(theme::PEACH()),
+                    components::response::JsonNodeType::Bool => Style::default().fg(theme::MAUVE()),
+                    components::response::JsonNodeType::Null => Style::default().fg(theme::TEXT_DIM()),
+                    components::response::JsonNodeType::Object | components::response::JsonNodeType::Array => Style::default().fg(theme::TEXT_FAINT()),
+                };
+                let bg = if is_cursor { Style::default().bg(theme::BG_HIGHLIGHT()) } else { Style::default() };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {}{}", indent, toggle), bg),
+                    Span::styled(format!("{}", node.key), ks.patch(bg)),
+                    Span::styled(": ", Style::default().fg(theme::TEXT_FAINT()).patch(bg)),
+                    Span::styled(node.value_preview.clone(), vs.patch(bg)),
+                ]));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(" ↑↓", Style::default().fg(theme::PEACH())),
+                Span::styled("=nav  ", Style::default().fg(theme::TEXT_FAINT())),
+                Span::styled("Enter", Style::default().fg(theme::PEACH())),
+                Span::styled("=toggle  ", Style::default().fg(theme::TEXT_FAINT())),
+                Span::styled("E", Style::default().fg(theme::PEACH())),
+                Span::styled("=expand  ", Style::default().fg(theme::TEXT_FAINT())),
+                Span::styled("C", Style::default().fg(theme::PEACH())),
+                Span::styled("=collapse  ", Style::default().fg(theme::TEXT_FAINT())),
+                Span::styled("1-9", Style::default().fg(theme::PEACH())),
+                Span::styled("=depth", Style::default().fg(theme::TEXT_FAINT())),
+            ]));
+        } else if let Some(ref body) = entry.response_body {
+            if body.is_empty() {
+                lines.push(Line::from(Span::styled("  (empty)", Style::default().fg(theme::TEXT_FAINT()))));
+            } else {
+                for line in body.lines() {
+                    lines.push(Line::from(Span::styled(format!("  {}", line), Style::default().fg(theme::TEXT()))));
+                }
+            }
+        } else {
+            lines.push(Line::from(Span::styled("  (no body)", Style::default().fg(theme::TEXT_FAINT()))));
+        }
     }
 
     let scroll = app.history_detail_scroll;
