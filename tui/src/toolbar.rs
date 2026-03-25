@@ -465,7 +465,7 @@ pub fn render_live_capture_popup(frame: &mut Frame, app: &App, area: Rect) {
 
     let (mode_label, mode_style) = match app.live_capture_mode.as_str() {
         "all" => ("All Requests", Style::default().fg(theme::GREEN()).add_modifier(Modifier::BOLD)),
-        "filtered" => ("Filtered", Style::default().fg(theme::PEACH()).add_modifier(Modifier::BOLD)),
+        "filtered" => ("Filtered", Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD)),
         _ => ("Off", Style::default().fg(theme::TEXT_FAINT())),
     };
     lines.push(Line::from(vec![

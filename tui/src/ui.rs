@@ -494,22 +494,29 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     ];
 
     // Right side: OTEL + Live Capture + badges + theme + help
+    let live_active = app.live_capture_mode != "off";
+    let live_connected = app.live_capture_connected;
     let mut right_spans: Vec<Span> = vec![
         // Live capture badge (satellite icon)
         Span::styled(
             "📡",
-            Style::default().fg(match app.live_capture_mode.as_str() {
-                "all" => theme::GREEN(),
-                "filtered" => theme::PEACH(),
-                _ => theme::TEXT_FAINT(),
+            Style::default().fg(if !live_active {
+                theme::TEXT_FAINT()
+            } else if live_connected {
+                if app.live_capture_mode == "all" { theme::GREEN() } else { theme::BLUE() }
+            } else {
+                theme::YELLOW()
             }),
         ),
         Span::styled(
             " EXT ",
-            match app.live_capture_mode.as_str() {
-                "all" => Style::default().fg(theme::BG_DARK()).bg(theme::GREEN()).add_modifier(Modifier::BOLD),
-                "filtered" => Style::default().fg(theme::BG_DARK()).bg(theme::PEACH()).add_modifier(Modifier::BOLD),
-                _ => Style::default().fg(theme::TEXT_FAINT()),
+            if !live_active {
+                Style::default().fg(theme::TEXT_FAINT())
+            } else if live_connected {
+                let bg = if app.live_capture_mode == "all" { theme::GREEN() } else { theme::BLUE() };
+                Style::default().fg(theme::BG_DARK()).bg(bg).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::BG_DARK()).bg(theme::YELLOW()).add_modifier(Modifier::BOLD)
             },
         ),
         Span::raw("  "),

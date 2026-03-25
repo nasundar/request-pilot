@@ -295,6 +295,7 @@ pub struct App {
     pub live_capture_popup_open: bool,
     pub live_capture_count: u64,
     pub live_capture_state: Option<std::sync::Arc<crate::live_capture::LiveCaptureState>>,
+    pub live_capture_file_idx: Option<usize>,
 
     // JSON tree view state (response panel)
     pub json_tree_nodes: Vec<crate::components::response::JsonTreeNode>,
@@ -459,6 +460,7 @@ impl App {
             live_capture_popup_open: false,
             live_capture_count: 0,
             live_capture_state: None,
+            live_capture_file_idx: None,
             json_tree_nodes: Vec::new(),
             json_expanded: HashSet::new(),
             json_cursor: 0,
@@ -796,18 +798,6 @@ impl App {
         }
     }
 
-    pub fn start_live_capture(&mut self) {
-        if self.live_capture_state.is_some() { return; }
-        let state = std::sync::Arc::new(crate::live_capture::LiveCaptureState::new());
-        self.live_capture_state = Some(state.clone());
-        let tx = self.runner_tx();
-        tokio::spawn(async move {
-            if let Err(e) = crate::live_capture::start_server(state, tx).await {
-                log::warn!("Live capture server error: {}", e);
-            }
-        });
-    }
-
     pub fn stop_live_capture(&mut self) {
         if let Some(ref state) = self.live_capture_state {
             let state = state.clone();
@@ -833,17 +823,122 @@ impl App {
             self.set_status("Extension connector: off".to_string());
         } else {
             if self.live_capture_state.is_none() {
-                self.start_live_capture();
+                // Set initial mode before starting server so newly connected
+                // clients receive the correct mode immediately
+                self.start_live_capture_with_mode(new_mode);
+            } else {
+                // Server already running, just update mode
+                if let Some(ref state) = self.live_capture_state {
+                    let state = state.clone();
+                    let mode = new_mode.to_string();
+                    tokio::spawn(async move {
+                        crate::live_capture::set_mode(&state, &mode).await;
+                    });
+                }
             }
-            if let Some(ref state) = self.live_capture_state {
-                let state = state.clone();
-                let mode = new_mode.to_string();
-                tokio::spawn(async move {
-                    crate::live_capture::set_mode(&state, &mode).await;
-                });
-            }
+            // Ensure we have a capture file
+            self.ensure_capture_file();
             let label = if new_mode == "all" { "all requests" } else { "filtered requests" };
             self.set_status(format!("Extension connector: capturing {}", label));
+        }
+    }
+
+    fn start_live_capture_with_mode(&mut self, mode: &str) {
+        if self.live_capture_state.is_some() { return; }
+        let state = std::sync::Arc::new(crate::live_capture::LiveCaptureState::new_with_mode(mode));
+        self.live_capture_state = Some(state.clone());
+        let tx = self.runner_tx();
+        tokio::spawn(async move {
+            if let Err(e) = crate::live_capture::start_server(state, tx).await {
+                log::warn!("Live capture server error: {}", e);
+            }
+        });
+    }
+
+    fn ensure_capture_file(&mut self) {
+        // If we already have a capture file that exists, reuse it
+        if let Some(idx) = self.live_capture_file_idx {
+            if idx < self.loaded_files.len() && self.loaded_files[idx].name == "📡 live-capture.http" {
+                return;
+            }
+        }
+        // Create a new virtual capture file
+        let template = "# Live Capture — requests from browser extension\n\n";
+        let suite = parse_test_suite(template);
+        let file_id = self.next_file_id;
+        self.next_file_id += 1;
+        self.loaded_files.push(LoadedFile {
+            id: file_id,
+            path: None,
+            name: "📡 live-capture.http".to_string(),
+            content: template.to_string(),
+            suite,
+            results: None,
+            expanded: true,
+            group_expanded: HashMap::new(),
+        });
+        let idx = self.loaded_files.len() - 1;
+        self.live_capture_file_idx = Some(idx);
+        self.active_file_idx = Some(idx);
+        self.active_block_idx = None;
+        self.rebuild_tree();
+    }
+
+    pub fn append_captured_request(&mut self, req: &crate::live_capture::CapturedRequest) {
+        self.ensure_capture_file();
+        let idx = match self.live_capture_file_idx {
+            Some(i) if i < self.loaded_files.len() => i,
+            _ => return,
+        };
+
+        // Build .http block from captured request (same logic as desktop)
+        let label = if let Some(pos) = req.url.find("://") {
+            let after = &req.url[pos + 3..];
+            let host_path = after.split('?').next().unwrap_or(after);
+            format!("{} {}", req.method, host_path)
+        } else {
+            format!("{} request", req.method)
+        };
+
+        let mut block = format!("###\n# @name {}\n{} {}\n", label, req.method, req.url);
+
+        // Filter out browser-internal and sensitive headers
+        let skip_prefixes = [":", "sec-ch-", "sec-fetch-"];
+        let skip_names: HashSet<&str> = [
+            "host", "connection", "accept-encoding", "accept-language",
+            "upgrade-insecure-requests", "priority", "pragma", "cache-control",
+            "user-agent", "dnt", "origin", "referer",
+            "authorization", "cookie", "set-cookie", "proxy-authorization",
+            "x-api-key", "x-auth-token",
+        ].into_iter().collect();
+
+        for h in &req.request_headers {
+            let lower = h.name.to_lowercase();
+            if skip_names.contains(lower.as_str()) { continue; }
+            if skip_prefixes.iter().any(|p| lower.starts_with(p)) { continue; }
+            block.push_str(&format!("{}: {}\n", h.name, h.value));
+        }
+
+        if let Some(ref body) = req.request_body {
+            if !body.is_empty() {
+                block.push_str(&format!("\n{}\n", body));
+            }
+        }
+        block.push('\n');
+
+        // Append to file content and re-parse
+        {
+            let file = &mut self.loaded_files[idx];
+            file.content.push_str(&block);
+            file.suite = parse_test_suite(&file.content);
+        }
+        self.rebuild_tree();
+
+        // Select the newly added block
+        let block_count = self.loaded_files[idx].suite.blocks.len();
+        if block_count > 0 {
+            self.active_file_idx = Some(idx);
+            self.active_block_idx = Some(block_count - 1);
         }
     }
 
@@ -1435,7 +1530,9 @@ impl App {
                     RunnerMessage::LiveCaptureRequest(req) => {
                         self.live_capture_count += 1;
                         log::info!("Captured: {} {}", req.method, req.url);
-                        self.set_status(format!("📡 Captured: {} {} (total: {})", req.method, req.url, self.live_capture_count));
+                        let summary = format!("📡 {} {} (total: {})", req.method, req.url, self.live_capture_count);
+                        self.append_captured_request(&req);
+                        self.set_status(summary);
                     }
                     RunnerMessage::LiveCaptureStatus { connected } => {
                         self.live_capture_connected = connected;

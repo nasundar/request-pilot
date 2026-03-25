@@ -86,6 +86,18 @@ impl LiveCaptureState {
             request_count: Mutex::new(0),
         }
     }
+
+    pub fn new_with_mode(mode: &str) -> Self {
+        let (command_tx, _) = broadcast::channel(64);
+        Self {
+            mode: Mutex::new(mode.to_string()),
+            command_tx,
+            running: Mutex::new(false),
+            connected: Mutex::new(false),
+            shutdown: Notify::new(),
+            request_count: Mutex::new(0),
+        }
+    }
 }
 
 /// Start the WebSocket server. Returns when the server is shut down.
