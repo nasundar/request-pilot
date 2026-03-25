@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use crate::app::{App, LogEntry, LogFilter, LogLevel};
+use crate::app::{App, Focus, LogEntry, LogFilter, LogLevel, Mode};
 use crate::ui::theme;
 
 const MAX_LOG_ENTRIES: usize = 2000;
@@ -212,6 +212,10 @@ fn render_log_entries(frame: &mut Frame, app: &App, area: Rect) {
 
 pub fn handle_logs_keys(app: &mut App, key: KeyEvent) {
     match key.code {
+        KeyCode::Esc => {
+            app.mode = Mode::Files;
+            app.focus = Focus::FileTree;
+        }
         KeyCode::Down | KeyCode::Char('j') => {
             app.log_auto_scroll = false;
             app.log_scroll = app.log_scroll.saturating_add(1);

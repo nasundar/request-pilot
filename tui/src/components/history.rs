@@ -7,7 +7,7 @@ use ratatui::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::BTreeMap;
-use crate::app::{App, Focus, InputMode, InputPurpose, ConfirmPurpose, HistoryGroupBy, HistoryPopup};
+use crate::app::{App, Focus, InputMode, InputPurpose, ConfirmPurpose, HistoryGroupBy, HistoryPopup, Mode};
 use crate::ui::theme;
 use request_pilot_core::history::{HistoryEntry, HistoryFilter};
 
@@ -393,6 +393,10 @@ pub fn handle_history_popup_keys(app: &mut App, key: KeyEvent) {
 pub fn handle_history_keys(app: &mut App, key: KeyEvent) {
     match app.focus {
         Focus::HistoryList => match key.code {
+            KeyCode::Esc => {
+                app.mode = Mode::Files;
+                app.focus = Focus::FileTree;
+            }
             KeyCode::Up | KeyCode::Char('k') => { app.history_cursor = app.history_cursor.saturating_sub(1); }
             KeyCode::Down | KeyCode::Char('j') => {
                 let max = display_row_count(app).saturating_sub(1);

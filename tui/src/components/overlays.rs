@@ -12,8 +12,8 @@ pub fn render_help_popup(frame: &mut Frame, area: Rect) {
     let w = area.width.saturating_sub(4);
     let h = area.height.saturating_sub(4);
     if w < 10 || h < 3 { return; }
-    let popup_width = 60.min(w);
-    let popup_height = 38.min(h);
+    let popup_width = 64.min(w);
+    let popup_height = 70.min(h);
     let x = (area.width - popup_width) / 2;
     let y = (area.height - popup_height) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -69,6 +69,30 @@ pub fn render_help_popup(frame: &mut Frame, area: Rect) {
         Line::from(vec![Span::styled("T             ", kb), Span::styled("Cycle theme", Style::default().fg(theme::TEXT()))]),
         Line::from(vec![Span::styled("?             ", kb), Span::styled("Toggle help", Style::default().fg(theme::TEXT()))]),
         Line::from(vec![Span::styled("q             ", kb), Span::styled("Quit", Style::default().fg(theme::TEXT()))]),
+        Line::from(""),
+        Line::from(Span::styled("\u{2501}\u{2501}\u{2501} Azure Auto Auth \u{2501}\u{2501}\u{2501}", Style::default().fg(theme::PEACH()))),
+        Line::from(Span::styled("Ctrl+A opens the Azure auth popup.", Style::default().fg(theme::TEXT()))),
+        Line::from(""),
+        Line::from(Span::styled("How it works:", Style::default().fg(theme::TEXT()))),
+        Line::from(Span::styled("  1. .http files can have @setup blocks with:", Style::default().fg(theme::TEXT()))),
+        Line::from(Span::styled("     # @mode app", Style::default().fg(theme::TEXT()))),
+        Line::from(Span::styled("     # @dev_auth https://management.azure.com/.default", Style::default().fg(theme::TEXT()))),
+        Line::from(""),
+        Line::from(Span::styled("  2. When dev mode is ON (toggle in Azure popup):", Style::default().fg(theme::TEXT()))),
+        Line::from(Span::styled("     - @mode app blocks are SKIPPED", Style::default().fg(theme::TEXT()))),
+        Line::from(Span::styled("     - The app authenticates YOU via Azure CLI", Style::default().fg(theme::TEXT()))),
+        Line::from(Span::styled("     - Uses: az account get-access-token --scope <scope>", Style::default().fg(theme::TEXT()))),
+        Line::from(Span::styled("     - Token injected into @extract variable", Style::default().fg(theme::TEXT()))),
+        Line::from(""),
+        Line::from(Span::styled("  3. Prerequisites:", Style::default().fg(theme::TEXT()))),
+        Line::from(Span::styled("     - Azure CLI installed (az command available)", Style::default().fg(theme::TEXT()))),
+        Line::from(Span::styled("     - Logged in: az login", Style::default().fg(theme::TEXT()))),
+        Line::from(Span::styled("     - Correct subscription: az account set -s <sub>", Style::default().fg(theme::TEXT()))),
+        Line::from(""),
+        Line::from(Span::styled("  4. In the Azure popup (Ctrl+A):", Style::default().fg(theme::TEXT()))),
+        Line::from(Span::styled("     - Toggle dev mode on/off", Style::default().fg(theme::TEXT()))),
+        Line::from(Span::styled("     - See current auth status", Style::default().fg(theme::TEXT()))),
+        Line::from(Span::styled("     - Token auto-refreshes before expiry", Style::default().fg(theme::TEXT()))),
     ];
 
     let block = Block::default()
