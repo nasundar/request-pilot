@@ -36,7 +36,7 @@ pub struct JsonTreeNode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContentKind {
+pub(crate) enum ContentKind {
     Json,
     Xml,
     Html,
@@ -44,7 +44,7 @@ enum ContentKind {
     Text,
 }
 
-fn detect_content_kind(headers: &[(String, String)], body: &str) -> ContentKind {
+pub(crate) fn detect_content_kind(headers: &[(String, String)], body: &str) -> ContentKind {
     let ct = headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))

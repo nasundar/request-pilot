@@ -3,6 +3,8 @@ mod code_editor;
 mod components;
 mod events;
 mod toolbar;
+#[cfg(test)]
+mod tests;
 mod ui;
 
 use app::App;

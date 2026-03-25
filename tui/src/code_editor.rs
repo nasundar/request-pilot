@@ -460,8 +460,8 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
                 let off = line_col_to_offset(
                     &app.code_editor_content, app.code_editor_cursor_line, app.code_editor_cursor_col,
                 );
-                if off > 0 {
-                    app.code_editor_content.remove(off - 1);
+                if let Some((prev_off, _)) = app.code_editor_content[..off].char_indices().last() {
+                    app.code_editor_content.remove(prev_off);
                     app.code_editor_cursor_col -= 1;
                     app.code_editor_modified = true;
                 }

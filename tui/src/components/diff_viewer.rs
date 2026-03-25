@@ -65,7 +65,7 @@ pub struct DiffViewerData {
 // LCS-based line diff
 // ---------------------------------------------------------------------------
 
-fn compute_line_diff(a: &[&str], b: &[&str]) -> Vec<DiffLine> {
+pub(crate) fn compute_line_diff(a: &[&str], b: &[&str]) -> Vec<DiffLine> {
     let n = a.len();
     let m = b.len();
 

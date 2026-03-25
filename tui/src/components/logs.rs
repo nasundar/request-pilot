@@ -36,7 +36,7 @@ fn level_badge(level: &LogLevel) -> &'static str {
     }
 }
 
-fn matches_filter(entry: &LogEntry, filter: &LogFilter) -> bool {
+pub(crate) fn matches_filter(entry: &LogEntry, filter: &LogFilter) -> bool {
     match filter {
         LogFilter::All => true,
         LogFilter::Debug => true,
