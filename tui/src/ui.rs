@@ -314,9 +314,9 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
     // Block-letter title — each row is exactly the same char width
     let c_title = Color::Rgb(120, 170, 255);
     let title_art: Vec<Vec<ArtSpan>> = vec![
-        vec![("█▀▀▄ █▀▀ █▀▀█ █ █ █▀▀ █▀▀ ▀█▀  █▀▀▄ █ █   █▀▀█ ▀█▀", c_title, true)],
-        vec![("█▄▄▀ █▀▀ █ ▄▄ █ █ █▀▀ ▀▀█  █   █▀▀▄ █ █   █  █  █ ", c_title, true)],
-        vec![("█  █ ▀▀▀  ▀▀▀  ▀▀ ▀▀▀ ▀▀▀  ▀   █▀▀  █ ▀▀▀ ▀▀▀▀  ▀ ", c_title, true)],
+        vec![("█▀▀▄ █▀▀▀ █▀▀█ █  █ █▀▀▀ ▄▀▀▄ ▀██▀   █▀▀▄ ▐██▌ █    ▄▀▀▄ ▀██▀", c_title, true)],
+        vec![("█▄▄▀ █▀▀  █ ▀█ █  █ █▀▀   ▀▀▄  ██    █▄▄▀ ▐██▌ █    █  █  ██ ", c_title, true)],
+        vec![("█  █ ▀▀▀▀  ▀▀▄  ▀▀  ▀▀▀▀ ▀▀▀   ▀▀    █    ▐██▌ ▀▀▀▀  ▀▀   ▀▀ ", c_title, true)],
     ];
     let title_h = title_art.len() as i32;
 
