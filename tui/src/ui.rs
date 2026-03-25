@@ -263,7 +263,6 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
     let c_body  = Color::Rgb(200, 210, 230);
     let c_nose  = Color::Rgb(230, 240, 255);
     let c_win   = Color::Rgb(100, 180, 255);
-    let c_win_open = Color::Rgb(255, 220, 100); // warm glow when door opens
     let c_fin   = Color::Rgb(140, 160, 190);
     let c_fire1 = Color::Rgb(255, 180, 50);
     let c_fire2 = Color::Rgb(255, 100, 30);
@@ -272,31 +271,13 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
     let c_trail = Color::Rgb(180, 120, 50);
     let c_bg    = Color::Rgb(15, 17, 25);
 
-    // Rocket with window closed
-    let rocket_closed: Vec<Vec<ArtSpan>> = vec![
+    let rocket: Vec<Vec<ArtSpan>> = vec![
         vec![("  ▄▀▀▄", c_nose, true)],
         vec![(" ▐", c_body, false), ("▓▓▓▓", c_nose, true), ("▌", c_body, false)],
         vec![(" ▐", c_body, false), ("████", c_body, true), ("▌", c_body, false)],
         vec![(" ▐", c_body, false), ("█", c_body, true), ("▄▄", c_win, true), ("█", c_body, true), ("▌", c_body, false)],
         vec![(" ▐", c_body, false), ("█", c_body, true), ("██", c_win, true), ("█", c_body, true), ("▌", c_body, false)],
         vec![(" ▐", c_body, false), ("█", c_body, true), ("▀▀", c_win, true), ("█", c_body, true), ("▌", c_body, false)],
-        vec![(" ▐", c_body, false), ("████", c_body, true), ("▌", c_body, false)],
-        vec![(" ▐", c_body, false), ("████", c_body, true), ("▌", c_body, false)],
-        vec![("▟", c_fin, true), ("█████", c_body, true), ("▙", c_fin, true)],
-        vec![("▟", c_fin, true), ("██", c_fin, false), ("███", c_body, true), ("██", c_fin, false), ("▙", c_fin, true)],
-        vec![("███", c_fin, false), (" ▐█▌ ", c_body, true), ("███", c_fin, false)],
-        vec![("▀▀▀", c_fin, false), (" ▐", c_body, false), ("██", c_body, true), ("▌ ", c_body, false), ("▀▀▀", c_fin, false)],
-        vec![("    ▐", c_body, false), ("██", c_body, true), ("▌", c_body, false)],
-    ];
-
-    // Rocket with window open (glowing)
-    let rocket_open: Vec<Vec<ArtSpan>> = vec![
-        vec![("  ▄▀▀▄", c_nose, true)],
-        vec![(" ▐", c_body, false), ("▓▓▓▓", c_nose, true), ("▌", c_body, false)],
-        vec![(" ▐", c_body, false), ("████", c_body, true), ("▌", c_body, false)],
-        vec![(" ▐", c_body, false), ("█", c_body, true), ("▄▄", c_win_open, true), ("█", c_body, true), ("▌", c_body, false)],
-        vec![(" ▐", c_body, false), ("█", c_body, true), ("░░", c_win_open, true), ("█", c_body, true), ("▌", c_body, false)],
-        vec![(" ▐", c_body, false), ("█", c_body, true), ("▀▀", c_win_open, true), ("█", c_body, true), ("▌", c_body, false)],
         vec![(" ▐", c_body, false), ("████", c_body, true), ("▌", c_body, false)],
         vec![(" ▐", c_body, false), ("████", c_body, true), ("▌", c_body, false)],
         vec![("▟", c_fin, true), ("█████", c_body, true), ("▙", c_fin, true)],
@@ -313,7 +294,6 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
             vec![("   ", c_fire3, false), ("▒▓██▓▒", c_fire2, true)],
             vec![("    ", c_fire3, false), ("░▒▓▒░", c_fire3, false)],
             vec![("     ", c_smoke, false), ("·▪·", c_trail, false)],
-            vec![("      ", c_smoke, false), ("·", c_smoke, false)],
         ],
         vec![
             vec![("   ▗", c_fire1, true), ("▄██▄", c_fire1, true), ("▖", c_fire1, true)],
@@ -321,7 +301,6 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
             vec![("  ", c_fire2, false), ("▒▓████▓▒", c_fire2, true)],
             vec![("   ", c_fire3, false), ("░▒▓██▓▒░", c_fire3, false)],
             vec![("     ", c_smoke, false), ("░▒▒░", c_trail, false)],
-            vec![("      ", c_smoke, false), ("·▪·", c_smoke, false)],
         ],
         vec![
             vec![("   ▗", c_fire1, true), ("▄██▄", c_fire1, true), ("▖", c_fire1, true)],
@@ -329,36 +308,35 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
             vec![("  ", c_fire2, false), ("░▓████▓░", c_fire2, true)],
             vec![("   ", c_fire3, false), ("░▒▓██▓▒░", c_fire3, false)],
             vec![("     ", c_smoke, false), ("·▪▪·", c_smoke, false)],
-            vec![("      ", c_smoke, false), ("··", c_smoke, false)],
         ],
     ];
 
-    // Smaller exhaust for idle/settling
-    let exhaust_idle: Vec<Vec<ArtSpan>> = vec![
-        vec![("    ", c_smoke, false), ("░▒▒░", c_trail, false)],
-        vec![("     ", c_smoke, false), ("·▪·", c_smoke, false)],
-    ];
-
-    // Unicode block-letter title — 3 rows tall
+    // Block-letter title — each row is exactly the same char width
     let c_title = Color::Rgb(120, 170, 255);
     let title_art: Vec<Vec<ArtSpan>> = vec![
-        vec![("█▀▀▄ █▀▀ █▀▀█ █ █ █▀▀ █▀▀ ▀█▀   █▀▀▄ ▀█▀ █   █▀▀█ ▀█▀", c_title, true)],
-        vec![("█▄▄▀ █▀▀ █ ▄▄ █ █ █▀▀ ▀▀█  █    █▀▀  █  █   █  █  █ ", c_title, true)],
-        vec![("█  █ ▀▀▀  ▀▀▀  ▀▀  ▀▀▀ ▀▀▀  ▀    █    ▀▀▀ ▀▀▀ ▀▀▀▀  ▀ ", c_title, true)],
+        vec![("█▀▀▄ █▀▀ █▀▀█ █ █ █▀▀ █▀▀ ▀█▀  █▀▀▄ █ █   █▀▀█ ▀█▀", c_title, true)],
+        vec![("█▄▄▀ █▀▀ █ ▄▄ █ █ █▀▀ ▀▀█  █   █▀▀▄ █ █   █  █  █ ", c_title, true)],
+        vec![("█  █ ▀▀▀  ▀▀▀  ▀▀ ▀▀▀ ▀▀▀  ▀   █▀▀  █ ▀▀▀ ▀▀▀▀  ▀ ", c_title, true)],
     ];
     let title_h = title_art.len() as i32;
+
     let tagline = "Wishing you safe passage across all endpoints ✦";
     let version = env!("CARGO_PKG_VERSION");
     let ver_line = format!("v{}", version);
 
     let area = terminal.size()?;
-    let rocket_h = rocket_closed.len() as i32;
-    let text_landing_y_offset = rocket_h + 3; // where text lands below rocket
-
-    // Center Y for the rocket (text will be below)
-    let center_y = (area.height as i32 - (rocket_h + text_landing_y_offset + title_h + 5)) / 2;
-    let start_y = area.height as i32 + 5; // off-screen bottom
+    let rocket_h = rocket.len() as i32;
+    let exhaust_h = 5i32;
+    // Total height: rocket + exhaust + gap + title(3) + gap + tagline + version
+    let total_h = rocket_h + exhaust_h + 2 + title_h + 1 + 2;
+    let center_y = (area.height as i32 - total_h) / 2;
+    let start_y = area.height as i32 + 5;
     let frame_ms = 50u64;
+
+    // Text positions relative to rocket top
+    let title_y_off = rocket_h + exhaust_h + 2;
+    let tag_y_off = title_y_off + title_h + 1;
+    let ver_y_off = tag_y_off + 1;
 
     let render_art = |frame: &mut Frame, art: &[Vec<ArtSpan>], base_y: i32, area: Rect| {
         for (i, spans_def) in art.iter().enumerate() {
@@ -389,7 +367,7 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
         );
     };
 
-    // ── Phase 1: Fly up (40 frames = 2s) ──
+    // ── Phase 1: Fly up with everything together (40 frames = 2s) ──
     for fi in 0..40u32 {
         let t = fi as f64 / 40.0;
         let eased = 1.0 - (1.0 - t).powi(3);
@@ -399,107 +377,30 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
         terminal.draw(|frame| {
             let a = frame.area();
             frame.render_widget(Paragraph::new("").style(Style::default().bg(c_bg)), a);
-            render_art(frame, &rocket_closed, ry, a);
+            render_art(frame, &rocket, ry, a);
             render_art(frame, &exhaust[exi], ry + rocket_h, a);
+            render_art(frame, &title_art, ry + title_y_off, a);
+            render_text_at(frame, tagline, ry + tag_y_off, Color::Rgb(140, 150, 170), false, a);
+            render_text_at(frame, &ver_line, ry + ver_y_off, Color::Rgb(60, 65, 80), false, a);
         })?;
         tokio::time::sleep(std::time::Duration::from_millis(frame_ms)).await;
     }
 
-    // ── Phase 2: Settle + door opens (15 frames = 0.75s) ──
-    for fi in 0..15u32 {
-        let t = fi as f64 / 15.0;
-        // Use open rocket after halfway
-        let rocket = if t > 0.4 { &rocket_open } else { &rocket_closed };
-        // Exhaust fades out
-        let show_exhaust = t < 0.6;
+    // ── Phase 2: Hold with cycling exhaust (40 frames = 2s) ──
+    for fi in 0..40u32 {
+        let exi = fi as usize % exhaust.len();
 
         terminal.draw(|frame| {
             let a = frame.area();
             frame.render_widget(Paragraph::new("").style(Style::default().bg(c_bg)), a);
-            render_art(frame, rocket, center_y, a);
-            if show_exhaust {
-                render_art(frame, &exhaust_idle, center_y + rocket_h, a);
-            }
+            render_art(frame, &rocket, center_y, a);
+            render_art(frame, &exhaust[exi], center_y + rocket_h, a);
+            render_art(frame, &title_art, center_y + title_y_off, a);
+            render_text_at(frame, tagline, center_y + tag_y_off, Color::Rgb(140, 150, 170), false, a);
+            render_text_at(frame, &ver_line, center_y + ver_y_off, Color::Rgb(60, 65, 80), false, a);
         })?;
         tokio::time::sleep(std::time::Duration::from_millis(frame_ms)).await;
     }
-
-    // ── Phase 3: Text flies out from window and lands below (30 frames = 1.5s) ──
-    let window_y = center_y + 4;
-    let title_land_y = center_y + text_landing_y_offset;
-    let tag_land_y = title_land_y + title_h + 1;
-    let ver_land_y = tag_land_y + 1;
-
-    for fi in 0..30u32 {
-        let t = fi as f64 / 30.0;
-
-        let title_t = (t * 1.8).min(1.0);
-        let tag_t = ((t - 0.2).max(0.0) * 2.0).min(1.0);
-        let ver_t = ((t - 0.35).max(0.0) * 2.0).min(1.0);
-
-        let ease = |tt: f64| -> f64 { 1.0 - (1.0 - tt).powi(3) };
-
-        let ty = window_y + ((title_land_y - window_y) as f64 * ease(title_t)) as i32;
-        let tgy = window_y + ((tag_land_y - window_y) as f64 * ease(tag_t)) as i32;
-        let vy = window_y + ((ver_land_y - window_y) as f64 * ease(ver_t)) as i32;
-
-        let title_alpha = title_t.min(1.0);
-        let tag_alpha = tag_t.min(1.0);
-        let ver_alpha = ver_t.min(1.0);
-
-        let glow = if t < 0.5 { 1.0 } else { 1.0 - ((t - 0.5) * 2.0).min(1.0) * 0.7 };
-
-        terminal.draw(|frame| {
-            let a = frame.area();
-            frame.render_widget(Paragraph::new("").style(Style::default().bg(c_bg)), a);
-
-            let win_color = Color::Rgb(
-                (255.0 * glow) as u8,
-                (220.0 * glow + 80.0 * (1.0 - glow)) as u8,
-                (100.0 * glow + 200.0 * (1.0 - glow)) as u8,
-            );
-            let mut rocket_frame = rocket_open.clone();
-            rocket_frame[3] = vec![(" ▐", c_body, false), ("█", c_body, true), ("▄▄", win_color, true), ("█", c_body, true), ("▌", c_body, false)];
-            rocket_frame[4] = vec![(" ▐", c_body, false), ("█", c_body, true), ("░░", win_color, true), ("█", c_body, true), ("▌", c_body, false)];
-            rocket_frame[5] = vec![(" ▐", c_body, false), ("█", c_body, true), ("▀▀", win_color, true), ("█", c_body, true), ("▌", c_body, false)];
-            render_art(frame, &rocket_frame, center_y, a);
-
-            // Title art flying down
-            if title_t > 0.0 {
-                let tc = Color::Rgb(
-                    (120.0 * title_alpha) as u8,
-                    (170.0 * title_alpha) as u8,
-                    (200.0 + 55.0 * title_alpha) as u8,
-                );
-                let alpha_art: Vec<Vec<ArtSpan>> = title_art.iter().map(|line| {
-                    line.iter().map(|(text, _, bold)| (*text, tc, *bold)).collect()
-                }).collect();
-                render_art(frame, &alpha_art, ty, a);
-            }
-            if tag_t > 0.0 {
-                render_text_at(frame, tagline, tgy, Color::Rgb(
-                    (140.0 * tag_alpha) as u8, (150.0 * tag_alpha) as u8, (170.0 * tag_alpha) as u8
-                ), false, a);
-            }
-            if ver_t > 0.0 {
-                render_text_at(frame, &ver_line, vy, Color::Rgb(
-                    (60.0 * ver_alpha) as u8, (65.0 * ver_alpha) as u8, (80.0 * ver_alpha) as u8
-                ), false, a);
-            }
-        })?;
-        tokio::time::sleep(std::time::Duration::from_millis(frame_ms)).await;
-    }
-
-    // ── Phase 4: Hold final frame (1s) ──
-    terminal.draw(|frame| {
-        let a = frame.area();
-        frame.render_widget(Paragraph::new("").style(Style::default().bg(c_bg)), a);
-        render_art(frame, &rocket_closed, center_y, a);
-        render_art(frame, &title_art, title_land_y, a);
-        render_text_at(frame, tagline, tag_land_y, Color::Rgb(140, 150, 170), false, a);
-        render_text_at(frame, &ver_line, ver_land_y, Color::Rgb(60, 65, 80), false, a);
-    })?;
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     Ok(())
 }
