@@ -331,6 +331,9 @@ pub struct App {
     pub editor_goto_active: bool,
     pub editor_goto_buffer: String,
 
+    // Selection state for code editor (line, col)
+    pub editor_selection_anchor: Option<(usize, usize)>,
+
     // Channel receiver (set up in run())
     runner_rx: Option<mpsc::UnboundedReceiver<RunnerMessage>>,
     runner_tx: mpsc::UnboundedSender<RunnerMessage>,
@@ -420,6 +423,7 @@ impl App {
             editor_search_idx: 0,
             editor_goto_active: false,
             editor_goto_buffer: String::new(),
+            editor_selection_anchor: None,
             runner_rx: Some(rx),
             runner_tx: tx,
             next_file_id: 0,
@@ -427,18 +431,29 @@ impl App {
     }
 
     pub fn load_env(&mut self, path: &Path) -> color_eyre::Result<()> {
+        let path = if path.is_relative() {
+            std::env::current_dir()?.join(path)
+        } else {
+            path.to_path_buf()
+        };
         let path_str = path.to_string_lossy().to_string();
         let vars = request_pilot_core::env_file::read_env_from_path(&path_str)
             .map_err(|e| color_eyre::eyre::eyre!(e))?;
         for (k, v) in vars {
             self.env_vars.insert(k, v);
         }
-        self.env_path = Some(path.to_path_buf());
+        self.env_path = Some(path.clone());
         self.set_status(format!("Loaded env: {}", path.display()));
         Ok(())
     }
 
     pub fn load_file(&mut self, path: &Path) -> color_eyre::Result<()> {
+        let path = if path.is_relative() {
+            std::env::current_dir()?.join(path)
+        } else {
+            path.to_path_buf()
+        };
+        let path = path.as_path();
         let content = std::fs::read_to_string(path)?;
         let suite = parse_test_suite(&content);
         let name = path.file_name()
