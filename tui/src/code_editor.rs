@@ -5,7 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Clear, Paragraph},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::{App, Mode, Focus};
@@ -259,7 +259,9 @@ fn find_active_block_range(lines: &[&str], cursor_line: usize) -> Option<(usize,
 
 pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
     let content = &app.code_editor_content;
-    let raw_lines: Vec<&str> = content.split('\n').collect();
+    // Strip \r for consistent rendering on Windows (\r\n → \n)
+    let clean: String = content.replace('\r', "");
+    let raw_lines: Vec<&str> = clean.split('\n').collect();
     let total_lines = raw_lines.len();
     let gutter_width: u16 = (total_lines.to_string().len() as u16).max(3) + 1;
     let has_search_bar = app.editor_search_active
@@ -456,6 +458,8 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
         width: area.width,
         height: area.height.saturating_sub(chrome_rows),
     };
+    // Clear the content area to remove any ghost content from previous frames
+    frame.render_widget(Clear, content_area);
     frame.render_widget(
         Paragraph::new(display_lines).style(Style::default().bg(theme::BG_DARK())),
         content_area,
