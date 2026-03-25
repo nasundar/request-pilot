@@ -174,12 +174,14 @@ pub enum RunnerMessage {
     BlockComplete(BlockProgress),
     SuiteComplete {
         file_idx: usize,
+        file_id: u64,
         results: TestRunResults,
     },
 }
 
 /// A loaded .http file with parsed suite and optional results.
 pub struct LoadedFile {
+    pub id: u64,
     pub path: Option<PathBuf>,
     pub name: String,
     pub content: String,
@@ -318,6 +320,7 @@ pub struct App {
     // Channel receiver (set up in run())
     runner_rx: Option<mpsc::UnboundedReceiver<RunnerMessage>>,
     runner_tx: mpsc::UnboundedSender<RunnerMessage>,
+    next_file_id: u64,
 }
 
 impl App {
@@ -395,6 +398,7 @@ impl App {
             log_auto_scroll: true,
             runner_rx: Some(rx),
             runner_tx: tx,
+            next_file_id: 0,
         }
     }
 
@@ -423,7 +427,10 @@ impl App {
             }
         }
 
+        let file_id = self.next_file_id;
+        self.next_file_id += 1;
         self.loaded_files.push(LoadedFile {
+            id: file_id,
             path: Some(path.to_path_buf()),
             name,
             content,
@@ -478,7 +485,8 @@ impl App {
     }
 
     /// Record block results into history.
-    fn record_history(&mut self, results: &TestRunResults) {
+    fn record_history(&mut self, file_idx: usize, results: &TestRunResults) {
+        let file_name = self.loaded_files.get(file_idx).map(|f| f.name.clone());
         let run_id = request_pilot_core::uuid::Uuid::new_v4().to_string();
         for br in &results.block_results {
             // For compare blocks, record each step as a separate history entry
@@ -491,7 +499,7 @@ impl App {
                             id: request_pilot_core::uuid::Uuid::new_v4().to_string(),
                             run_id: Some(run_id.clone()),
                             source: "tui".to_string(),
-                            file_name: None,
+                            file_name: file_name.clone(),
                             group: br.group.clone(),
                             block_name: Some(br.name.clone()),
                             compare_step: Some(step.name.clone()),
@@ -517,7 +525,7 @@ impl App {
                     id: request_pilot_core::uuid::Uuid::new_v4().to_string(),
                     run_id: Some(run_id.clone()),
                     source: "tui".to_string(),
-                    file_name: None,
+                    file_name: file_name.clone(),
                     group: br.group.clone(),
                     block_name: Some(br.name.clone()),
                     compare_step: None,
@@ -591,7 +599,10 @@ impl App {
     pub fn new_file(&mut self) {
         let template = "### New Request\n\n# @name Example Request\n# @type test\nGET https://httpbin.org/get\nContent-Type: application/json\n";
         let suite = parse_test_suite(template);
+        let file_id = self.next_file_id;
+        self.next_file_id += 1;
         self.loaded_files.push(LoadedFile {
+            id: file_id,
             path: None,
             name: "untitled.http".to_string(),
             content: template.to_string(),
@@ -816,6 +827,7 @@ impl App {
         self.progress_total = self.loaded_files[fi].suite.blocks.len();
         self.spinner_tick = 0;
 
+        let fid = self.loaded_files[fi].id;
         let suite = self.loaded_files[fi].suite.clone();
         let extra_vars: Vec<(String, String)> = self.env_vars.iter()
             .map(|(k, v)| (k.clone(), v.clone())).collect();
@@ -826,7 +838,7 @@ impl App {
             let results = request_pilot_core::test_runner::run_suite(
                 &suite, &extra_vars, Some(handler), None,
             ).await;
-            let _ = tx.send(RunnerMessage::SuiteComplete { file_idx: fi, results });
+            let _ = tx.send(RunnerMessage::SuiteComplete { file_idx: fi, file_id: fid, results });
         });
         self.set_status("Running all tests...".to_string());
     }
@@ -840,11 +852,11 @@ impl App {
                     ..Default::default()
                 };
                 let total_blocks = file.suite.blocks.len();
-                (single_suite, block.name.clone(), total_blocks)
+                (single_suite, block.name.clone(), total_blocks, file.id)
             })
         });
 
-        if let Some((single_suite, block_name, total_blocks)) = suite_data {
+        if let Some((single_suite, block_name, total_blocks, fid)) = suite_data {
             self.is_running = true;
             self.progress_current = 0;
             self.progress_total = 1;
@@ -896,7 +908,7 @@ impl App {
                     }
                 }
                 let _ = tx.send(RunnerMessage::SuiteComplete {
-                    file_idx: fi, results: full_results,
+                    file_idx: fi, file_id: fid, results: full_results,
                 });
             });
         }
@@ -913,10 +925,10 @@ impl App {
                 ..Default::default()
             };
             let total_blocks = file.suite.blocks.len();
-            (group_suite, total_blocks)
+            (group_suite, total_blocks, file.id)
         });
 
-        if let Some((group_suite, total_blocks)) = suite_data {
+        if let Some((group_suite, total_blocks, fid)) = suite_data {
             if group_suite.blocks.is_empty() { return; }
             self.is_running = true;
             self.progress_current = 0;
@@ -972,7 +984,7 @@ impl App {
                     telemetry: None,
                 };
                 let _ = tx.send(RunnerMessage::SuiteComplete {
-                    file_idx: fi, results: full_results,
+                    file_idx: fi, file_id: fid, results: full_results,
                 });
             });
         }
@@ -1010,23 +1022,27 @@ impl App {
                             icon, progress.name, self.progress_current, self.progress_total
                         ));
                     }
-                    RunnerMessage::SuiteComplete { file_idx, results } => {
-                        self.record_history(&results);
-                        if let Some(file) = self.loaded_files.get_mut(file_idx) {
-                            file.results = Some(results);
-                        }
-                        self.is_running = false;
-                        self.progress_current = 0;
-                        self.progress_total = 0;
+                    RunnerMessage::SuiteComplete { file_idx, file_id, results } => {
+                        let resolved_idx = if self.loaded_files.get(file_idx).map_or(false, |f| f.id == file_id) {
+                            Some(file_idx)
+                        } else {
+                            self.loaded_files.iter().position(|f| f.id == file_id)
+                        };
 
-                        if let Some(file) = self.loaded_files.get(file_idx) {
-                            if let Some(ref r) = file.results {
+                        if let Some(idx) = resolved_idx {
+                            self.record_history(idx, &results);
+                            self.loaded_files[idx].results = Some(results);
+
+                            if let Some(ref r) = self.loaded_files[idx].results {
                                 self.set_status(format!(
                                     "\u{2713} {} passed  \u{2717} {} failed  \u{2298} {} skipped  \u{00b7} {}ms",
                                     r.passed, r.failed, r.skipped, r.total_time_ms
                                 ));
                             }
                         }
+                        self.is_running = false;
+                        self.progress_current = 0;
+                        self.progress_total = 0;
                     }
                 }
             }
