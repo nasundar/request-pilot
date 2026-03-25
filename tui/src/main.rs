@@ -12,9 +12,21 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "request-pilot", about = "Request Pilot — HTTP testing from the terminal")]
+#[command(
+    name = "request-pilot",
+    about = "Request Pilot — HTTP testing from the terminal",
+    long_about = "Request Pilot — HTTP testing from the terminal\n\n\
+        Load .http test files, attach environment variables, and run API tests \
+        with an interactive TUI.\n\n\
+        Examples:\n  \
+        request-pilot --file tests/api.http\n  \
+        request-pilot -f api.http -f auth.http --env .env\n  \
+        request-pilot -f suite.http -e prod.env --run",
+    after_help = "Use Ctrl+O to open files interactively, or pass them via --file."
+)]
 struct Cli {
-    /// .http file(s) to load on startup
+    /// .http test file(s) to load on startup (repeatable)
+    #[arg(short, long = "file", value_name = "FILE", num_args = 1)]
     files: Vec<PathBuf>,
 
     /// .env file to load variables from
