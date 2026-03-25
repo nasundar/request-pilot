@@ -348,7 +348,7 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(if app.otel_enabled { theme::SKY() } else { theme::TEXT_FAINT() }),
         ),
         Span::styled(
-            "OTEL",
+            " OTEL ",
             if app.otel_enabled {
                 Style::default().fg(theme::BG_DARK()).bg(theme::PEACH()).add_modifier(Modifier::BOLD)
             } else {

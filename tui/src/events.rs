@@ -72,10 +72,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Down if is_ctrl => {
                 app.history_detail_scroll = app.history_detail_scroll.saturating_add(5);
             }
+            // Ctrl+U/D for half-page scroll
+            KeyCode::Char('u') if is_ctrl => {
+                app.history_detail_scroll = app.history_detail_scroll.saturating_sub(10);
+            }
+            KeyCode::Char('d') if is_ctrl => {
+                app.history_detail_scroll = app.history_detail_scroll.saturating_add(10);
+            }
             // Up/Down for JSON tree cursor navigation (response tab with JSON) or scroll
             KeyCode::Up | KeyCode::Char('k') => {
                 if app.history_detail_tab == 1 && !app.history_json_nodes.is_empty() {
                     app.history_json_cursor = app.history_json_cursor.saturating_sub(1);
+                    history_auto_scroll(app);
                 } else {
                     app.history_detail_scroll = app.history_detail_scroll.saturating_sub(1);
                 }
@@ -86,6 +94,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     if app.history_json_cursor < max {
                         app.history_json_cursor += 1;
                     }
+                    history_auto_scroll(app);
                 } else {
                     app.history_detail_scroll = app.history_detail_scroll.saturating_add(1);
                 }
@@ -485,6 +494,47 @@ fn handle_code_scroll(app: &mut App, key: KeyEvent) {
             app.code_scroll = u16::MAX;
         }
         _ => {}
+    }
+}
+
+/// Auto-scroll history detail so the JSON cursor stays visible.
+/// The JSON tree starts after ~6 header lines (status, blank, headers section title,
+/// headers, blank, body title, blank). We estimate the offset and scroll accordingly.
+fn history_auto_scroll(app: &mut App) {
+    // Estimate: response headers count + ~7 fixed lines before JSON tree
+    let header_lines = if app.history_detail_idx.is_some() {
+        // Get a rough count of response headers
+        let hdr_count = {
+            use request_pilot_core::history::HistoryFilter;
+            let filter = if app.filter_text.is_empty() {
+                HistoryFilter::default()
+            } else {
+                HistoryFilter { url_contains: Some(app.filter_text.clone()), ..Default::default() }
+            };
+            let mut filtered = app.history.filter(&filter);
+            filtered.reverse();
+            app.history_detail_idx
+                .and_then(|idx| filtered.get(idx).map(|e| e.response_headers.len()))
+                .unwrap_or(0)
+        };
+        // status + blank + "--- Headers (N) ---" + blank + N headers + blank + "--- Body ---" + blank
+        2 + 2 + hdr_count + 2 + 2
+    } else {
+        8
+    };
+    let cursor_line = header_lines + app.history_json_cursor;
+    let visible_h = app.history_detail_content_height as usize;
+    let scroll = app.history_detail_scroll as usize;
+
+    if visible_h == 0 { return; }
+
+    // If cursor is below visible area, scroll down
+    if cursor_line >= scroll + visible_h {
+        app.history_detail_scroll = (cursor_line.saturating_sub(visible_h) + 1) as u16;
+    }
+    // If cursor is above visible area, scroll up
+    if cursor_line < scroll {
+        app.history_detail_scroll = cursor_line as u16;
     }
 }
 

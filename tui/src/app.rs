@@ -313,6 +313,7 @@ pub struct App {
     pub history_json_cursor: usize,
     pub history_json_built: bool, // true when tree was built for current body
     pub history_json_expanded: HashSet<String>,
+    pub history_detail_content_height: u16, // visible content area height set by renderer
 
     // Diff viewer state
     pub diff_viewer_open: bool,
@@ -465,6 +466,7 @@ impl App {
             history_json_cursor: 0,
             history_json_built: false,
             history_json_expanded: HashSet::new(),
+            history_detail_content_height: 0,
             diff_viewer_open: false,
             diff_viewer_data: None,
             builder_focus: BuilderFocus::Method,
@@ -1267,6 +1269,14 @@ impl App {
             // Build history JSON tree if needed (lazy — only when response tab shown)
             if self.history_detail_idx.is_some() && self.history_detail_tab == 1 && !self.history_json_built {
                 self.build_history_json_tree();
+            }
+
+            // Update history detail content height from terminal size for auto-scroll
+            if self.history_detail_idx.is_some() {
+                let term_h = terminal.size()?.height;
+                // popup_height = min(term_h - 4, 40), content = popup_height - header(4) - tabs(1) - border(1)
+                let popup_h = (term_h.saturating_sub(4)).min(40);
+                self.history_detail_content_height = popup_h.saturating_sub(6);
             }
 
             terminal.draw(|frame| ui::draw(frame, self))?;
