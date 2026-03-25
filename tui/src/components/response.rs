@@ -381,94 +381,251 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
                     let mut lines = Vec::new();
                     match app.response_tab {
                         ResponseTab::Body => {
-                            let sc = match br.status.as_str() {
-                                "passed" => theme::GREEN(),
-                                "failed" | "error" => theme::RED(),
-                                "skipped" => theme::YELLOW(),
-                                _ => theme::TEXT(),
-                            };
-                            let mut ss = vec![Span::styled(
-                                format!(" {} ", br.status.to_uppercase()),
-                                Style::default()
-                                    .fg(theme::BG_DARK())
-                                    .bg(sc)
-                                    .add_modifier(Modifier::BOLD),
-                            )];
-                            if let Some(ref resp) = br.response {
-                                let kind = detect_content_kind(&resp.headers, &resp.body);
-                                let (bt, bc) = content_kind_badge(kind);
-                                ss.push(Span::raw(" "));
-                                ss.push(Span::styled(
-                                    format!(" {} ", bt),
-                                    Style::default()
-                                        .fg(theme::BG_DARK())
-                                        .bg(bc)
-                                        .add_modifier(Modifier::BOLD),
-                                ));
-                            }
-                            ss.push(Span::styled(
-                                format!(" \u{00b7} {}ms", br.time_ms),
-                                Style::default().fg(theme::TEXT_DIM()),
-                            ));
-                            if let Some(ref resp) = br.response {
-                                if resp.size_bytes > 0 {
-                                    ss.push(Span::styled(
-                                        format!(
-                                            " \u{00b7} {}",
-                                            format_size(resp.size_bytes)
-                                        ),
-                                        Style::default().fg(theme::TEXT_DIM()),
-                                    ));
-                                }
-                            }
-                            lines.push(Line::from(ss));
-                            if let Some(ref resp) = br.response {
-                                lines.push(Line::from(""));
+                            // Check if this is a compare block
+                            let active_block = file.suite.blocks.get(bi);
+                            let is_compare = active_block.map(|b| b.compare).unwrap_or(false);
+
+                            if is_compare && !br.step_results.is_empty() {
+                                // === Compare block: show step results and diff summary ===
+                                let sc = match br.status.as_str() {
+                                    "passed" => theme::GREEN(),
+                                    "failed" | "error" => theme::RED(),
+                                    "skipped" => theme::YELLOW(),
+                                    _ => theme::TEXT(),
+                                };
                                 lines.push(Line::from(vec![
                                     Span::styled(
-                                        "HTTP ",
-                                        Style::default().fg(theme::TEXT_FAINT()),
+                                        format!(" {} ", br.status.to_uppercase()),
+                                        Style::default().fg(theme::BG_DARK()).bg(sc).add_modifier(Modifier::BOLD),
                                     ),
                                     Span::styled(
-                                        format!("{} {}", resp.status, resp.status_text),
-                                        Style::default()
-                                            .fg(http_status_color(resp.status)),
+                                        format!(" \u{21C4} Compare \u{00b7} {}ms", br.time_ms),
+                                        Style::default().fg(theme::TEXT_DIM()),
                                     ),
                                 ]));
-                                if !resp.body.is_empty() {
-                                    let blen = resp.body.len();
-                                    let is_large = blen > LARGE_BODY_THRESHOLD;
-                                    let kind =
-                                        detect_content_kind(&resp.headers, &resp.body);
-                                    if is_large && !app.body_fully_loaded {
+                                lines.push(Line::from(""));
+
+                                // Show each step's result
+                                lines.push(Line::from(Span::styled(
+                                    "\u{2500}\u{2500}\u{2500} Steps \u{2500}\u{2500}\u{2500}",
+                                    Style::default().fg(theme::TEXT_FAINT()),
+                                )));
+                                for sr in &br.step_results {
+                                    let (icon, color) = if sr.error.is_some() {
+                                        ("\u{2717}", theme::RED())
+                                    } else if sr.response.is_some() {
+                                        ("\u{2713}", theme::GREEN())
+                                    } else {
+                                        ("\u{00b7}", theme::TEXT_FAINT())
+                                    };
+                                    let status_code = sr.response.as_ref().map(|r| r.status).unwrap_or(0);
+                                    let mut step_spans = vec![
+                                        Span::styled(format!(" {} ", icon), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                                        Span::styled(sr.name.clone(), Style::default().fg(theme::TEXT()).add_modifier(Modifier::BOLD)),
+                                    ];
+                                    if status_code > 0 {
+                                        step_spans.push(Span::styled(
+                                            format!("  {} \u{00b7} {}ms", status_code, sr.time_ms),
+                                            Style::default().fg(theme::TEXT_DIM()),
+                                        ));
+                                    }
+                                    if let Some(ref err) = sr.error {
+                                        step_spans.push(Span::styled(
+                                            format!("  {}", err),
+                                            Style::default().fg(theme::RED()),
+                                        ));
+                                    }
+                                    lines.push(Line::from(step_spans));
+
+                                    // Show step assertions inline
+                                    for ar in &sr.assertion_results {
+                                        let (ai, ac) = if ar.passed { ("  \u{2713}", theme::GREEN()) } else { ("  \u{2717}", theme::RED()) };
+                                        lines.push(Line::from(Span::styled(
+                                            format!("   {} {}", ai, ar.assertion),
+                                            Style::default().fg(ac),
+                                        )));
+                                    }
+                                }
+
+                                // Show diff summary
+                                if let Some(ref diff) = br.diff_result {
+                                    lines.push(Line::from(""));
+                                    lines.push(Line::from(Span::styled(
+                                        "\u{2500}\u{2500}\u{2500} Diff \u{2500}\u{2500}\u{2500}",
+                                        Style::default().fg(theme::TEXT_FAINT()),
+                                    )));
+                                    let match_label = if diff.match_exact {
+                                        Span::styled(" \u{2713} Exact Match ", Style::default().fg(theme::BG_DARK()).bg(theme::GREEN()).add_modifier(Modifier::BOLD))
+                                    } else {
+                                        let pct = (diff.similarity * 100.0) as u32;
+                                        Span::styled(
+                                            format!(" {}% similar ", pct),
+                                            Style::default().fg(theme::BG_DARK()).bg(theme::YELLOW()).add_modifier(Modifier::BOLD),
+                                        )
+                                    };
+                                    lines.push(Line::from(vec![
+                                        Span::raw(" "),
+                                        match_label,
+                                        Span::styled(
+                                            format!("  +{} -{} ~{}", diff.added_count, diff.removed_count, diff.changed_count),
+                                            Style::default().fg(theme::TEXT_DIM()),
+                                        ),
+                                    ]));
+
+                                    // Show changed paths
+                                    if !diff.changed_paths.is_empty() {
                                         lines.push(Line::from(""));
                                         lines.push(Line::from(Span::styled(
-                                            format!(
-                                                "\u{26a0} Response is {} \u{2014} showing first 8 KiB preview (press l to load full)",
-                                                format_size(blen)
-                                            ),
-                                            Style::default()
-                                                .fg(theme::YELLOW())
-                                                .add_modifier(Modifier::BOLD),
+                                            "Changed fields:",
+                                            Style::default().fg(theme::TEXT_DIM()),
                                         )));
+                                        for cp in diff.changed_paths.iter().take(20) {
+                                            lines.push(Line::from(Span::styled(
+                                                format!("  {} ", cp.path),
+                                                Style::default().fg(theme::PEACH()).add_modifier(Modifier::BOLD),
+                                            )));
+                                            lines.push(Line::from(vec![
+                                                Span::styled("    - ", Style::default().fg(theme::RED())),
+                                                Span::styled(truncate_to(&cp.left, (area.width as usize).saturating_sub(8)), Style::default().fg(theme::RED())),
+                                            ]));
+                                            lines.push(Line::from(vec![
+                                                Span::styled("    + ", Style::default().fg(theme::GREEN())),
+                                                Span::styled(truncate_to(&cp.right, (area.width as usize).saturating_sub(8)), Style::default().fg(theme::GREEN())),
+                                            ]));
+                                        }
+                                        if diff.changed_paths.len() > 20 {
+                                            lines.push(Line::from(Span::styled(
+                                                format!("  ... and {} more", diff.changed_paths.len() - 20),
+                                                Style::default().fg(theme::TEXT_FAINT()),
+                                            )));
+                                        }
+                                    }
+
+                                    // Show added/removed paths
+                                    if !diff.added_paths.is_empty() {
                                         lines.push(Line::from(""));
-                                        let preview = &resp.body
-                                            [..PREVIEW_SIZE.min(resp.body.len())];
-                                        render_body_content(
-                                            preview, kind, app, &mut lines,
-                                        );
-                                    } else {
-                                        let bt = if is_large {
-                                            app.response_body_full
-                                                .as_deref()
-                                                .unwrap_or(&resp.body)
+                                        lines.push(Line::from(Span::styled(
+                                            format!("Added paths ({}):", diff.added_paths.len()),
+                                            Style::default().fg(theme::GREEN()),
+                                        )));
+                                        for p in diff.added_paths.iter().take(10) {
+                                            lines.push(Line::from(Span::styled(
+                                                format!("  + {}", p),
+                                                Style::default().fg(theme::GREEN()),
+                                            )));
+                                        }
+                                    }
+                                    if !diff.removed_paths.is_empty() {
+                                        lines.push(Line::from(""));
+                                        lines.push(Line::from(Span::styled(
+                                            format!("Removed paths ({}):", diff.removed_paths.len()),
+                                            Style::default().fg(theme::RED()),
+                                        )));
+                                        for p in diff.removed_paths.iter().take(10) {
+                                            lines.push(Line::from(Span::styled(
+                                                format!("  - {}", p),
+                                                Style::default().fg(theme::RED()),
+                                            )));
+                                        }
+                                    }
+
+                                    lines.push(Line::from(""));
+                                    lines.push(Line::from(Span::styled(
+                                        "Press D to view full diff",
+                                        Style::default().fg(theme::TEXT_FAINT()),
+                                    )));
+                                }
+                            } else {
+                                // === Normal block (existing code) ===
+                                let sc = match br.status.as_str() {
+                                    "passed" => theme::GREEN(),
+                                    "failed" | "error" => theme::RED(),
+                                    "skipped" => theme::YELLOW(),
+                                    _ => theme::TEXT(),
+                                };
+                                let mut ss = vec![Span::styled(
+                                    format!(" {} ", br.status.to_uppercase()),
+                                    Style::default()
+                                        .fg(theme::BG_DARK())
+                                        .bg(sc)
+                                        .add_modifier(Modifier::BOLD),
+                                )];
+                                if let Some(ref resp) = br.response {
+                                    let kind = detect_content_kind(&resp.headers, &resp.body);
+                                    let (bt, bc) = content_kind_badge(kind);
+                                    ss.push(Span::raw(" "));
+                                    ss.push(Span::styled(
+                                        format!(" {} ", bt),
+                                        Style::default()
+                                            .fg(theme::BG_DARK())
+                                            .bg(bc)
+                                            .add_modifier(Modifier::BOLD),
+                                    ));
+                                }
+                                ss.push(Span::styled(
+                                    format!(" \u{00b7} {}ms", br.time_ms),
+                                    Style::default().fg(theme::TEXT_DIM()),
+                                ));
+                                if let Some(ref resp) = br.response {
+                                    if resp.size_bytes > 0 {
+                                        ss.push(Span::styled(
+                                            format!(
+                                                " \u{00b7} {}",
+                                                format_size(resp.size_bytes)
+                                            ),
+                                            Style::default().fg(theme::TEXT_DIM()),
+                                        ));
+                                    }
+                                }
+                                lines.push(Line::from(ss));
+                                if let Some(ref resp) = br.response {
+                                    lines.push(Line::from(""));
+                                    lines.push(Line::from(vec![
+                                        Span::styled(
+                                            "HTTP ",
+                                            Style::default().fg(theme::TEXT_FAINT()),
+                                        ),
+                                        Span::styled(
+                                            format!("{} {}", resp.status, resp.status_text),
+                                            Style::default()
+                                                .fg(http_status_color(resp.status)),
+                                        ),
+                                    ]));
+                                    if !resp.body.is_empty() {
+                                        let blen = resp.body.len();
+                                        let is_large = blen > LARGE_BODY_THRESHOLD;
+                                        let kind =
+                                            detect_content_kind(&resp.headers, &resp.body);
+                                        if is_large && !app.body_fully_loaded {
+                                            lines.push(Line::from(""));
+                                            lines.push(Line::from(Span::styled(
+                                                format!(
+                                                    "\u{26a0} Response is {} \u{2014} showing first 8 KiB preview (press l to load full)",
+                                                    format_size(blen)
+                                                ),
+                                                Style::default()
+                                                    .fg(theme::YELLOW())
+                                                    .add_modifier(Modifier::BOLD),
+                                            )));
+                                            lines.push(Line::from(""));
+                                            let preview = &resp.body
+                                                [..PREVIEW_SIZE.min(resp.body.len())];
+                                            render_body_content(
+                                                preview, kind, app, &mut lines,
+                                            );
                                         } else {
-                                            &resp.body
-                                        };
-                                        lines.push(Line::from(""));
-                                        render_body_content(
-                                            bt, kind, app, &mut lines,
-                                        );
+                                            let bt = if is_large {
+                                                app.response_body_full
+                                                    .as_deref()
+                                                    .unwrap_or(&resp.body)
+                                            } else {
+                                                &resp.body
+                                            };
+                                            lines.push(Line::from(""));
+                                            render_body_content(
+                                                bt, kind, app, &mut lines,
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -523,6 +680,59 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
                                             .fg(color)
                                             .add_modifier(Modifier::BOLD),
                                     )));
+                                }
+                                // Show step-level assertions for compare blocks
+                                if !br.step_results.is_empty() {
+                                    for sr in &br.step_results {
+                                        if !sr.assertion_results.is_empty() {
+                                            lines.push(Line::from(""));
+                                            lines.push(Line::from(Span::styled(
+                                                format!("\u{2500}\u{2500}\u{2500} Step: {} \u{2500}\u{2500}\u{2500}", sr.name),
+                                                Style::default().fg(theme::SAPPHIRE()),
+                                            )));
+                                            for ar in &sr.assertion_results {
+                                                let (icon, color) = if ar.passed {
+                                                    ("\u{2713}", theme::GREEN())
+                                                } else {
+                                                    ("\u{2717}", theme::RED())
+                                                };
+                                                let max_a = (area.width as usize).saturating_sub(6);
+                                                let display_a = truncate_to(&ar.assertion, max_a);
+                                                lines.push(Line::from(Span::styled(
+                                                    format!(" {} {}", icon, display_a),
+                                                    Style::default()
+                                                        .fg(color)
+                                                        .add_modifier(Modifier::BOLD),
+                                                )));
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if !br.step_results.is_empty() {
+                                // Compare block with no block-level assertions — show step assertions directly
+                                for sr in &br.step_results {
+                                    if !sr.assertion_results.is_empty() {
+                                        lines.push(Line::from(Span::styled(
+                                            format!("\u{2500}\u{2500}\u{2500} Step: {} \u{2500}\u{2500}\u{2500}", sr.name),
+                                            Style::default().fg(theme::SAPPHIRE()),
+                                        )));
+                                        for ar in &sr.assertion_results {
+                                            let (icon, color) = if ar.passed {
+                                                ("\u{2713}", theme::GREEN())
+                                            } else {
+                                                ("\u{2717}", theme::RED())
+                                            };
+                                            let max_a = (area.width as usize).saturating_sub(6);
+                                            let display_a = truncate_to(&ar.assertion, max_a);
+                                            lines.push(Line::from(Span::styled(
+                                                format!(" {} {}", icon, display_a),
+                                                Style::default()
+                                                    .fg(color)
+                                                    .add_modifier(Modifier::BOLD),
+                                            )));
+                                        }
+                                        lines.push(Line::from(""));
+                                    }
                                 }
                             } else {
                                 lines.push(Line::from(Span::styled(
@@ -732,6 +942,34 @@ pub fn handle_response_keys(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('y') => {
             copy_body(app);
+        }
+        KeyCode::Char('D') => {
+            // Open diff viewer for compare blocks
+            if let (Some(fi), Some(bi)) = (app.active_file_idx, app.active_block_idx) {
+                let diff_data = app.loaded_files.get(fi).and_then(|file| {
+                    let blk = file.suite.blocks.get(bi)?;
+                    if !blk.compare { return None; }
+                    let diff_dir = blk.diff.as_ref()?;
+                    let results = file.results.as_ref()?;
+                    let br = find_block_result(&results.block_results, &blk.name)?;
+                    let body_a = br.step_results.iter()
+                        .find(|s| s.name == diff_dir.step_a)
+                        .and_then(|s| s.response.as_ref())
+                        .map(|r| r.body.clone())
+                        .unwrap_or_default();
+                    let body_b = br.step_results.iter()
+                        .find(|s| s.name == diff_dir.step_b)
+                        .and_then(|s| s.response.as_ref())
+                        .map(|r| r.body.clone())
+                        .unwrap_or_default();
+                    let label_a = format!("{} ({})", diff_dir.step_a, blk.name);
+                    let label_b = format!("{} ({})", diff_dir.step_b, blk.name);
+                    Some((body_a, body_b, label_a, label_b))
+                });
+                if let Some((body_a, body_b, label_a, label_b)) = diff_data {
+                    app.open_diff_viewer(&body_a, &body_b, label_a, label_b);
+                }
+            }
         }
         _ => {}
     }

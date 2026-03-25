@@ -976,7 +976,7 @@ fn get_keyhints(app: &App) -> String {
             }
             Focus::Variables => " ↑↓=nav  a=add  e=edit  d=delete  V=files  Esc=quit ".to_string(),
             Focus::Builder => " Tab=cycle  ←→=method  Enter=edit  Ctrl+Enter=send  Esc=back ".to_string(),
-            Focus::Response => " ↑↓=nav  Enter=expand  E=all  C=collapse  b=body  H=hdrs  y=copy  Esc=back ".to_string(),
+            Focus::Response => " ↑↓=nav  Enter=expand  E=all  C=collapse  b=body  H=hdrs  D=diff  y=copy  Esc=back ".to_string(),
             _ => " q=quit  Tab=focus  r=run  ?=help ".to_string(),
         },
         Mode::History => " ↑↓=nav  g=group  m=method  s=status  Enter=detail  Space=compare  Esc=files ".to_string(),

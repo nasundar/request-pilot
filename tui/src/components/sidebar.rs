@@ -56,11 +56,15 @@ pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                     TreeNode::Block { file_idx, block_idx } => {
                         let f = &app.loaded_files[*file_idx];
                         let blk = &f.suite.blocks[*block_idx];
-                        let icon = match blk.block_type.as_str() {
-                            "setup" => "\u{2699}",
-                            "test" => "\u{1f9ea}",
-                            "teardown" => "\u{1f5d1}",
-                            _ => "\u{1f4e4}",
+                        let icon = if blk.compare {
+                            "\u{21C4}" // ⇄ for compare blocks
+                        } else {
+                            match blk.block_type.as_str() {
+                                "setup" => "\u{2699}",
+                                "test" => "\u{1f9ea}",
+                                "teardown" => "\u{1f5d1}",
+                                _ => "\u{1f4e4}",
+                            }
                         };
                         let status = get_block_status(f, *block_idx);
                         // Show @mode app blocks as dimmed/skipped when dev mode is on
