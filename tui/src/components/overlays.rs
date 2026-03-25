@@ -70,6 +70,7 @@ pub fn render_help_popup(frame: &mut Frame, area: Rect) {
         Line::from(Span::styled("\u{2500}\u{2500} Toolbar \u{2500}\u{2500}", dim)),
         Line::from(vec![Span::styled("Ctrl+T        ", kb), Span::styled("OTEL telemetry popup (Space=toggle)", Style::default().fg(theme::TEXT()))]),
         Line::from(vec![Span::styled("Ctrl+A        ", kb), Span::styled("Azure auth popup", Style::default().fg(theme::TEXT()))]),
+        Line::from(vec![Span::styled("Ctrl+L        ", kb), Span::styled("Extension connector (Space=cycle mode)", Style::default().fg(theme::TEXT()))]),
         Line::from(""),
         Line::from(Span::styled("\u{2500}\u{2500} General \u{2500}\u{2500}", dim)),
         Line::from(vec![Span::styled("T             ", kb), Span::styled("Cycle theme", Style::default().fg(theme::TEXT()))]),

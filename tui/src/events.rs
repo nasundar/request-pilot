@@ -41,6 +41,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     if toolbar::handle_extra_headers_keys(app, key) { return; }
     if toolbar::handle_azure_keys(app, key) { return; }
     if toolbar::handle_otel_keys(app, key) { return; }
+    if toolbar::handle_live_capture_keys(app, key) { return; }
 
     // 5. History popup
     if app.history_popup.is_some() {

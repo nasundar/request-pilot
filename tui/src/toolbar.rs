@@ -439,6 +439,77 @@ pub fn handle_otel_keys(app: &mut App, key: KeyEvent) -> bool {
     true
 }
 
+pub fn handle_live_capture_keys(app: &mut App, key: KeyEvent) -> bool {
+    if !app.live_capture_popup_open { return false; }
+    match key.code {
+        KeyCode::Esc => { app.live_capture_popup_open = false; }
+        KeyCode::Char(' ') => {
+            app.cycle_live_capture_mode();
+        }
+        _ => {}
+    }
+    true
+}
+
+pub fn render_live_capture_popup(frame: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_popup(area, 52, 14);
+    if popup.width < 10 || popup.height < 5 { return; }
+    frame.render_widget(Clear, popup);
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    lines.push(Line::from(Span::styled(
+        "Extension Connector",
+        Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    let (mode_label, mode_style) = match app.live_capture_mode.as_str() {
+        "all" => ("All Requests", Style::default().fg(theme::GREEN()).add_modifier(Modifier::BOLD)),
+        "filtered" => ("Filtered", Style::default().fg(theme::PEACH()).add_modifier(Modifier::BOLD)),
+        _ => ("Off", Style::default().fg(theme::TEXT_FAINT())),
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  Mode: ", Style::default().fg(theme::TEXT_DIM())),
+        Span::styled(mode_label, mode_style),
+    ]));
+
+    let (conn_label, conn_style) = if app.live_capture_connected {
+        ("Connected", Style::default().fg(theme::GREEN()).add_modifier(Modifier::BOLD))
+    } else if app.live_capture_mode != "off" {
+        ("Waiting for extension…", Style::default().fg(theme::PEACH()))
+    } else {
+        ("—", Style::default().fg(theme::TEXT_FAINT()))
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  Status: ", Style::default().fg(theme::TEXT_DIM())),
+        Span::styled(conn_label, conn_style),
+    ]));
+
+    lines.push(Line::from(vec![
+        Span::styled("  Captured: ", Style::default().fg(theme::TEXT_DIM())),
+        Span::styled(app.live_capture_count.to_string(), Style::default().fg(theme::PEACH())),
+    ]));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  Port: ", Style::default().fg(theme::TEXT_DIM())),
+        Span::styled("9718", Style::default().fg(theme::TEXT())),
+    ]));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Space=cycle mode  Esc=close",
+        Style::default().fg(theme::TEXT_FAINT()),
+    )));
+
+    let block = Block::default()
+        .title(" 📡 Extension Connector ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BLUE()))
+        .style(Style::default().bg(theme::BG_SURFACE()));
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
 pub fn handle_toolbar_shortcuts(app: &mut App, key: KeyEvent) -> bool {
     if !key.modifiers.contains(KeyModifiers::CONTROL) { return false; }
     match key.code {
@@ -448,6 +519,7 @@ pub fn handle_toolbar_shortcuts(app: &mut App, key: KeyEvent) -> bool {
                 app.extra_headers_edit_mode = HeaderEditMode::Browse;
                 app.azure_popup_open = false;
                 app.otel_popup_open = false;
+                app.live_capture_popup_open = false;
             }
             true
         }
@@ -457,6 +529,7 @@ pub fn handle_toolbar_shortcuts(app: &mut App, key: KeyEvent) -> bool {
             if app.azure_popup_open {
                 app.extra_headers_open = false;
                 app.otel_popup_open = false;
+                app.live_capture_popup_open = false;
                 // Check CLI availability async on first open
                 if app.az_cli_available.is_none() {
                     let tx = app.runner_tx();
@@ -475,6 +548,16 @@ pub fn handle_toolbar_shortcuts(app: &mut App, key: KeyEvent) -> bool {
             if app.otel_popup_open {
                 app.extra_headers_open = false;
                 app.azure_popup_open = false;
+                app.live_capture_popup_open = false;
+            }
+            true
+        }
+        KeyCode::Char('l') => {
+            app.live_capture_popup_open = !app.live_capture_popup_open;
+            if app.live_capture_popup_open {
+                app.extra_headers_open = false;
+                app.azure_popup_open = false;
+                app.otel_popup_open = false;
             }
             true
         }

@@ -2,6 +2,7 @@ mod app;
 mod code_editor;
 mod components;
 mod events;
+mod live_capture;
 mod toolbar;
 #[cfg(test)]
 mod tests;

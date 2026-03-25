@@ -28,6 +28,7 @@ pub enum InputPurpose {
     AddVarValue { name: String },
     EditVarValue { name: String },
     ExportHistory,
+    SaveFile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +180,8 @@ pub enum RunnerMessage {
     },
     AzureAuthResult(Result<request_pilot_core::azure_auth::AzureToken, String>),
     AzureCliCheck(bool),
+    LiveCaptureRequest(crate::live_capture::CapturedRequest),
+    LiveCaptureStatus { connected: bool },
 }
 
 /// A loaded .http file with parsed suite and optional results.
@@ -285,6 +288,13 @@ pub struct App {
     pub otel_enabled: bool,
     pub otel_stats: Option<TelemetryStats>,
     pub otel_popup_open: bool,
+
+    // Toolbar: Live Capture (Extension Connector)
+    pub live_capture_mode: String,
+    pub live_capture_connected: bool,
+    pub live_capture_popup_open: bool,
+    pub live_capture_count: u64,
+    pub live_capture_state: Option<std::sync::Arc<crate::live_capture::LiveCaptureState>>,
 
     // JSON tree view state (response panel)
     pub json_tree_nodes: Vec<crate::components::response::JsonTreeNode>,
@@ -444,6 +454,11 @@ impl App {
             otel_enabled: false,
             otel_stats: None,
             otel_popup_open: false,
+            live_capture_mode: "off".to_string(),
+            live_capture_connected: false,
+            live_capture_popup_open: false,
+            live_capture_count: 0,
+            live_capture_state: None,
             json_tree_nodes: Vec::new(),
             json_expanded: HashSet::new(),
             json_cursor: 0,
@@ -771,9 +786,64 @@ impl App {
                         Err(e) => self.set_status(format!("Save failed: {}", e)),
                     }
                 } else {
-                    self.set_status("No file path (new file)".to_string());
+                    self.input_mode = InputMode::Input {
+                        prompt: "Save as: ".to_string(),
+                        purpose: InputPurpose::SaveFile,
+                        buffer: String::new(),
+                    };
                 }
             }
+        }
+    }
+
+    pub fn start_live_capture(&mut self) {
+        if self.live_capture_state.is_some() { return; }
+        let state = std::sync::Arc::new(crate::live_capture::LiveCaptureState::new());
+        self.live_capture_state = Some(state.clone());
+        let tx = self.runner_tx();
+        tokio::spawn(async move {
+            if let Err(e) = crate::live_capture::start_server(state, tx).await {
+                log::warn!("Live capture server error: {}", e);
+            }
+        });
+    }
+
+    pub fn stop_live_capture(&mut self) {
+        if let Some(ref state) = self.live_capture_state {
+            let state = state.clone();
+            tokio::spawn(async move {
+                crate::live_capture::stop_server(&state).await;
+            });
+            self.live_capture_state = None;
+            self.live_capture_connected = false;
+        }
+    }
+
+    pub fn cycle_live_capture_mode(&mut self) {
+        let new_mode = match self.live_capture_mode.as_str() {
+            "off" => "all",
+            "all" => "filtered",
+            "filtered" => "off",
+            _ => "off",
+        };
+        self.live_capture_mode = new_mode.to_string();
+
+        if new_mode == "off" {
+            self.stop_live_capture();
+            self.set_status("Extension connector: off".to_string());
+        } else {
+            if self.live_capture_state.is_none() {
+                self.start_live_capture();
+            }
+            if let Some(ref state) = self.live_capture_state {
+                let state = state.clone();
+                let mode = new_mode.to_string();
+                tokio::spawn(async move {
+                    crate::live_capture::set_mode(&state, &mode).await;
+                });
+            }
+            let label = if new_mode == "all" { "all requests" } else { "filtered requests" };
+            self.set_status(format!("Extension connector: capturing {}", label));
         }
     }
 
@@ -1011,6 +1081,21 @@ impl App {
             }
             InputPurpose::ExportHistory => {
                 self.export_history(value);
+            }
+            InputPurpose::SaveFile => {
+                let path = PathBuf::from(&value);
+                if let Some(fi) = self.active_file_idx {
+                    let content = generate_http_content(&self.loaded_files[fi].suite);
+                    let display = path.display().to_string();
+                    match std::fs::write(&path, &content) {
+                        Ok(_) => {
+                            self.loaded_files[fi].path = Some(path);
+                            self.loaded_files[fi].content = content;
+                            self.set_status(format!("Saved: {}", display));
+                        }
+                        Err(e) => self.set_status(format!("Save failed: {}", e)),
+                    }
+                }
             }
         }
     }
@@ -1346,6 +1431,19 @@ impl App {
                     }
                     RunnerMessage::AzureCliCheck(available) => {
                         self.az_cli_available = Some(available);
+                    }
+                    RunnerMessage::LiveCaptureRequest(req) => {
+                        self.live_capture_count += 1;
+                        log::info!("Captured: {} {}", req.method, req.url);
+                        self.set_status(format!("📡 Captured: {} {} (total: {})", req.method, req.url, self.live_capture_count));
+                    }
+                    RunnerMessage::LiveCaptureStatus { connected } => {
+                        self.live_capture_connected = connected;
+                        if connected {
+                            self.set_status("📡 Extension connected".to_string());
+                        } else {
+                            self.set_status("📡 Extension disconnected".to_string());
+                        }
                     }
                 }
             }

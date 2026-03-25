@@ -460,6 +460,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.otel_popup_open {
         toolbar::render_otel_popup(frame, app, frame.area());
     }
+    if app.live_capture_popup_open {
+        toolbar::render_live_capture_popup(frame, app, frame.area());
+    }
 }
 
 fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -490,8 +493,26 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("R Run All", Style::default().fg(theme::GREEN())),
     ];
 
-    // Right side: OTEL + badges + theme + help
+    // Right side: OTEL + Live Capture + badges + theme + help
     let mut right_spans: Vec<Span> = vec![
+        // Live capture badge (satellite icon)
+        Span::styled(
+            "📡",
+            Style::default().fg(match app.live_capture_mode.as_str() {
+                "all" => theme::GREEN(),
+                "filtered" => theme::PEACH(),
+                _ => theme::TEXT_FAINT(),
+            }),
+        ),
+        Span::styled(
+            " EXT ",
+            match app.live_capture_mode.as_str() {
+                "all" => Style::default().fg(theme::BG_DARK()).bg(theme::GREEN()).add_modifier(Modifier::BOLD),
+                "filtered" => Style::default().fg(theme::BG_DARK()).bg(theme::PEACH()).add_modifier(Modifier::BOLD),
+                _ => Style::default().fg(theme::TEXT_FAINT()),
+            },
+        ),
+        Span::raw("  "),
         Span::styled(
             "⚡",
             Style::default().fg(if app.otel_enabled { theme::SKY() } else { theme::TEXT_FAINT() }),
@@ -943,7 +964,7 @@ fn get_keyhints(app: &App) -> String {
                 if app.sidebar_tab == SidebarTab::Variables {
                     " ↑↓=nav  a=add  e=edit  d=delete  V=files  Esc=quit ".to_string()
                 } else {
-                    " ↑↓=nav  Enter=select  e=code  o=open  r=run  R=RunAll  Ctrl+T=OTEL  Ctrl+A=Azure  Esc=quit ".to_string()
+                    " ↑↓=nav  Enter=select  e=code  o=open  r=run  R=RunAll  Ctrl+T=OTEL  Ctrl+A=Azure  Ctrl+L=Ext  Esc=quit ".to_string()
                 }
             }
             Focus::Variables => " ↑↓=nav  a=add  e=edit  d=delete  V=files  Esc=quit ".to_string(),
