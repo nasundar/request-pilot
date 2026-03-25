@@ -58,6 +58,11 @@ pub fn render_builder(frame: &mut Frame, app: &App, area: Rect) {
         None => return,
     };
 
+    if blk.compare && !blk.steps.is_empty() {
+        render_compare_builder(frame, app, blk, area);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -126,6 +131,153 @@ fn render_method_url(
 
     let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line).block(block), area);
+}
+
+/// Renders a compare-block-specific builder view showing steps and diff assertions.
+fn render_compare_builder(
+    frame: &mut Frame,
+    app: &App,
+    blk: &request_pilot_core::http_parser::TestBlock,
+    area: Rect,
+) {
+    let is_focused = matches!(app.builder_focus, BuilderFocus::Method | BuilderFocus::Url);
+    let border_style = if is_focused {
+        Style::default().fg(theme::BLUE())
+    } else {
+        Style::default().fg(theme::TEXT_FAINT())
+    };
+    let block_widget = Block::default()
+        .title(" ⇄ Compare Block ")
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .style(if is_focused {
+            Style::default().bg(theme::BG_FOCUS())
+        } else {
+            Style::default()
+        });
+
+    let inner = block_widget.inner(area);
+    frame.render_widget(block_widget, area);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Block name
+    if !blk.name.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                blk.name.clone(),
+                Style::default().fg(theme::TEXT()).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+    if !blk.description.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(blk.description.clone(), Style::default().fg(theme::TEXT_DIM())),
+        ]));
+    }
+    lines.push(Line::from(""));
+
+    // Steps
+    for (i, step) in blk.steps.iter().enumerate() {
+        let step_marker = if i == 0 { "▸ " } else { "▸ " };
+        let m = &step.request.method;
+        let mc = method_color(m);
+        let url_max = (inner.width as usize).saturating_sub(m.len() + step.name.len() + 12);
+        let url_display = truncate_to(&step.request.url, url_max);
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {}", step_marker), Style::default().fg(theme::YELLOW())),
+            Span::styled(
+                step.name.clone(),
+                Style::default().fg(theme::PEACH()).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                m.clone(),
+                Style::default().fg(mc).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ", Style::default()),
+            Span::styled(url_display, Style::default().fg(theme::TEXT_DIM())),
+        ]));
+
+        // Step headers summary
+        let hdr_count = step.request.headers.len();
+        let assert_count = step.assertions.len();
+        let extract_count = step.extracts.len();
+        let mut meta_spans: Vec<Span<'static>> = vec![
+            Span::styled("      ", Style::default()),
+        ];
+        meta_spans.push(Span::styled(
+            format!("{} headers", hdr_count),
+            Style::default().fg(theme::TEXT_FAINT()),
+        ));
+        if assert_count > 0 {
+            meta_spans.push(Span::styled(
+                format!("  {} assertions", assert_count),
+                Style::default().fg(theme::TEXT_FAINT()),
+            ));
+        }
+        if extract_count > 0 {
+            meta_spans.push(Span::styled(
+                format!("  {} extracts", extract_count),
+                Style::default().fg(theme::TEXT_FAINT()),
+            ));
+        }
+        if let Some(ref body) = step.request.body {
+            let body_len = body.len();
+            meta_spans.push(Span::styled(
+                format!("  body: {} bytes", body_len),
+                Style::default().fg(theme::TEXT_FAINT()),
+            ));
+        }
+        lines.push(Line::from(meta_spans));
+
+        // Show header details for each step
+        for (k, v) in &step.request.headers {
+            let val_max = (inner.width as usize).saturating_sub(k.len() + 12);
+            let val_display = truncate_to(v, val_max);
+            lines.push(Line::from(vec![
+                Span::styled("        ", Style::default()),
+                Span::styled(k.clone(), Style::default().fg(theme::LAVENDER())),
+                Span::styled(": ", Style::default().fg(theme::TEXT_FAINT())),
+                Span::styled(val_display, Style::default().fg(theme::TEXT_DIM())),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+    }
+
+    // Diff directive
+    if let Some(ref diff) = blk.diff {
+        lines.push(Line::from(vec![
+            Span::styled("  ⇄ diff ", Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD)),
+            Span::styled(diff.step_a.clone(), Style::default().fg(theme::PEACH())),
+            Span::styled(" ↔ ", Style::default().fg(theme::TEXT_FAINT())),
+            Span::styled(diff.step_b.clone(), Style::default().fg(theme::PEACH())),
+        ]));
+    }
+
+    // Diff assertions
+    if !blk.assertions.is_empty() {
+        for a in &blk.assertions {
+            lines.push(Line::from(vec![
+                Span::styled("  ● ", Style::default().fg(theme::YELLOW())),
+                Span::styled(
+                    format!("{} {} {}", a.left, a.operator, a.right),
+                    Style::default().fg(theme::TEXT()),
+                ),
+            ]));
+        }
+    }
+
+    let scroll = app.builder_body_scroll;
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((scroll, 0)),
+        inner,
+    );
 }
 
 fn highlight_variables(text: &str, focused: bool) -> Vec<Span<'_>> {
