@@ -256,82 +256,132 @@ pub fn restore_terminal() -> color_eyre::Result<()> {
 }
 
 pub fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre::Result<()> {
-    let rocket_art = vec![
-        r"                  /\        ",
-        r"                 /  \       ",
-        r"                |    |      ",
-        r"                |    |      ",
-        r"               /| .  |\     ",
-        r"              / | /\ | \    ",
-        r"             /  |/  \|  \   ",
-        r"            /   /    \   \  ",
-        r"           /   / \  / \   \ ",
-        r"          /__ /   \/   \ __\",
-        r"             ||      ||     ",
-        r"             ||      ||     ",
-        r"             |_|    |_|     ",
-        r"            /___|  |___\    ",
-        r"         .:' .  :  .  ':.   ",
-        r"        :__.'.__:__.'.__:   ",
+    use ratatui::style::Color;
+
+    // Rich block-character rocket with depth and shading
+    // Each line is a vec of (text, fg_color, bold)
+    type ArtSpan = (&'static str, Color, bool);
+
+    let c_body = Color::Rgb(200, 210, 230);    // light silver-blue hull
+    let c_nose = Color::Rgb(230, 240, 255);    // bright nose cone
+    let c_win  = Color::Rgb(100, 180, 255);    // window cyan-blue
+    let c_fin  = Color::Rgb(140, 160, 190);    // darker fin/shadow
+    let c_fire1 = Color::Rgb(255, 180, 50);    // bright orange flame
+    let c_fire2 = Color::Rgb(255, 100, 30);    // deep orange
+    let c_fire3 = Color::Rgb(255, 60, 40);     // red flame
+    let c_smoke = Color::Rgb(100, 100, 120);   // exhaust smoke
+    let c_star  = Color::Rgb(255, 255, 180);   // stars
+    let c_dim   = Color::Rgb(60, 65, 80);      // dim accents
+    let c_trail = Color::Rgb(180, 120, 50);     // trail particles
+
+    let art: Vec<Vec<ArtSpan>> = vec![
+        vec![("                          ·           ", c_star, false), ("✦", c_star, true), ("       ·", c_star, false)],
+        vec![("               ·                    ·    ", c_star, false), ("     ✧", c_star, false)],
+        vec![("                        ▄▀▀▄", c_nose, true)],
+        vec![("                       ▐", c_body, false), ("▓▓▓▓", c_nose, true), ("▌", c_body, false)],
+        vec![("                       ▐", c_body, false), ("████", c_body, true), ("▌", c_body, false)],
+        vec![("                       ▐", c_body, false), ("█", c_body, true), ("▄▄", c_win, true), ("█", c_body, true), ("▌", c_body, false)],
+        vec![("                       ▐", c_body, false), ("█", c_body, true), ("██", c_win, true), ("█", c_body, true), ("▌", c_body, false)],
+        vec![("                       ▐", c_body, false), ("█", c_body, true), ("▀▀", c_win, true), ("█", c_body, true), ("▌", c_body, false)],
+        vec![("                       ▐", c_body, false), ("████", c_body, true), ("▌", c_body, false)],
+        vec![("                       ▐", c_body, false), ("████", c_body, true), ("▌", c_body, false)],
+        vec![("                      ▟", c_fin, true), ("█████", c_body, true), ("▙", c_fin, true)],
+        vec![("                     ▟", c_fin, true), ("██", c_fin, false), ("███", c_body, true), ("██", c_fin, false), ("▙", c_fin, true)],
+        vec![("                    ▟", c_fin, true), ("███", c_fin, false), ("▐█▌", c_body, true), ("███", c_fin, false), ("▙", c_fin, true)],
+        vec![("                    ▀▀▀", c_fin, false), (" ▐", c_body, false), ("██", c_body, true), ("▌ ", c_body, false), ("▀▀▀", c_fin, false)],
+        vec![("                         ▐", c_body, false), ("██", c_body, true), ("▌", c_body, false)],
+        vec![("                        ▗", c_fire1, true), ("▄██▄", c_fire1, true), ("▖", c_fire1, true)],
+        vec![("                       ▗", c_fire2, false), ("▓████▓", c_fire1, true), ("▖", c_fire2, false)],
+        vec![("                        ", c_fire3, false), ("▒▓██▓▒", c_fire2, true)],
+        vec![("                         ", c_fire3, false), ("░▒▓▒░", c_fire3, false)],
+        vec![("                          ", c_smoke, false), ("·▪·", c_trail, false)],
+        vec![("                           ", c_smoke, false), ("·", c_smoke, false)],
+        vec![("                ✧", c_star, false), ("                          ·", c_star, false)],
     ];
 
-    let tagline = "Wishing you safe passage across all endpoints.";
-    let title = "R E Q U E S T   P I L O T";
+    let title = "R  E  Q  U  E  S  T     P  I  L  O  T";
+    let subtitle = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+    let tagline = "Wishing you safe passage across all endpoints ✦";
+    let version = env!("CARGO_PKG_VERSION");
+    let ver_line = format!("v{}", version);
 
     terminal.draw(|frame| {
         let area = frame.area();
+        // Dark background
         frame.render_widget(
-            Paragraph::new("").style(Style::default().bg(theme::BG_DARK())),
+            Paragraph::new("").style(Style::default().bg(Color::Rgb(15, 17, 25))),
             area,
         );
 
-        let total_height = rocket_art.len() as u16 + 5; // art + gaps + title + tagline
+        let total_height = art.len() as u16 + 7;
         let start_y = area.height.saturating_sub(total_height) / 2;
 
         // Title
         let title_x = area.width.saturating_sub(title.len() as u16) / 2;
-        if start_y < area.height {
+        let y = start_y;
+        if y < area.height {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     title,
-                    Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Rgb(120, 170, 255)).add_modifier(Modifier::BOLD),
                 ))),
-                Rect::new(title_x, start_y, title.len() as u16, 1),
+                Rect::new(title_x, y, title.len() as u16, 1),
+            );
+        }
+        // Subtitle rule
+        let sub_x = area.width.saturating_sub(subtitle.len() as u16) / 2;
+        let y = start_y + 1;
+        if y < area.height {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    subtitle,
+                    Style::default().fg(c_dim),
+                ))),
+                Rect::new(sub_x, y, subtitle.len() as u16, 1),
             );
         }
 
-        // Rocket art
-        let art_start = start_y + 2;
-        for (i, line) in rocket_art.iter().enumerate() {
+        // Rocket art — multi-colored spans per line
+        let art_start = start_y + 3;
+        for (i, spans_def) in art.iter().enumerate() {
             let y = art_start + i as u16;
             if y >= area.height { break; }
-            let x = area.width.saturating_sub(line.len() as u16) / 2;
-            let color = if i < 10 {
-                theme::TEXT()
-            } else if i < 14 {
-                theme::PEACH()
-            } else {
-                theme::RED()
-            };
+            let spans: Vec<Span> = spans_def.iter().map(|(text, color, bold)| {
+                let mut s = Style::default().fg(*color);
+                if *bold { s = s.add_modifier(Modifier::BOLD); }
+                Span::styled(*text, s)
+            }).collect();
+            let line_width: u16 = spans.iter().map(|s| s.width() as u16).sum();
+            let x = area.width.saturating_sub(line_width) / 2;
             frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    *line,
-                    Style::default().fg(color),
-                ))),
-                Rect::new(x, y, line.len() as u16, 1),
+                Paragraph::new(Line::from(spans)),
+                Rect::new(x, y, line_width.min(area.width), 1),
             );
         }
 
         // Tagline
-        let tag_y = art_start + rocket_art.len() as u16 + 1;
+        let tag_y = art_start + art.len() as u16 + 1;
         if tag_y < area.height {
             let tag_x = area.width.saturating_sub(tagline.len() as u16) / 2;
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     tagline,
-                    Style::default().fg(theme::TEXT_DIM()).add_modifier(Modifier::ITALIC),
+                    Style::default().fg(Color::Rgb(140, 150, 170)).add_modifier(Modifier::ITALIC),
                 ))),
                 Rect::new(tag_x, tag_y, tagline.len() as u16, 1),
+            );
+        }
+
+        // Version
+        let ver_y = tag_y + 1;
+        if ver_y < area.height {
+            let ver_x = area.width.saturating_sub(ver_line.len() as u16) / 2;
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    &ver_line,
+                    Style::default().fg(c_dim),
+                ))),
+                Rect::new(ver_x, ver_y, ver_line.len() as u16, 1),
             );
         }
     })?;
