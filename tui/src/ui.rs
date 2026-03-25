@@ -6,10 +6,11 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 use crate::app::{App, Focus, Mode, SidebarTab, TreeNode, InputMode, ResponseTab};
+use crate::toolbar;
 use request_pilot_core::history::HistoryFilter;
 
 // Catppuccin Mocha-inspired palette
-mod theme {
+pub mod theme {
     use ratatui::style::Color;
 
     pub const BG_DARK: Color = Color::Rgb(30, 30, 46);
@@ -86,6 +87,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if let Some(idx) = app.history_detail_idx {
         draw_history_detail(frame, app, frame.area(), idx);
     }
+
+    // Toolbar popup overlays
+    if app.extra_headers_open {
+        toolbar::render_extra_headers_popup(frame, app, frame.area());
+    }
+    if app.azure_popup_open {
+        toolbar::render_azure_popup(frame, app, frame.area());
+    }
+    if app.otel_popup_open {
+        toolbar::render_otel_popup(frame, app, frame.area());
+    }
 }
 
 fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -97,7 +109,7 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(" \u{2708} Request Pilot ", Style::default().fg(theme::BLUE).add_modifier(Modifier::BOLD)),
         Span::raw(" "),
         Span::styled(" F1 Files ", mode_style(Mode::Files, app.mode)),
@@ -107,7 +119,10 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("F5 Run All", Style::default().fg(theme::GREEN)),
         Span::raw("  "),
         Span::styled("? Help", Style::default().fg(theme::TEXT_FAINT)),
-    ]);
+        Span::raw("  "),
+    ];
+    spans.extend(toolbar::toolbar_badges(app));
+    let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line).style(Style::default().bg(theme::BG_BASE)), area);
 }
 

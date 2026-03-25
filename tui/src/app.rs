@@ -7,6 +7,8 @@ use request_pilot_core::history::{HistoryStore, HistoryEntry};
 use crossterm::event::{self, Event};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
+use request_pilot_core::azure_auth::AzureToken;
+use request_pilot_core::telemetry::TelemetryStats;
 
 // === Input mode system ===
 
@@ -64,6 +66,26 @@ pub enum Focus {
 pub enum SidebarTab {
     Files,
     Variables,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AzureAuthState {
+    Off,
+    Authenticated,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeaderEditField {
+    Key,
+    Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HeaderEditMode {
+    Browse,
+    Adding { field: HeaderEditField, key_buf: String, val_buf: String },
+    Editing { index: usize, field: HeaderEditField, key_buf: String, val_buf: String },
 }
 
 /// Messages sent from the test runner to the event loop.
@@ -157,6 +179,23 @@ pub struct App {
     pub filter_text: String,
     pub filtered_history_len: usize,
 
+    // Toolbar: Extra Headers
+    pub extra_headers: Vec<(String, String, bool)>,
+    pub extra_headers_open: bool,
+    pub extra_headers_cursor: usize,
+    pub extra_headers_edit_mode: HeaderEditMode,
+
+    // Toolbar: Azure Auth
+    pub azure_state: AzureAuthState,
+    pub azure_token: Option<AzureToken>,
+    pub azure_popup_open: bool,
+    pub azure_loading: bool,
+
+    // Toolbar: OTEL
+    pub otel_enabled: bool,
+    pub otel_stats: Option<TelemetryStats>,
+    pub otel_popup_open: bool,
+
     // Channel receiver (set up in run())
     runner_rx: Option<mpsc::UnboundedReceiver<RunnerMessage>>,
     runner_tx: mpsc::UnboundedSender<RunnerMessage>,
@@ -197,6 +236,17 @@ impl App {
             history_cursor: 0,
             filter_text: String::new(),
             filtered_history_len: 0,
+            extra_headers: Vec::new(),
+            extra_headers_open: false,
+            extra_headers_cursor: 0,
+            extra_headers_edit_mode: HeaderEditMode::Browse,
+            azure_state: AzureAuthState::Off,
+            azure_token: None,
+            azure_popup_open: false,
+            azure_loading: false,
+            otel_enabled: false,
+            otel_stats: None,
+            otel_popup_open: false,
             runner_rx: Some(rx),
             runner_tx: tx,
         }
@@ -483,6 +533,17 @@ impl App {
         self.history.clear();
         self.history_cursor = 0;
         self.set_status("History cleared".to_string());
+    }
+
+    pub fn clear_all(&mut self) {
+        self.history.clear();
+        self.history_cursor = 0;
+        for f in &mut self.loaded_files {
+            f.results = None;
+        }
+        self.progress_current = 0;
+        self.progress_total = 0;
+        self.set_status("Cleared all results and history".to_string());
     }
 
     pub fn export_history(&mut self, path_str: String) {

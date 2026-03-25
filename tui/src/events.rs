@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::{App, Focus, Mode, SidebarTab, TreeNode, InputMode, InputPurpose, ConfirmPurpose, ResponseTab};
+use crate::toolbar;
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
     // 1. Input mode handling takes priority
@@ -23,7 +24,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // 3. History detail overlay
+    // 3. Toolbar popup key consumption
+    if toolbar::handle_extra_headers_keys(app, key) { return; }
+    if toolbar::handle_azure_keys(app, key) { return; }
+    if toolbar::handle_otel_keys(app, key) { return; }
+
+    // 4. History detail overlay
     if app.history_detail_idx.is_some() {
         if matches!(key.code, KeyCode::Esc | KeyCode::Backspace) {
             app.history_detail_idx = None;
@@ -90,10 +96,27 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             };
             return;
         }
+        // Toolbar shortcuts
+        KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            toolbar::handle_toolbar_shortcuts(app, key);
+            return;
+        }
+        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            toolbar::handle_toolbar_shortcuts(app, key);
+            return;
+        }
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            toolbar::handle_toolbar_shortcuts(app, key);
+            return;
+        }
+        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            toolbar::handle_toolbar_shortcuts(app, key);
+            return;
+        }
         _ => {}
     }
 
-    // 5. Mode-specific keybinds
+    // 6. Mode-specific keybinds
     match app.mode {
         Mode::Files => handle_files_mode(app, key),
         Mode::History => handle_history_mode(app, key),
