@@ -1,138 +1,79 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#0a0e1a"/>
-      <stop offset="100%" stop-color="#1a1040"/>
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e1b4b"/>
     </linearGradient>
-    <linearGradient id="plane-body" x1="40" y1="30" x2="80" y2="75" gradientUnits="userSpaceOnUse">
+    <linearGradient id="body" x1="30" y1="40" x2="90" y2="80" gradientUnits="userSpaceOnUse">
       <stop offset="0%" stop-color="#f8fafc"/>
       <stop offset="100%" stop-color="#94a3b8"/>
     </linearGradient>
-    <!-- Multiverse trail gradients -->
-    <linearGradient id="trail1" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#f97316" stop-opacity="0.9"/>
-      <stop offset="100%" stop-color="#f97316" stop-opacity="0"/>
-    </linearGradient>
-    <linearGradient id="trail2" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#8b5cf6" stop-opacity="0.8"/>
-      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0"/>
-    </linearGradient>
-    <linearGradient id="trail3" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#06b6d4" stop-opacity="0.7"/>
-      <stop offset="100%" stop-color="#06b6d4" stop-opacity="0"/>
-    </linearGradient>
-    <linearGradient id="trail4" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#22c55e" stop-opacity="0.6"/>
-      <stop offset="100%" stop-color="#22c55e" stop-opacity="0"/>
-    </linearGradient>
-    <linearGradient id="trail5" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#ec4899" stop-opacity="0.7"/>
-      <stop offset="100%" stop-color="#ec4899" stop-opacity="0"/>
-    </linearGradient>
-    <!-- Engine glow -->
-    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="#fbbf24" stop-opacity="0.6"/>
-      <stop offset="100%" stop-color="#f97316" stop-opacity="0"/>
-    </radialGradient>
   </defs>
 
-  <!-- Deep space background -->
+  <!-- Background -->
   <rect width="128" height="128" rx="26" fill="url(#bg)"/>
 
   <!-- Stars -->
-  <circle cx="12" cy="18" r="1.2" fill="#fff" opacity=".7"/>
-  <circle cx="110" cy="12" r="1" fill="#fff" opacity=".5"/>
-  <circle cx="8" cy="72" r="0.8" fill="#fff" opacity=".4"/>
-  <circle cx="118" cy="65" r="1.1" fill="#fff" opacity=".5"/>
-  <circle cx="20" cy="110" r="0.9" fill="#fff" opacity=".3"/>
-  <circle cx="105" cy="108" r="1.3" fill="#fff" opacity=".4"/>
-  <circle cx="35" cy="10" r="0.7" fill="#fff" opacity=".6"/>
-  <circle cx="95" cy="22" r="0.8" fill="#fff" opacity=".35"/>
-  <circle cx="16" cy="48" r="1" fill="#fff" opacity=".4"/>
-  <circle cx="120" cy="40" r="0.7" fill="#fff" opacity=".3"/>
-  <circle cx="70" cy="8" r="0.6" fill="#fff" opacity=".5"/>
-  <circle cx="50" cy="120" r="0.8" fill="#fff" opacity=".3"/>
+  <circle cx="14" cy="16" r="1.2" fill="#fff" opacity=".6"/>
+  <circle cx="108" cy="14" r="1" fill="#fff" opacity=".45"/>
+  <circle cx="10" cy="64" r="0.9" fill="#fff" opacity=".35"/>
+  <circle cx="120" cy="58" r="1" fill="#fff" opacity=".4"/>
+  <circle cx="22" cy="112" r="0.8" fill="#fff" opacity=".3"/>
+  <circle cx="106" cy="106" r="1.1" fill="#fff" opacity=".35"/>
+  <circle cx="50" cy="10" r="0.7" fill="#fff" opacity=".5"/>
+  <circle cx="90" cy="24" r="0.6" fill="#fff" opacity=".3"/>
+  <circle cx="118" cy="86" r="0.8" fill="#fff" opacity=".3"/>
+  <circle cx="30" cy="42" r="0.7" fill="#fff" opacity=".4"/>
 
-  <!-- Destination dots (where trails end) -->
-  <circle cx="8" cy="28" r="2.5" fill="#f97316" opacity=".5"/>
-  <circle cx="6" cy="58" r="2.5" fill="#8b5cf6" opacity=".4"/>
-  <circle cx="14" cy="88" r="2.5" fill="#06b6d4" opacity=".4"/>
-  <circle cx="30" cy="108" r="2.5" fill="#22c55e" opacity=".35"/>
-  <circle cx="8" cy="105" r="2.5" fill="#ec4899" opacity=".35"/>
+  <!-- Multiple trajectory arcs — fanning out behind the plane -->
+  <path d="M58 62 Q40 50 14 20" stroke="#f97316" stroke-width="2" fill="none" stroke-linecap="round" opacity=".6"/>
+  <path d="M56 66 Q36 62 10 52" stroke="#a78bfa" stroke-width="2" fill="none" stroke-linecap="round" opacity=".5"/>
+  <path d="M56 70 Q38 76 12 86" stroke="#22d3ee" stroke-width="2" fill="none" stroke-linecap="round" opacity=".45"/>
+  <path d="M56 74 Q40 88 20 110" stroke="#34d399" stroke-width="2" fill="none" stroke-linecap="round" opacity=".4"/>
+  <path d="M58 68 Q34 68 8 68" stroke="#818cf8" stroke-width="1.8" fill="none" stroke-linecap="round" opacity=".35"/>
 
-  <!-- Multiverse trails — curving from plane tail to different destinations -->
-  <path d="M52 68 Q36 52 8 28" stroke="url(#trail1)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-  <path d="M50 72 Q32 68 6 58" stroke="url(#trail2)" stroke-width="2.2" fill="none" stroke-linecap="round"/>
-  <path d="M50 76 Q34 82 14 88" stroke="url(#trail3)" stroke-width="2" fill="none" stroke-linecap="round"/>
-  <path d="M52 80 Q42 94 30 108" stroke="url(#trail4)" stroke-width="1.8" fill="none" stroke-linecap="round"/>
-  <path d="M48 82 Q30 96 8 105" stroke="url(#trail5)" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+  <!-- Destination markers -->
+  <circle cx="14" cy="20" r="2.5" fill="#f97316" opacity=".55"/>
+  <circle cx="10" cy="52" r="2.5" fill="#a78bfa" opacity=".45"/>
+  <circle cx="8" cy="68" r="2.5" fill="#818cf8" opacity=".4"/>
+  <circle cx="12" cy="86" r="2.5" fill="#22d3ee" opacity=".4"/>
+  <circle cx="20" cy="110" r="2.5" fill="#34d399" opacity=".4"/>
 
-  <!-- Ghost planes on trails (faded multiverse copies) -->
-  <g opacity="0.2" transform="translate(-28,-24) scale(0.35) rotate(-30 64 60)">
-    <path d="M64 30 L54 50 L40 48 L54 60 L48 80 L64 68 L80 80 L74 60 L88 48 L74 50Z" fill="#f97316"/>
-  </g>
-  <g opacity="0.15" transform="translate(-32,6) scale(0.3) rotate(-10 64 60)">
-    <path d="M64 30 L54 50 L40 48 L54 60 L48 80 L64 68 L80 80 L74 60 L88 48 L74 50Z" fill="#8b5cf6"/>
-  </g>
-  <g opacity="0.15" transform="translate(-24,40) scale(0.28) rotate(15 64 60)">
-    <path d="M64 30 L54 50 L40 48 L54 60 L48 80 L64 68 L80 80 L74 60 L88 48 L74 50Z" fill="#06b6d4"/>
-  </g>
+  <!-- Airplane — clean side-profile, flying right → -->
+  <!-- Fuselage -->
+  <ellipse cx="78" cy="68" rx="28" ry="8" fill="url(#body)"/>
+  <!-- Nose -->
+  <path d="M106 68 Q114 68 108 66 Q106 65 106 68Z" fill="#e2e8f0"/>
+  <path d="M106 68 Q114 68 108 70 Q106 71 106 68Z" fill="#cbd5e1"/>
+  <!-- Cockpit window -->
+  <path d="M100 64 Q104 62 106 64 Q106 66 102 66Z" fill="#0ea5e9" opacity=".7"/>
+  <path d="M101 64.5 Q103 63 104.5 64.5" fill="#38bdf8" opacity=".3"/>
+  <!-- Passenger windows -->
+  <circle cx="94" cy="65.5" r="1.3" fill="#1e3a5f" opacity=".6"/>
+  <circle cx="89" cy="65.5" r="1.3" fill="#1e3a5f" opacity=".6"/>
+  <circle cx="84" cy="65.5" r="1.3" fill="#1e3a5f" opacity=".6"/>
+  <circle cx="79" cy="65.5" r="1.3" fill="#1e3a5f" opacity=".6"/>
+  <circle cx="74" cy="65.5" r="1.3" fill="#1e3a5f" opacity=".5"/>
+  <!-- Main wing -->
+  <path d="M72 68 L60 82 L64 82 L82 68Z" fill="#6366f1"/>
+  <path d="M72 68 L60 54 L64 54 L82 68Z" fill="#6366f1"/>
+  <!-- Wing highlights -->
+  <path d="M72 68 L62 80 L64 80 L80 68Z" fill="#818cf8" opacity=".3"/>
+  <path d="M72 68 L62 56 L64 56 L80 68Z" fill="#818cf8" opacity=".3"/>
+  <!-- Tail vertical stabilizer -->
+  <path d="M52 68 L48 48 L54 48 L56 68Z" fill="#6366f1"/>
+  <path d="M52 68 L50 50 L54 50 L55 68Z" fill="#818cf8" opacity=".3"/>
+  <!-- Tail horizontal stabilizer -->
+  <path d="M50 68 L44 74 L48 74 L54 68Z" fill="#6366f1" opacity=".8"/>
+  <path d="M50 68 L44 62 L48 62 L54 68Z" fill="#6366f1" opacity=".8"/>
+  <!-- Engine under wing -->
+  <ellipse cx="70" cy="76" rx="5" ry="2.5" fill="#94a3b8"/>
+  <ellipse cx="70" cy="76" rx="4" ry="2" fill="#cbd5e1"/>
+  <!-- Engine glow -->
+  <ellipse cx="65" cy="76" rx="3" ry="1.5" fill="#fbbf24" opacity=".4"/>
 
-  <!-- Engine glow behind plane -->
-  <ellipse cx="52" cy="76" rx="12" ry="8" fill="url(#glow)"/>
-
-  <!-- Main airplane body — angled, flying upper-right -->
-  <g transform="translate(62,52) rotate(-35) translate(-64,-60)">
-    <!-- Fuselage -->
-    <path d="M64 24 C58 24 54 34 54 48 L54 76 C54 80 58 82 64 82 C70 82 74 80 74 76 L74 48 C74 34 70 24 64 24Z" fill="url(#plane-body)"/>
-    <!-- Nose cone -->
-    <path d="M64 24 C60 24 57 30 56 36 L72 36 C71 30 68 24 64 24Z" fill="#e2e8f0"/>
-    <!-- Wings -->
-    <path d="M54 54 L32 62 L34 58 L54 50Z" fill="#6366f1"/>
-    <path d="M74 54 L96 62 L94 58 L74 50Z" fill="#6366f1"/>
-    <!-- Tail fin -->
-    <path d="M60 78 L56 88 L64 82Z" fill="#6366f1" opacity=".8"/>
-    <path d="M68 78 L72 88 L64 82Z" fill="#6366f1" opacity=".8"/>
-    <path d="M62 76 L64 88 L66 76Z" fill="#818cf8" opacity=".6"/>
-    <!-- Wing stripe accents -->
-    <line x1="42" y1="57" x2="54" y2="52" stroke="#818cf8" stroke-width="1" opacity=".5"/>
-    <line x1="86" y1="57" x2="74" y2="52" stroke="#818cf8" stroke-width="1" opacity=".5"/>
-    <!-- Cockpit window -->
-    <ellipse cx="64" cy="40" rx="7" ry="8" fill="#0c2d48"/>
-    <ellipse cx="64" cy="40" rx="6" ry="7" fill="#0ea5e9" opacity=".25"/>
-    <!-- Pilot head -->
-    <circle cx="64" cy="37" r="3.8" fill="#fbbf24"/>
-    <!-- Pilot cap -->
-    <path d="M60.2 35.5 Q64 33 67.8 35.5 Q67.8 34 64 33 Q60.2 34 60.2 35.5Z" fill="#1e3a5f"/>
-    <!-- Pilot goggles/visor -->
-    <path d="M60.8 36.5 Q64 35 67.2 36.5 Q67.2 38.5 64 39 Q60.8 38.5 60.8 36.5Z" fill="#38bdf8" opacity=".7"/>
-    <!-- Pilot smile -->
-    <path d="M62.5 39.5 Q64 40.8 65.5 39.5" stroke="#92400e" stroke-width="0.6" fill="none" stroke-linecap="round"/>
-    <!-- Body/jacket -->
-    <ellipse cx="64" cy="44" rx="3.5" ry="2.5" fill="#f97316" opacity=".65"/>
-  </g>
-
-  <!-- Waving hand — positioned outside/above the window -->
-  <g transform="translate(62,52) rotate(-35) translate(-64,-60)">
-    <!-- Arm extending out from cockpit -->
-    <path d="M70 38 Q74 34 76 30" stroke="#fbbf24" stroke-width="2" fill="none" stroke-linecap="round"/>
-    <!-- Hand (open palm waving) -->
-    <circle cx="76" cy="29" r="2.2" fill="#fbbf24"/>
-    <!-- Fingers -->
-    <line x1="74.5" y1="27.5" x2="73.5" y2="26" stroke="#fbbf24" stroke-width="1" stroke-linecap="round"/>
-    <line x1="75.8" y1="27" x2="75.5" y2="25.2" stroke="#fbbf24" stroke-width="1" stroke-linecap="round"/>
-    <line x1="77" y1="27.2" x2="77.5" y2="25.5" stroke="#fbbf24" stroke-width="1" stroke-linecap="round"/>
-    <line x1="78" y1="28" x2="79" y2="26.5" stroke="#fbbf24" stroke-width="1" stroke-linecap="round"/>
-  </g>
-
-  <!-- Speed lines (motion blur) -->
-  <line x1="90" y1="20" x2="100" y2="14" stroke="#fff" stroke-width="1.5" stroke-linecap="round" opacity=".2"/>
-  <line x1="95" y1="28" x2="108" y2="20" stroke="#fff" stroke-width="1.2" stroke-linecap="round" opacity=".15"/>
-  <line x1="88" y1="36" x2="96" y2="32" stroke="#fff" stroke-width="1" stroke-linecap="round" opacity=".12"/>
-  <line x1="100" y1="44" x2="114" y2="36" stroke="#fff" stroke-width="1.3" stroke-linecap="round" opacity=".15"/>
-  <line x1="92" y1="52" x2="102" y2="47" stroke="#fff" stroke-width="1" stroke-linecap="round" opacity=".1"/>
-
-  <!-- Subtle portal/warp ring around the split point -->
-  <ellipse cx="50" cy="75" rx="14" ry="6" fill="none" stroke="#a78bfa" stroke-width="1" opacity=".3" transform="rotate(-20 50 75)"/>
-  <ellipse cx="50" cy="75" rx="18" ry="8" fill="none" stroke="#c084fc" stroke-width="0.7" opacity=".15" transform="rotate(-20 50 75)"/>
+  <!-- Speed lines -->
+  <line x1="40" y1="64" x2="32" y2="64" stroke="#fff" stroke-width="1.5" stroke-linecap="round" opacity=".2"/>
+  <line x1="42" y1="72" x2="36" y2="72" stroke="#fff" stroke-width="1.2" stroke-linecap="round" opacity=".15"/>
+  <line x1="44" y1="56" x2="38" y2="56" stroke="#fff" stroke-width="1" stroke-linecap="round" opacity=".12"/>
 </svg>
