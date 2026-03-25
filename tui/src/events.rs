@@ -200,7 +200,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             app.focus = Focus::HistoryList;
             return;
         }
-        KeyCode::Char('l') if !in_text_input && app.mode != Mode::Logs => {
+        KeyCode::Char('l') if !in_text_input && app.mode != Mode::Logs
+            && !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.mode = Mode::Logs;
             return;
         }
@@ -306,6 +307,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             toolbar::handle_toolbar_shortcuts(app, key);
             return;
         }
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            toolbar::handle_toolbar_shortcuts(app, key);
+            return;
+        }
         _ => {}
     }
 
@@ -341,7 +346,7 @@ fn handle_input_mode(app: &mut App, key: KeyEvent) {
             return;
         }
         KeyCode::Tab => {
-            if matches!(purpose, InputPurpose::OpenFile | InputPurpose::LoadEnv) {
+            if matches!(purpose, InputPurpose::OpenFile | InputPurpose::LoadEnv | InputPurpose::SaveFile) {
                 if app.autocomplete_suggestions.is_empty() || app.autocomplete_idx.is_none() {
                     app.compute_file_completions(&buffer);
                 }
@@ -356,7 +361,7 @@ fn handle_input_mode(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::BackTab => {
-            if matches!(purpose, InputPurpose::OpenFile | InputPurpose::LoadEnv)
+            if matches!(purpose, InputPurpose::OpenFile | InputPurpose::LoadEnv | InputPurpose::SaveFile)
                 && !app.autocomplete_suggestions.is_empty()
             {
                 let len = app.autocomplete_suggestions.len();
