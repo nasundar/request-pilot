@@ -70,23 +70,9 @@ pub struct LiveCaptureState {
     pub connected: Mutex<bool>,
     /// Shutdown signal to wake the accept loop
     pub shutdown: Notify,
-    /// Number of captured requests
-    pub request_count: Mutex<u64>,
 }
 
 impl LiveCaptureState {
-    pub fn new() -> Self {
-        let (command_tx, _) = broadcast::channel(64);
-        Self {
-            mode: Mutex::new("off".to_string()),
-            command_tx,
-            running: Mutex::new(false),
-            connected: Mutex::new(false),
-            shutdown: Notify::new(),
-            request_count: Mutex::new(0),
-        }
-    }
-
     pub fn new_with_mode(mode: &str) -> Self {
         let (command_tx, _) = broadcast::channel(64);
         Self {
@@ -95,7 +81,6 @@ impl LiveCaptureState {
             running: Mutex::new(false),
             connected: Mutex::new(false),
             shutdown: Notify::new(),
-            request_count: Mutex::new(0),
         }
     }
 }

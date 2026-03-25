@@ -93,7 +93,12 @@ fn render_method_url(
     let block = Block::default()
         .title(" Method / URL  (Tab cycle, ←/→ method, Ctrl+Enter send) ")
         .borders(Borders::ALL)
-        .border_style(border_style);
+        .border_style(border_style)
+        .style(if is_focused {
+            Style::default().bg(theme::BG_FOCUS())
+        } else {
+            Style::default()
+        });
 
     let method_style = if app.builder_focus == BuilderFocus::Method {
         Style::default()
@@ -172,7 +177,12 @@ fn render_headers(
     let block = Block::default()
         .title(format!(" Headers ({}) ", blk.request.headers.len()))
         .borders(Borders::ALL)
-        .border_style(border_style);
+        .border_style(border_style)
+        .style(if is_focused {
+            Style::default().bg(theme::BG_FOCUS())
+        } else {
+            Style::default()
+        });
 
     if blk.request.headers.is_empty() {
         frame.render_widget(
@@ -228,7 +238,12 @@ fn render_body(
     let block = Block::default()
         .title(" Body ")
         .borders(Borders::ALL)
-        .border_style(border_style);
+        .border_style(border_style)
+        .style(if is_focused {
+            Style::default().bg(theme::BG_FOCUS())
+        } else {
+            Style::default()
+        });
 
     match &blk.request.body {
         Some(body) if !body.is_empty() => {

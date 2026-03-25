@@ -361,10 +361,16 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(" Assertions(a) ", tab_style(ResponseTab::Assertions)),
         Span::raw(" "),
     ]);
+    let is_focused = app.focus == Focus::Response;
     let block_widget = Block::default()
         .title(title_line)
         .borders(Borders::ALL)
-        .border_style(border_style);
+        .border_style(border_style)
+        .style(if is_focused {
+            Style::default().bg(theme::BG_FOCUS())
+        } else {
+            Style::default()
+        });
 
     if let (Some(fi), Some(bi)) = (app.active_file_idx, app.active_block_idx) {
         if let Some(file) = app.loaded_files.get(fi) {
@@ -967,7 +973,16 @@ pub fn handle_response_keys(app: &mut App, key: KeyEvent) {
                     Some((body_a, body_b, label_a, label_b))
                 });
                 if let Some((body_a, body_b, label_a, label_b)) = diff_data {
-                    app.open_diff_viewer(&body_a, &body_b, label_a, label_b);
+                    let format_body = |body: &str| -> String {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+                            serde_json::to_string_pretty(&val).unwrap_or_else(|_| body.to_string())
+                        } else {
+                            body.to_string()
+                        }
+                    };
+                    let text_a = format_body(&body_a);
+                    let text_b = format_body(&body_b);
+                    app.open_diff_viewer(&text_a, &text_b, label_a, label_b);
                 }
             }
         }

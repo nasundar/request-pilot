@@ -318,7 +318,7 @@ pub fn render_diff_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(
-            " Diff: {} vs {} | +{} -{} ~{} | {} | Esc close, m toggle ",
+            " Diff: {} vs {} | +{} -{} ~{} | {} | Esc close, m toggle, n/N next/prev diff ",
             data.label_a,
             data.label_b,
             data.stats.added,
@@ -484,6 +484,27 @@ pub fn handle_diff_keys(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('G') => {
             data.scroll = data.display_lines.len().saturating_sub(1);
+        }
+        KeyCode::Char('n') => {
+            let scroll = data.scroll;
+            if let Some(pos) = data.display_lines.iter().enumerate()
+                .skip(scroll + 1)
+                .find(|(_, line)| matches!(line, DisplayLine::Added(_) | DisplayLine::Removed(_) | DisplayLine::Modified(_, _)))
+                .map(|(i, _)| i)
+            {
+                data.scroll = pos;
+            }
+        }
+        KeyCode::Char('N') => {
+            if data.scroll > 0 {
+                if let Some(pos) = data.display_lines[..data.scroll].iter().enumerate()
+                    .rev()
+                    .find(|(_, line)| matches!(line, DisplayLine::Added(_) | DisplayLine::Removed(_) | DisplayLine::Modified(_, _)))
+                    .map(|(i, _)| i)
+                {
+                    data.scroll = pos;
+                }
+            }
         }
         KeyCode::Char('m') => {
             data.toggle_mode();

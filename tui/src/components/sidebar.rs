@@ -28,7 +28,12 @@ pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(border_style);
+        .border_style(border_style)
+        .style(if is_focused {
+            Style::default().bg(theme::BG_FOCUS())
+        } else {
+            Style::default()
+        });
 
     match app.sidebar_tab {
         SidebarTab::Files => {

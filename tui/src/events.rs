@@ -439,7 +439,7 @@ fn handle_files_mode(app: &mut App, key: KeyEvent) {
                 app.sidebar_tab = SidebarTab::Files;
             }
             Focus::CodeView => { app.focus = Focus::FileTree; }
-            Focus::FileTree => { app.should_quit = true; }
+            Focus::FileTree => {}
             _ => {}
         }
         return;

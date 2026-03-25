@@ -224,6 +224,14 @@ pub mod theme {
         );
     }
 
+    pub fn BG_FOCUS() -> Color {
+        let pal = p();
+        if let Color::Rgb(r, g, b) = pal.bg_dark {
+            Color::Rgb(r.saturating_add(8), g.saturating_add(8), b.saturating_add(10))
+        } else {
+            pal.bg_surface
+        }
+    }
     pub fn BG_DARK() -> Color { p().bg_dark }
     pub fn BG_BASE() -> Color { p().bg_base }
     pub fn BG_SURFACE() -> Color { p().bg_surface }
@@ -969,12 +977,12 @@ fn get_keyhints(app: &App) -> String {
         Mode::Files => match app.focus {
             Focus::FileTree | Focus::CodeView => {
                 if app.sidebar_tab == SidebarTab::Variables {
-                    " ↑↓=nav  a=add  e=edit  d=delete  V=files  Esc=quit ".to_string()
+                    " ↑↓=nav  a=add  e=edit  d=delete  V=files  q=quit ".to_string()
                 } else {
-                    " ↑↓=nav  Enter=select  e=code  o=open  r=run  R=RunAll  Ctrl+T=OTEL  Ctrl+A=Azure  Ctrl+L=Ext  Esc=quit ".to_string()
+                    " ↑↓=nav  Enter=select  e=code  o=open  r=run  R=RunAll  Ctrl+T=OTEL  Ctrl+A=Azure  Ctrl+L=Ext  q=quit ".to_string()
                 }
             }
-            Focus::Variables => " ↑↓=nav  a=add  e=edit  d=delete  V=files  Esc=quit ".to_string(),
+            Focus::Variables => " ↑↓=nav  a=add  e=edit  d=delete  V=files  q=quit ".to_string(),
             Focus::Builder => " Tab=cycle  ←→=method  Enter=edit  Ctrl+Enter=send  Esc=back ".to_string(),
             Focus::Response => " ↑↓=nav  Enter=expand  E=all  C=collapse  b=body  H=hdrs  D=diff  y=copy  Esc=back ".to_string(),
             _ => " q=quit  Tab=focus  r=run  ?=help ".to_string(),
