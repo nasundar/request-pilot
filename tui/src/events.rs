@@ -110,6 +110,21 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             crate::ui::theme::cycle_next();
             return;
         }
+        KeyCode::Char('V') if !in_text_input => {
+            app.sidebar_tab = match app.sidebar_tab {
+                SidebarTab::Files => {
+                    app.focus = Focus::Variables;
+                    app.mode = Mode::Files;
+                    SidebarTab::Variables
+                }
+                SidebarTab::Variables => {
+                    app.focus = Focus::FileTree;
+                    app.mode = Mode::Files;
+                    SidebarTab::Files
+                }
+            };
+            return;
+        }
         KeyCode::Tab if app.mode != Mode::Logs && app.focus != Focus::Builder => {
             cycle_focus(app);
             return;
@@ -145,12 +160,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             return;
         }
         KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            toolbar::handle_toolbar_shortcuts(app, key);
-            return;
+            // In Code mode, Ctrl+X = Cut (not clear all)
+            if app.mode != Mode::Code {
+                toolbar::handle_toolbar_shortcuts(app, key);
+                return;
+            }
         }
         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            toolbar::handle_toolbar_shortcuts(app, key);
-            return;
+            // In Code mode, Ctrl+A = Select All (not Azure popup)
+            if app.mode != Mode::Code {
+                toolbar::handle_toolbar_shortcuts(app, key);
+                return;
+            }
         }
         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             toolbar::handle_toolbar_shortcuts(app, key);
@@ -274,21 +295,6 @@ fn cycle_focus(app: &mut App) {
 }
 
 fn handle_files_mode(app: &mut App, key: KeyEvent) {
-    // Sidebar tab switching (Ctrl+V)
-    if key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        app.sidebar_tab = match app.sidebar_tab {
-            SidebarTab::Files => {
-                app.focus = Focus::Variables;
-                SidebarTab::Variables
-            }
-            SidebarTab::Variables => {
-                app.focus = Focus::FileTree;
-                SidebarTab::Files
-            }
-        };
-        return;
-    }
-
     // Esc navigates back one level
     if key.code == KeyCode::Esc {
         match app.focus {

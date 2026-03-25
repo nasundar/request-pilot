@@ -551,18 +551,18 @@ fn get_keyhints(app: &App) -> String {
         Mode::Files => match app.focus {
             Focus::FileTree | Focus::CodeView => {
                 if app.sidebar_tab == SidebarTab::Variables {
-                    " \u{2191}\u{2193}=nav  a=add  e=edit  d=delete  Ctrl+V=files  Esc=quit ".to_string()
+                    " \u{2191}\u{2193}=nav  a=add  e=edit  d=delete  V=files  Esc=quit ".to_string()
                 } else {
-                    " \u{2191}\u{2193}=nav  Enter=select  o=open  r=run  R=RunAll  t=toggle  Ctrl+V=vars  Esc=quit ".to_string()
+                    " \u{2191}\u{2193}=nav  Enter=select  o=open  r=run  R=RunAll  t=toggle  V=vars  Esc=quit ".to_string()
                 }
             }
-            Focus::Variables => " \u{2191}\u{2193}=nav  a=add  e=edit  d=delete  Ctrl+V=files  Esc=quit ".to_string(),
+            Focus::Variables => " \u{2191}\u{2193}=nav  a=add  e=edit  d=delete  V=files  Esc=quit ".to_string(),
             Focus::Builder => " Tab=cycle  \u{2190}\u{2192}=method  Enter=edit  Ctrl+Enter=send  Esc=back ".to_string(),
             Focus::Response => " \u{2191}\u{2193}=nav  Enter=expand  E=all  C=collapse  b=body  h=hdrs  y=copy  Esc=back ".to_string(),
             _ => " q=quit  Tab=focus  r=run  ?=help ".to_string(),
         },
         Mode::History => " \u{2191}\u{2193}=nav  g=group  m=method  s=status  Enter=detail  Space=compare  Esc=files ".to_string(),
-        Mode::Code => " Type to edit  Ctrl+S=save  Ctrl+D/U=scroll  /=search  Esc=exit ".to_string(),
+        Mode::Code => " Type to edit  Ctrl+S=save  Ctrl+C/X/V=copy/cut/paste  Ctrl+A=select all  Shift+Arrow=select  /=search  Esc=exit ".to_string(),
         Mode::Logs => " \u{2191}\u{2193}=scroll  f=filter  c=clear  Esc=files ".to_string(),
     }
 }

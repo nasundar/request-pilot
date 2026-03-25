@@ -347,12 +347,14 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
             Vec::new()
         };
 
-        if line_matches.is_empty() {
+        let has_selection = app.editor_selection_anchor.is_some();
+
+        if line_matches.is_empty() && !has_selection {
             for s in highlight_line(raw, in_body_flags[i]) {
                 spans.push(Span::styled(s.content.to_string(), s.style.bg(bg)));
             }
         } else {
-            // Render with search highlights overlaid
+            // Render with per-char styles for search highlights and/or selection
             let base_spans = highlight_line(raw, in_body_flags[i]);
             let chars: Vec<char> = raw.chars().collect();
             let mut char_styles: Vec<Style> = vec![Style::default().fg(theme::TEXT()).bg(bg); chars.len()];
@@ -368,7 +370,16 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
                     }
                 }
             }
-            // Apply search highlight
+            // Apply selection highlight
+            if has_selection {
+                for ci in 0..chars.len() {
+                    if is_in_selection(app, i, ci) {
+                        let base = char_styles[ci];
+                        char_styles[ci] = base.bg(theme::BG_HIGHLIGHT());
+                    }
+                }
+            }
+            // Apply search highlight (on top of selection)
             for &(col, is_current) in &line_matches {
                 let hl_bg = if is_current { theme::PEACH() } else { theme::YELLOW() };
                 let hl_fg = theme::BG_DARK();
@@ -614,20 +625,142 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
                 app.code_editor_cursor_line = app.code_editor_cursor_line.saturating_sub(15);
                 clamp_cursor_col(app);
                 ensure_cursor_visible(app);
+                app.editor_selection_anchor = None;
             }
             KeyCode::Char('d') => {
                 app.code_editor_cursor_line =
                     (app.code_editor_cursor_line + 15).min(total_lines.saturating_sub(1));
                 clamp_cursor_col(app);
                 ensure_cursor_visible(app);
+                app.editor_selection_anchor = None;
             }
             KeyCode::Char('g') => {
                 app.editor_goto_active = true;
                 app.editor_goto_buffer.clear();
             }
+            KeyCode::Char('c') => {
+                if let Some(text) = get_selected_text(app) {
+                    if clipboard_set(&text) {
+                        app.set_status(format!("Copied {} chars", text.len()));
+                    } else {
+                        app.set_status("Copy failed".into());
+                    }
+                }
+            }
+            KeyCode::Char('v') => {
+                if let Some(text) = clipboard_get() {
+                    // If there's a selection, delete it first
+                    if app.editor_selection_anchor.is_some() {
+                        delete_selection(app);
+                    }
+                    let off = line_col_to_offset(
+                        &app.code_editor_content,
+                        app.code_editor_cursor_line,
+                        app.code_editor_cursor_col,
+                    );
+                    app.code_editor_content.insert_str(off, &text);
+                    // Move cursor to end of pasted text
+                    let newlines = text.matches('\n').count();
+                    if newlines > 0 {
+                        app.code_editor_cursor_line += newlines;
+                        let last_line = text.rsplit('\n').next().unwrap_or("");
+                        app.code_editor_cursor_col = last_line.chars().count();
+                    } else {
+                        app.code_editor_cursor_col += text.chars().count();
+                    }
+                    app.code_editor_modified = true;
+                    app.editor_selection_anchor = None;
+                    ensure_cursor_visible(app);
+                    app.set_status(format!("Pasted {} chars", text.len()));
+                }
+            }
+            KeyCode::Char('a') => {
+                // Select all
+                app.editor_selection_anchor = Some((0, 0));
+                let last_line = total_lines.saturating_sub(1);
+                app.code_editor_cursor_line = last_line;
+                app.code_editor_cursor_col = get_line_len(&app.code_editor_content, last_line);
+                ensure_cursor_visible(app);
+            }
+            KeyCode::Char('x') => {
+                // Cut
+                if let Some(text) = get_selected_text(app) {
+                    if clipboard_set(&text) {
+                        delete_selection(app);
+                        app.code_editor_modified = true;
+                        app.set_status(format!("Cut {} chars", text.len()));
+                    }
+                }
+            }
             _ => {}
         }
         return;
+    }
+
+    // Shift+Arrow for selection
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        match key.code {
+            KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+            | KeyCode::Home | KeyCode::End => {
+                // Set anchor if starting a new selection
+                if app.editor_selection_anchor.is_none() {
+                    app.editor_selection_anchor = Some((
+                        app.code_editor_cursor_line,
+                        app.code_editor_cursor_col,
+                    ));
+                }
+                // Move cursor (same logic as normal movement)
+                match key.code {
+                    KeyCode::Up => {
+                        if app.code_editor_cursor_line > 0 {
+                            app.code_editor_cursor_line -= 1;
+                            clamp_cursor_col(app);
+                            ensure_cursor_visible(app);
+                        }
+                    }
+                    KeyCode::Down => {
+                        if app.code_editor_cursor_line + 1 < total_lines {
+                            app.code_editor_cursor_line += 1;
+                            clamp_cursor_col(app);
+                            ensure_cursor_visible(app);
+                        }
+                    }
+                    KeyCode::Left => {
+                        if app.code_editor_cursor_col > 0 {
+                            app.code_editor_cursor_col -= 1;
+                        } else if app.code_editor_cursor_line > 0 {
+                            app.code_editor_cursor_line -= 1;
+                            app.code_editor_cursor_col =
+                                get_line_len(&app.code_editor_content, app.code_editor_cursor_line);
+                            ensure_cursor_visible(app);
+                        }
+                    }
+                    KeyCode::Right => {
+                        let ll = get_line_len(&app.code_editor_content, app.code_editor_cursor_line);
+                        if app.code_editor_cursor_col < ll {
+                            app.code_editor_cursor_col += 1;
+                        } else if app.code_editor_cursor_line + 1 < total_lines {
+                            app.code_editor_cursor_line += 1;
+                            app.code_editor_cursor_col = 0;
+                            ensure_cursor_visible(app);
+                        }
+                    }
+                    KeyCode::Home => { app.code_editor_cursor_col = 0; }
+                    KeyCode::End => {
+                        app.code_editor_cursor_col =
+                            get_line_len(&app.code_editor_content, app.code_editor_cursor_line);
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    // Clear selection on any non-shift, non-ctrl key
+    if !key.modifiers.contains(KeyModifiers::SHIFT) {
+        app.editor_selection_anchor = None;
     }
 
     match key.code {
@@ -800,6 +933,75 @@ fn ensure_cursor_visible(app: &mut App) {
         app.code_editor_scroll = cursor;
     } else if cursor >= scroll + visible {
         app.code_editor_scroll = cursor.saturating_sub(visible - 1);
+    }
+}
+
+/// Get the ordered selection range as (start_offset, end_offset) into the content string.
+fn selection_offsets(app: &App) -> Option<(usize, usize)> {
+    let anchor = app.editor_selection_anchor?;
+    let cursor = (app.code_editor_cursor_line, app.code_editor_cursor_col);
+    let (start, end) = if anchor <= cursor { (anchor, cursor) } else { (cursor, anchor) };
+    let s = line_col_to_offset(&app.code_editor_content, start.0, start.1);
+    let e = line_col_to_offset(&app.code_editor_content, end.0, end.1);
+    if s == e { None } else { Some((s, e)) }
+}
+
+fn get_selected_text(app: &App) -> Option<String> {
+    let (s, e) = selection_offsets(app)?;
+    Some(app.code_editor_content[s..e].to_string())
+}
+
+fn delete_selection(app: &mut App) {
+    if let Some((s, e)) = selection_offsets(app) {
+        let anchor = app.editor_selection_anchor.unwrap();
+        let cursor = (app.code_editor_cursor_line, app.code_editor_cursor_col);
+        let start = if anchor <= cursor { anchor } else { cursor };
+        app.code_editor_content.replace_range(s..e, "");
+        app.code_editor_cursor_line = start.0;
+        app.code_editor_cursor_col = start.1;
+        app.editor_selection_anchor = None;
+        clamp_cursor_col(app);
+    }
+}
+
+/// Check if a position (line, col) is within the current selection range.
+pub fn is_in_selection(app: &App, line: usize, col: usize) -> bool {
+    let anchor = match app.editor_selection_anchor {
+        Some(a) => a,
+        None => return false,
+    };
+    let cursor = (app.code_editor_cursor_line, app.code_editor_cursor_col);
+    let (start, end) = if anchor <= cursor { (anchor, cursor) } else { (cursor, anchor) };
+    if line < start.0 || line > end.0 { return false; }
+    if line == start.0 && line == end.0 { return col >= start.1 && col < end.1; }
+    if line == start.0 { return col >= start.1; }
+    if line == end.0 { return col < end.1; }
+    true
+}
+
+fn clipboard_set(text: &str) -> bool {
+    use std::io::Write;
+    std::process::Command::new("clip")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.as_mut().unwrap().write_all(text.as_bytes())?;
+            child.wait()
+        })
+        .is_ok()
+}
+
+fn clipboard_get() -> Option<String> {
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", "Get-Clipboard"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        let trimmed = text.trim_end_matches("\r\n").trim_end_matches('\n');
+        if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+    } else {
+        None
     }
 }
 
