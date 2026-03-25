@@ -9,6 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
 use crate::app::{App, Focus, ResponseTab};
 use crate::ui::theme;
+use crate::ui::truncate_to;
 
 const LARGE_BODY_THRESHOLD: usize = 262_144;
 const PREVIEW_SIZE: usize = 8_192;
@@ -512,8 +513,10 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
                                     } else {
                                         ("\u{2717}", theme::RED())
                                     };
+                                    let max_a = (area.width as usize).saturating_sub(6);
+                                    let display_a = truncate_to(&ar.assertion, max_a);
                                     lines.push(Line::from(Span::styled(
-                                        format!(" {} {}", icon, ar.assertion),
+                                        format!(" {} {}", icon, display_a),
                                         Style::default()
                                             .fg(color)
                                             .add_modifier(Modifier::BOLD),

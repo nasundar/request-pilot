@@ -10,6 +10,7 @@ use ratatui::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::{App, BuilderFocus};
 use crate::ui::theme;
+use crate::ui::truncate_to;
 
 const METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
@@ -195,13 +196,15 @@ fn render_headers(
             } else {
                 ratatui::style::Color::Reset
             };
+            let max_val = (area.width as usize).saturating_sub(k.len() + 6);
+            let display_val = truncate_to(v, max_val);
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("  {}", k),
                     Style::default().fg(theme::LAVENDER()).bg(bg),
                 ),
                 Span::styled(": ", Style::default().fg(theme::TEXT_FAINT()).bg(bg)),
-                Span::styled(v, Style::default().fg(theme::TEXT()).bg(bg)),
+                Span::styled(display_val, Style::default().fg(theme::TEXT()).bg(bg)),
             ]))
         })
         .collect();
@@ -284,10 +287,13 @@ fn render_assertions(
         .assertions
         .iter()
         .map(|a| {
+            let full = format!("{} {} {}", a.left, a.operator, a.right);
+            let max_a = (area.width as usize).saturating_sub(6);
+            let display_a = truncate_to(&full, max_a);
             ListItem::new(Line::from(vec![
                 Span::styled("  ● ", Style::default().fg(theme::YELLOW())),
                 Span::styled(
-                    format!("{} {} {}", a.left, a.operator, a.right),
+                    display_a,
                     Style::default().fg(theme::TEXT()),
                 ),
             ]))

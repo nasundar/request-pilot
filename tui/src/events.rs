@@ -56,6 +56,39 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // 6b. Progress panel expanded overlay
+    if app.progress_expanded {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('E') => { app.progress_expanded = false; }
+            KeyCode::Up => { app.progress_scroll = app.progress_scroll.saturating_sub(1); }
+            KeyCode::Down => {
+                let max = app.run_progress_lines.len().saturating_sub(1);
+                if app.progress_scroll < max { app.progress_scroll += 1; }
+            }
+            KeyCode::Enter => {
+                // Select the block at current scroll position and jump to it
+                if let Some((_, name)) = app.run_progress_lines.get(app.progress_scroll) {
+                    // Find the block by name and select it
+                    if let Some(fi) = app.active_file_idx {
+                        if let Some(file) = app.loaded_files.get(fi) {
+                            if let Some(bi) = file.suite.blocks.iter().position(|b| b.name == *name) {
+                                app.select_block(fi, bi);
+                                app.progress_expanded = false;
+                            }
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('x') | KeyCode::Char('X') => {
+                app.run_progress_lines.clear();
+                app.progress_expanded = false;
+                app.progress_scroll = 0;
+            }
+            _ => {}
+        }
+        return;
+    }
+
     // 7. Global keybinds
     let in_text_input = matches!(app.focus, Focus::FilterInput);
 
@@ -123,6 +156,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     SidebarTab::Files
                 }
             };
+            return;
+        }
+        KeyCode::Char('E') if !in_text_input && !app.run_progress_lines.is_empty() => {
+            app.progress_expanded = !app.progress_expanded;
+            return;
+        }
+        KeyCode::Char('X') if !in_text_input && !app.run_progress_lines.is_empty() && !app.is_running => {
+            app.run_progress_lines.clear();
+            app.progress_scroll = 0;
             return;
         }
         KeyCode::Tab if app.mode != Mode::Logs && app.focus != Focus::Builder => {

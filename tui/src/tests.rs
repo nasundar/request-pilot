@@ -1417,16 +1417,16 @@ GET https://example.com/third
     }
 
     #[test]
-    fn handle_key_ctrl_v_toggles_sidebar_tab_and_focus() {
+    fn handle_key_shift_v_toggles_sidebar_tab_and_focus() {
         let mut app = app_with_file();
         app.mode = Mode::Files;
         app.focus = Focus::FileTree;
 
-        handle_key(&mut app, key_ctrl('v'));
+        handle_key(&mut app, key_char('V'));
         assert_eq!(app.sidebar_tab, SidebarTab::Variables);
         assert_eq!(app.focus, Focus::Variables);
 
-        handle_key(&mut app, key_ctrl('v'));
+        handle_key(&mut app, key_char('V'));
         assert_eq!(app.sidebar_tab, SidebarTab::Files);
         assert_eq!(app.focus, Focus::FileTree);
     }

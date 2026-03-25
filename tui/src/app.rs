@@ -259,6 +259,8 @@ pub struct App {
     pub progress_current: usize,
     pub progress_total: usize,
     pub spinner_tick: usize,
+    pub progress_scroll: usize,
+    pub progress_expanded: bool,
 
     // History mode state
     pub history_cursor: usize,
@@ -277,6 +279,7 @@ pub struct App {
     pub azure_popup_open: bool,
     pub azure_loading: bool,
     pub az_cli_available: Option<bool>,
+    pub dev_mode: bool,
 
     // Toolbar: OTEL
     pub otel_enabled: bool,
@@ -347,6 +350,24 @@ impl App {
     pub fn runner_tx(&self) -> mpsc::UnboundedSender<RunnerMessage> {
         self.runner_tx.clone()
     }
+
+    /// Build extra variables for test runner, including Azure token when in dev mode.
+    fn build_extra_vars(&self) -> Vec<(String, String)> {
+        let mut vars: Vec<(String, String)> = self.env_vars.iter()
+            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        // Inject Azure token as access_token when in dev mode
+        if self.dev_mode {
+            if let Some(ref token) = self.azure_token {
+                vars.push(("access_token".to_string(), token.access_token.clone()));
+            }
+        }
+        vars
+    }
+
+    /// Get run_mode string for test runner based on dev_mode flag.
+    fn run_mode(&self) -> Option<&str> {
+        if self.dev_mode { Some("dev") } else { None }
+    }
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         Self {
@@ -380,6 +401,8 @@ impl App {
             progress_current: 0,
             progress_total: 0,
             spinner_tick: 0,
+            progress_scroll: 0,
+            progress_expanded: false,
             history_cursor: 0,
             filter_text: String::new(),
             filtered_history_len: 0,
@@ -392,6 +415,7 @@ impl App {
             azure_popup_open: false,
             azure_loading: false,
             az_cli_available: None,
+            dev_mode: false,
             otel_enabled: false,
             otel_stats: None,
             otel_popup_open: false,
@@ -947,18 +971,20 @@ impl App {
         self.progress_total = self.loaded_files[fi].suite.blocks.len();
         self.spinner_tick = 0;
         self.run_progress_lines.clear();
+        self.progress_scroll = 0;
+        self.progress_expanded = false;
         self.run_start_time = Some(std::time::Instant::now());
 
         let fid = self.loaded_files[fi].id;
         let suite = self.loaded_files[fi].suite.clone();
-        let extra_vars: Vec<(String, String)> = self.env_vars.iter()
-            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        let extra_vars = self.build_extra_vars();
+        let run_mode = self.run_mode().map(|s| s.to_string());
         let tx = self.runner_tx.clone();
         let handler = Arc::new(TuiProgress::new(tx.clone()));
 
         tokio::spawn(async move {
             let results = request_pilot_core::test_runner::run_suite(
-                &suite, &extra_vars, Some(handler), None,
+                &suite, &extra_vars, Some(handler), run_mode.as_deref(),
             ).await;
             let _ = tx.send(RunnerMessage::SuiteComplete { file_idx: fi, file_id: fid, results });
         });
@@ -984,17 +1010,19 @@ impl App {
             self.progress_total = 1;
             self.spinner_tick = 0;
             self.run_progress_lines.clear();
+            self.progress_scroll = 0;
+            self.progress_expanded = false;
             self.run_start_time = Some(std::time::Instant::now());
             self.set_status(format!("Running: {}...", block_name));
 
-            let extra_vars: Vec<(String, String)> = self.env_vars.iter()
-                .map(|(k, v)| (k.clone(), v.clone())).collect();
+            let extra_vars = self.build_extra_vars();
+            let run_mode = self.run_mode().map(|s| s.to_string());
             let tx = self.runner_tx.clone();
             let handler = Arc::new(TuiProgress::new(tx.clone()));
 
             tokio::spawn(async move {
                 let single_results = request_pilot_core::test_runner::run_suite(
-                    &single_suite, &extra_vars, Some(handler), None,
+                    &single_suite, &extra_vars, Some(handler), run_mode.as_deref(),
                 ).await;
 
                 let mut full_results = TestRunResults {
@@ -1059,18 +1087,20 @@ impl App {
             self.progress_total = group_suite.blocks.len();
             self.spinner_tick = 0;
             self.run_progress_lines.clear();
+            self.progress_scroll = 0;
+            self.progress_expanded = false;
             self.run_start_time = Some(std::time::Instant::now());
             self.set_status("Running group...".to_string());
 
-            let extra_vars: Vec<(String, String)> = self.env_vars.iter()
-                .map(|(k, v)| (k.clone(), v.clone())).collect();
+            let extra_vars = self.build_extra_vars();
+            let run_mode = self.run_mode().map(|s| s.to_string());
             let tx = self.runner_tx.clone();
             let handler = Arc::new(TuiProgress::new(tx.clone()));
             let indices = block_indices;
 
             tokio::spawn(async move {
                 let group_results = request_pilot_core::test_runner::run_suite(
-                    &group_suite, &extra_vars, Some(handler), None,
+                    &group_suite, &extra_vars, Some(handler), run_mode.as_deref(),
                 ).await;
 
                 let passed = group_results.passed;
@@ -1178,10 +1208,12 @@ impl App {
                             Ok(token) => {
                                 self.azure_state = AzureAuthState::Authenticated;
                                 self.azure_token = Some(token);
-                                self.set_status("Azure: authenticated ✓".to_string());
+                                self.dev_mode = true;
+                                self.set_status("Azure: authenticated ✓ (dev mode ON)".to_string());
                             }
                             Err(e) => {
                                 self.azure_state = AzureAuthState::Expired;
+                                self.dev_mode = false;
                                 self.set_status(format!("Azure auth failed: {}", e));
                             }
                         }

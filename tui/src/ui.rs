@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use crate::app::{App, Mode, Focus, SidebarTab, InputMode};
 use crate::components;
@@ -257,41 +257,39 @@ pub fn restore_terminal() -> color_eyre::Result<()> {
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let has_input = !matches!(app.input_mode, InputMode::Normal);
+    let show_progress = !app.run_progress_lines.is_empty() || app.is_running;
 
-    let constraints = if has_input {
-        vec![
-            Constraint::Length(1),    // top bar
-            Constraint::Min(10),      // main area
-            Constraint::Length(1),    // input bar
-            Constraint::Length(1),    // status bar
-        ]
-    } else {
-        vec![
-            Constraint::Length(1),    // top bar
-            Constraint::Min(10),      // main area
-            Constraint::Length(1),    // status bar
-        ]
-    };
+    let mut constraints = vec![
+        Constraint::Length(1),    // top bar
+    ];
+    constraints.push(Constraint::Min(10)); // main area
+    if show_progress {
+        constraints.push(Constraint::Length(4)); // progress strip
+    }
+    if has_input {
+        constraints.push(Constraint::Length(1)); // input bar
+    }
+    constraints.push(Constraint::Length(1)); // status bar
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(frame.area());
 
-    draw_top_bar(frame, app, chunks[0]);
-
-    if has_input {
-        draw_main(frame, app, chunks[1]);
-        draw_input_bar(frame, app, chunks[2]);
-        draw_status_bar(frame, app, chunks[3]);
-    } else {
-        draw_main(frame, app, chunks[1]);
-        draw_status_bar(frame, app, chunks[2]);
+    let mut ci = 0;
+    draw_top_bar(frame, app, chunks[ci]); ci += 1;
+    draw_main(frame, app, chunks[ci]); ci += 1;
+    if show_progress {
+        render_progress_strip(frame, app, chunks[ci]); ci += 1;
     }
+    if has_input {
+        draw_input_bar(frame, app, chunks[ci]); ci += 1;
+    }
+    draw_status_bar(frame, app, chunks[ci]);
 
-    // Test progress overlay (before help so help can go on top)
-    if app.is_running {
-        render_test_progress_overlay(frame, app, frame.area());
+    // Expanded progress overlay
+    if app.progress_expanded && show_progress {
+        render_progress_expanded(frame, app, frame.area());
     }
 
     if app.show_help {
@@ -654,78 +652,163 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn render_test_progress_overlay(frame: &mut Frame, app: &App, area: Rect) {
-    if area.width < 20 || area.height < 5 { return; }
-    let width = (area.width / 2).max(40).min(area.width);
-    let height = 10u16.min(area.height);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let popup_area = Rect::new(x, y, width, height);
-
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::SKY()))
-            .title(" \u{27F3} Running Tests ")
-            .title_style(Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD))
-            .style(Style::default().bg(theme::BG_OVERLAY())),
-        popup_area,
-    );
-
-    let inner = Rect::new(popup_area.x + 2, popup_area.y + 1, popup_area.width.saturating_sub(4), popup_area.height.saturating_sub(2));
-    if inner.height == 0 || inner.width == 0 {
-        return;
-    }
+/// Compact 4-line progress strip at the bottom — always visible when tests are running or have results.
+fn render_progress_strip(frame: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 || area.width < 10 { return; }
 
     let mut lines: Vec<Line> = Vec::new();
 
-    let elapsed = app.run_start_time
-        .map(|t| t.elapsed().as_secs())
-        .unwrap_or(0);
-
-    if app.progress_total > 0 {
+    // Progress bar (if running)
+    if app.is_running && app.progress_total > 0 {
         let pct = app.progress_current as f64 / app.progress_total as f64;
-        let bar_width = (inner.width as usize).saturating_sub(2);
-        let filled = (pct * bar_width as f64) as usize;
-        let empty = bar_width.saturating_sub(filled);
-        let bar = format!("{}{}", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty));
-        lines.push(Line::from(vec![
-            Span::styled(bar, Style::default().fg(theme::GREEN())),
-        ]));
+        let bar_w = area.width.saturating_sub(20) as usize;
+        let filled = (pct * bar_w as f64) as usize;
+        let empty = bar_w.saturating_sub(filled);
+        let elapsed = app.run_start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
         lines.push(Line::from(vec![
             Span::styled(
-                format!("{}/{} blocks  \u{00b7} {}s elapsed", app.progress_current, app.progress_total, elapsed),
+                format!(" {}{} ", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty)),
+                Style::default().fg(theme::GREEN()),
+            ),
+            Span::styled(
+                format!("{}/{} · {}s", app.progress_current, app.progress_total, elapsed),
                 Style::default().fg(theme::TEXT_DIM()),
             ),
         ]));
-    } else {
+    } else if app.is_running {
         let spinner = app.spinner_char();
+        let elapsed = app.run_start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
         lines.push(Line::from(Span::styled(
-            format!("{} Preparing...  \u{00b7} {}s elapsed", spinner, elapsed),
+            format!(" {} Preparing... · {}s", spinner, elapsed),
             Style::default().fg(theme::SKY()),
+        )));
+    } else {
+        // Finished — show summary
+        let passed = app.run_progress_lines.iter().filter(|(i, _)| i == "\u{2713}").count();
+        let failed = app.run_progress_lines.iter().filter(|(i, _)| i == "\u{2717}").count();
+        let total = app.run_progress_lines.len();
+        lines.push(Line::from(vec![
+            Span::styled(" Results: ", Style::default().fg(theme::TEXT_DIM())),
+            Span::styled(format!("✓{} ", passed), Style::default().fg(theme::GREEN())),
+            Span::styled(format!("✗{} ", failed), Style::default().fg(if failed > 0 { theme::RED() } else { theme::TEXT_DIM() })),
+            Span::styled(format!("({} total)", total), Style::default().fg(theme::TEXT_FAINT())),
+        ]));
+    }
+
+    // Show last few progress entries (scroll-aware)
+    let remaining_rows = area.height.saturating_sub(2) as usize;
+    let total_entries = app.run_progress_lines.len();
+    let max_scroll = total_entries.saturating_sub(remaining_rows);
+    let scroll = app.progress_scroll.min(max_scroll);
+    let visible = app.run_progress_lines.iter().skip(scroll).take(remaining_rows);
+    for (icon, name) in visible {
+        let color = match icon.as_str() {
+            "\u{2713}" => theme::GREEN(),
+            "\u{2717}" => theme::RED(),
+            _ => theme::YELLOW(),
+        };
+        let max_name = area.width.saturating_sub(6) as usize;
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {} ", icon), Style::default().fg(color)),
+            Span::styled(truncate_to(name, max_name), Style::default().fg(theme::TEXT())),
+        ]));
+    }
+
+    // Hint
+    let hint = if app.progress_expanded { " E=collapse  ↑↓=scroll " } else { " E=expand  ↑↓=scroll  X=dismiss " };
+    lines.push(Line::from(Span::styled(hint, Style::default().fg(theme::TEXT_FAINT()))));
+
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(theme::BLUE()))
+        .title(" ⟳ Test Progress ")
+        .title_style(Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(theme::BG_SURFACE()));
+
+    frame.render_widget(
+        Paragraph::new(lines).block(block).style(Style::default().bg(theme::BG_SURFACE())),
+        area,
+    );
+}
+
+/// Expanded progress overlay — larger window with full scrollable list.
+fn render_progress_expanded(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width < 30 || area.height < 10 { return; }
+    let width = (area.width * 3 / 4).max(50).min(area.width);
+    let height = (area.height * 3 / 4).max(15).min(area.height);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::SKY()))
+        .title(" ⟳ Test Progress (Expanded) ")
+        .title_style(Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(theme::BG_OVERLAY()));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.height == 0 || inner.width == 0 { return; }
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Progress bar
+    if app.is_running && app.progress_total > 0 {
+        let pct = app.progress_current as f64 / app.progress_total as f64;
+        let bar_w = inner.width.saturating_sub(20) as usize;
+        let filled = (pct * bar_w as f64) as usize;
+        let empty = bar_w.saturating_sub(filled);
+        let elapsed = app.run_start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{}{} ", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty)),
+                Style::default().fg(theme::GREEN()),
+            ),
+            Span::styled(
+                format!("{}/{} · {}s", app.progress_current, app.progress_total, elapsed),
+                Style::default().fg(theme::TEXT_DIM()),
+            ),
+        ]));
+        lines.push(Line::from(""));
+    }
+
+    // All entries with scroll
+    let list_height = inner.height.saturating_sub(lines.len() as u16 + 2) as usize;
+    let total = app.run_progress_lines.len();
+    let max_scroll = total.saturating_sub(list_height);
+    let scroll = app.progress_scroll.min(max_scroll);
+    let visible_entries: Vec<_> = app.run_progress_lines.iter().enumerate().skip(scroll).take(list_height).collect();
+    for (idx, (icon, name)) in visible_entries {
+        let color = match icon.as_str() {
+            "\u{2713}" => theme::GREEN(),
+            "\u{2717}" => theme::RED(),
+            _ => theme::YELLOW(),
+        };
+        let selected = idx == scroll + app.progress_scroll.min(total.saturating_sub(1));
+        let prefix = if selected && app.progress_expanded { "▸" } else { " " };
+        let max_name = inner.width.saturating_sub(8) as usize;
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} {} ", prefix, icon), Style::default().fg(color)),
+            Span::styled(truncate_to(name, max_name), Style::default().fg(theme::TEXT())),
+        ]));
+    }
+
+    // Scroll indicator
+    if total > list_height {
+        lines.push(Line::from(Span::styled(
+            format!(" [{}-{} of {}]", scroll + 1, (scroll + list_height).min(total), total),
+            Style::default().fg(theme::TEXT_FAINT()),
         )));
     }
 
-    let available_rows = inner.height.saturating_sub(lines.len() as u16) as usize;
-    if available_rows > 0 && !app.run_progress_lines.is_empty() {
-        lines.push(Line::from(Span::raw("")));
-        let skip = app.run_progress_lines.len().saturating_sub(available_rows.saturating_sub(1));
-        for (icon, name) in app.run_progress_lines.iter().skip(skip) {
-            let color = if icon == "\u{2713}" {
-                theme::GREEN()
-            } else if icon == "\u{2717}" {
-                theme::RED()
-            } else {
-                theme::YELLOW()
-            };
-            let max_name = inner.width.saturating_sub(5) as usize;
-            let display_name = truncate_to(name, max_name);
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {} ", icon), Style::default().fg(color)),
-                Span::styled(display_name, Style::default().fg(theme::TEXT())),
-            ]));
-        }
-    }
+    lines.push(Line::from(Span::styled(
+        " ↑↓=scroll  Enter=select  E=collapse  Esc=close ",
+        Style::default().fg(theme::TEXT_FAINT()),
+    )));
 
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(theme::BG_OVERLAY())),

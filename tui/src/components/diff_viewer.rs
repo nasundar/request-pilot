@@ -305,8 +305,8 @@ pub fn render_diff_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let inner = Rect {
         x: area.x + margin,
         y: area.y + margin,
-        width: area.width - margin * 2,
-        height: area.height - margin * 2,
+        width: area.width.saturating_sub(margin * 2),
+        height: area.height.saturating_sub(margin * 2),
     };
 
     frame.render_widget(Clear, inner);

@@ -14,8 +14,8 @@ pub fn render_help_popup(frame: &mut Frame, area: Rect) {
     if w < 10 || h < 3 { return; }
     let popup_width = 64.min(w);
     let popup_height = 70.min(h);
-    let x = (area.width - popup_width) / 2;
-    let y = (area.height - popup_height) / 2;
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
 
     frame.render_widget(ratatui::widgets::Clear, popup_area);
@@ -48,7 +48,7 @@ pub fn render_help_popup(frame: &mut Frame, area: Rect) {
         Line::from(vec![Span::styled("t             ", kb), Span::styled("Toggle block enabled/disabled", Style::default().fg(theme::TEXT()))]),
         Line::from(""),
         Line::from(Span::styled("\u{2500}\u{2500} Variables \u{2500}\u{2500}", dim)),
-        Line::from(vec![Span::styled("Ctrl+V        ", kb), Span::styled("Toggle sidebar tab", Style::default().fg(theme::TEXT()))]),
+        Line::from(vec![Span::styled("V             ", kb), Span::styled("Toggle sidebar tab (files/vars)", Style::default().fg(theme::TEXT()))]),
         Line::from(vec![Span::styled("a             ", kb), Span::styled("Add variable", Style::default().fg(theme::TEXT()))]),
         Line::from(vec![Span::styled("e             ", kb), Span::styled("Edit variable", Style::default().fg(theme::TEXT()))]),
         Line::from(vec![Span::styled("d             ", kb), Span::styled("Delete variable", Style::default().fg(theme::TEXT()))]),

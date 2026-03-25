@@ -43,6 +43,9 @@ pub fn toolbar_badges(app: &App) -> Vec<Span<'static>> {
             spans.push(Span::styled(" \u{26a0}Az ", Style::default().fg(theme::YELLOW()).add_modifier(Modifier::BOLD)));
         }
     }
+    if app.dev_mode {
+        spans.push(Span::styled(" DEV ", Style::default().fg(theme::BG_DARK()).bg(theme::PEACH()).add_modifier(Modifier::BOLD)));
+    }
     if app.otel_enabled {
         spans.push(Span::styled(" \u{1f4e1} ", Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD)));
     }
@@ -178,15 +181,26 @@ pub fn render_azure_popup(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(token.expires_on.clone(), Style::default().fg(theme::TEXT())),
         ]));
     }
+    // Dev mode toggle
+    lines.push(Line::from(vec![
+        Span::styled("  Dev Mode: ", Style::default().fg(theme::TEXT_DIM())),
+        if app.dev_mode {
+            Span::styled("ON", Style::default().fg(theme::GREEN()).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled("OFF", Style::default().fg(theme::TEXT_FAINT()))
+        },
+        Span::styled("  (d=toggle)", Style::default().fg(theme::TEXT_FAINT())),
+    ]));
     if app.azure_loading {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("  Authenticating...", Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled("  ⏳ Authenticating...", Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD))));
     }
     lines.push(Line::from(""));
     if cli_ok && !app.azure_loading {
-        lines.push(Line::from(Span::styled("  Press Enter to authenticate", Style::default().fg(theme::GREEN()))));
+        lines.push(Line::from(Span::styled("  Enter=authenticate  d=toggle dev mode  Esc=close", Style::default().fg(theme::TEXT_FAINT()))));
+    } else {
+        lines.push(Line::from(Span::styled("  Esc=close", Style::default().fg(theme::TEXT_FAINT()))));
     }
-    lines.push(Line::from(Span::styled("  Esc=close", Style::default().fg(theme::TEXT_FAINT()))));
     let block = Block::default()
         .title(" \u{1f512} Azure Auth ")
         .borders(Borders::ALL)
