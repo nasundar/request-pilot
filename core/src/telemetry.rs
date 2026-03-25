@@ -1098,9 +1098,9 @@ impl TelemetryCollector {
             } else {
                 format!("{}: {}...", hdr, &val[..20.min(val.len())])
             };
-            eprintln!("[telemetry] Auth: {}", token_info);
+            log::info!("[telemetry] Auth: {}", token_info);
         } else {
-            eprintln!("[telemetry] No auth header configured");
+            log::debug!("[telemetry] No auth header configured");
         }
 
         let client = match reqwest::Client::builder()
@@ -1142,16 +1142,16 @@ impl TelemetryCollector {
 
         for (signal, pb, endpoint, count) in signals {
             if count == 0 {
-                eprintln!("[telemetry] {}: 0 items, skipping export", signal);
+                log::debug!("[telemetry] {}: 0 items, skipping export", signal);
                 continue;
             }
-            eprintln!("[telemetry] {} export: {} items, {} bytes → {}", signal, count, pb.len(), endpoint);
+            log::info!("[telemetry] {} export: {} items, {} bytes → {}", signal, count, pb.len(), endpoint);
             match self.post_to(&client, endpoint, pb).await {
                 Ok(status) => {
-                    eprintln!("[telemetry] {} export: HTTP {} OK", signal, status);
+                    log::info!("[telemetry] {} export: HTTP {} OK", signal, status);
                 }
                 Err(e) => {
-                    eprintln!("[telemetry] {} export FAILED: {}", signal, e);
+                    log::warn!("[telemetry] {} export FAILED: {}", signal, e);
                     stats.errors.push(format!("{} export: {}", signal, e));
                 }
             }

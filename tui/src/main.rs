@@ -10,6 +10,8 @@ mod ui;
 use app::App;
 use clap::Parser;
 use std::path::PathBuf;
+use simplelog::{WriteLogger, LevelFilter, ConfigBuilder};
+use std::fs::File;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -40,6 +42,16 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
+    // All log output goes to a file — never to stdout/stderr (would corrupt the TUI)
+    let log_path = std::env::temp_dir().join("request-pilot.log");
+    if let Ok(file) = File::create(&log_path) {
+        let _ = WriteLogger::init(
+            LevelFilter::Info,
+            ConfigBuilder::new().set_time_format_rfc3339().build(),
+            file,
+        );
+    }
+
     let cli = Cli::parse();
     let mut app = App::new();
 

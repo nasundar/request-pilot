@@ -767,13 +767,13 @@ async fn run_suite_inner(
                             Some(cfg)
                         }
                         Err(e) => {
-                            eprintln!("[telemetry] Failed to fetch OTLP endpoints: {}", e);
+                            log::warn!("[telemetry] Failed to fetch OTLP endpoints: {}", e);
                             None
                         }
                     }
                 }
                 None => {
-                    eprintln!("[telemetry] Resource ID provided but no telemetry_token variable resolved");
+                    log::warn!("[telemetry] Resource ID provided but no telemetry_token variable resolved");
                     None
                 }
             }

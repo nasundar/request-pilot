@@ -124,12 +124,12 @@ pub async fn start_server(
                         let app_clone = app_handle.clone();
                         tokio::spawn(async move {
                             if let Err(e) = handle_connection(stream, state_clone, app_clone).await {
-                                eprintln!("WS connection error: {}", e);
+                                log::warn!("WS connection error: {}", e);
                             }
                         });
                     }
                     Err(e) => {
-                        eprintln!("WS accept error: {}", e);
+                        log::warn!("WS accept error: {}", e);
                     }
                 }
             }
@@ -216,7 +216,7 @@ async fn handle_connection(
                             Ok(IncomingMessage::Connected) => {}
                             Err(e) => {
                                 let preview = &text[..text.len().min(300)];
-                                eprintln!("WS parse error (msg #{}): {} — raw: {}", msg_count, e, preview);
+                                log::warn!("WS parse error (msg #{}): {} — raw: {}", msg_count, e, preview);
                                 let _ = app_handle.emit(
                                     "live-capture-error",
                                     serde_json::json!({
@@ -229,7 +229,7 @@ async fn handle_connection(
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Err(e)) => {
-                        eprintln!("WS read error: {}", e);
+                        log::warn!("WS read error: {}", e);
                         break;
                     }
                     _ => {}

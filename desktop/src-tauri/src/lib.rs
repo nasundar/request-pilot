@@ -6,6 +6,7 @@ use request_pilot_core::{
 };
 
 use history::HistoryStore;
+use simplelog::ConfigBuilder;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
 
@@ -390,7 +391,7 @@ async fn start_live_capture(
     let state = state.inner().clone();
     tokio::spawn(async move {
         if let Err(e) = live_capture::start_server(state, app_handle).await {
-            eprintln!("Live capture server error: {}", e);
+            log::error!("Live capture server error: {}", e);
         }
     });
     Ok(())
@@ -434,10 +435,20 @@ async fn get_live_capture_status(
 }
 
 pub fn run() {
+    // All log output goes to a file — never to the console
+    let log_path = std::env::temp_dir().join("request-pilot-desktop.log");
+    if let Ok(file) = std::fs::File::create(&log_path) {
+        let _ = simplelog::WriteLogger::init(
+            simplelog::LevelFilter::Info,
+            ConfigBuilder::new().set_time_format_rfc3339().build(),
+            file,
+        );
+    }
+
     // Install a panic hook so unexpected panics are logged instead of silently lost.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        eprintln!("[RequestPilot] PANIC: {}", info);
+        log::error!("[RequestPilot] PANIC: {}", info);
         default_hook(info);
     }));
 
