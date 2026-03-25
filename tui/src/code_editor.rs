@@ -412,11 +412,10 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
 
-        if is_cursor_line {
-            let w: usize = spans.iter().map(|s| s.width()).sum();
-            if w < area_width {
-                spans.push(Span::styled(" ".repeat(area_width - w), Style::default().bg(bg)));
-            }
+        // Pad every line to full area width to clear ghost content from previous frame
+        let w: usize = spans.iter().map(|s| s.width()).sum();
+        if w < area_width {
+            spans.push(Span::styled(" ".repeat(area_width - w), Style::default().bg(bg)));
         }
         display_lines.push(Line::from(spans));
     }
