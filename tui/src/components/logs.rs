@@ -1,4 +1,5 @@
 //! Logs panel — application log viewer with level filtering and auto-scroll.
+#![allow(dead_code)]
 
 use ratatui::{
     Frame,

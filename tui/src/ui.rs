@@ -1,13 +1,12 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
-use crate::app::{App, Focus, Mode, SidebarTab, TreeNode, InputMode};
+use crate::app::{App, Mode, InputMode};
 use crate::components;
-use crate::components::sidebar::get_block_status;
 use crate::toolbar;
 use request_pilot_core::history::HistoryFilter;
 
@@ -173,7 +172,7 @@ fn draw_files_mode(frame: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area);
 
-    draw_sidebar(frame, app, h_chunks[0]);
+    components::sidebar::render_sidebar(frame, app, h_chunks[0]);
 
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -186,117 +185,6 @@ fn draw_files_mode(frame: &mut Frame, app: &App, area: Rect) {
     // Show builder panel (top) and response (bottom)
     components::builder::render_builder(frame, app, v_chunks[0]);
     draw_response_view(frame, app, v_chunks[1]);
-}
-
-fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
-    let is_focused = matches!(app.focus, Focus::FileTree | Focus::Variables);
-    let border_style = if is_focused {
-        Style::default().fg(theme::BLUE)
-    } else {
-        Style::default().fg(theme::TEXT_FAINT)
-    };
-
-    let title = match app.sidebar_tab {
-        SidebarTab::Files => " \u{1f4c1} Files ",
-        SidebarTab::Variables => " \u{1f510} Variables ",
-    };
-
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(border_style);
-
-    match app.sidebar_tab {
-        SidebarTab::Files => {
-            if app.tree_nodes.is_empty() {
-                let msg = Paragraph::new("No files loaded.\nPress 'o' to open a file.")
-                    .block(block)
-                    .style(Style::default().fg(theme::TEXT_FAINT));
-                frame.render_widget(msg, area);
-                return;
-            }
-
-            let items: Vec<ListItem> = app.tree_nodes.iter().enumerate().map(|(i, node)| {
-                let (prefix, label, style) = match node {
-                    TreeNode::File { file_idx } => {
-                        let f = &app.loaded_files[*file_idx];
-                        let chevron = if f.expanded { "\u{25bc}" } else { "\u{25b6}" };
-                        (format!("{} \u{1f4c4} ", chevron), f.name.clone(), Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD))
-                    }
-                    TreeNode::Group { file_idx, group_name } => {
-                        let f = &app.loaded_files[*file_idx];
-                        let expanded = f.group_expanded.get(group_name).copied().unwrap_or(true);
-                        let chevron = if expanded { "\u{25bc}" } else { "\u{25b6}" };
-                        (format!("  {} ", chevron), group_name.clone(), Style::default().fg(theme::SAPPHIRE))
-                    }
-                    TreeNode::Block { file_idx, block_idx } => {
-                        let f = &app.loaded_files[*file_idx];
-                        let blk = &f.suite.blocks[*block_idx];
-                        let icon = match blk.block_type.as_str() {
-                            "setup" => "\u{2699}",
-                            "test" => "\u{1f9ea}",
-                            "teardown" => "\u{1f5d1}",
-                            _ => "\u{1f4e4}",
-                        };
-                        let status = get_block_status(f, *block_idx);
-                        let disabled_mark = if blk.disabled { " \u{d8}" } else { "" };
-                        let indent = if blk.group.is_some() { "      " } else { "    " };
-                        (format!("{}{} {} ", indent, status, icon), format!("{}{}", blk.name, disabled_mark), Style::default().fg(theme::TEXT))
-                    }
-                };
-
-                let is_selected = i == app.tree_cursor;
-                let final_style = if is_selected {
-                    style.bg(theme::BG_HIGHLIGHT)
-                } else {
-                    style
-                };
-                ListItem::new(Line::from(vec![
-                    Span::raw(prefix),
-                    Span::styled(label, final_style),
-                ]))
-            }).collect();
-
-            let list = List::new(items).block(block);
-            frame.render_widget(list, area);
-        }
-        SidebarTab::Variables => {
-            let mut extract_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for file in &app.loaded_files {
-                for blk in &file.suite.blocks {
-                    for e in &blk.extracts {
-                        extract_vars.insert(e.variable_name.clone());
-                    }
-                }
-            }
-
-            let sorted_vars = app.get_sorted_var_names();
-
-            let items: Vec<ListItem> = sorted_vars.iter().enumerate().map(|(i, k)| {
-                let v = app.env_vars.get(k).map(|s| s.as_str()).unwrap_or("");
-                let name_color = if extract_vars.contains(k.as_str()) {
-                    theme::MAUVE
-                } else {
-                    theme::SAPPHIRE
-                };
-                let prefix = if extract_vars.contains(k.as_str()) { "\u{21d0} " } else { "  " };
-                let is_selected = i == app.vars_cursor;
-                let bg = if is_selected { theme::BG_HIGHLIGHT } else { Color::Reset };
-                ListItem::new(Line::from(vec![
-                    Span::styled(prefix, Style::default().fg(name_color).bg(bg)),
-                    Span::styled(k, Style::default().fg(name_color).bg(bg)),
-                    Span::styled(" = ", Style::default().fg(theme::TEXT_FAINT).bg(bg)),
-                    Span::styled(v, Style::default().fg(theme::TEXT).bg(bg)),
-                ]))
-            }).collect();
-
-            let scroll = app.vars_scroll as usize;
-            let visible_items: Vec<ListItem> = items.into_iter().skip(scroll).collect();
-
-            let list = List::new(visible_items).block(block);
-            frame.render_widget(list, area);
-        }
-    }
 }
 
 fn draw_response_view(frame: &mut Frame, app: &App, area: Rect) {

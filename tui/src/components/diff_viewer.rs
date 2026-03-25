@@ -1,7 +1,8 @@
-//! Diff viewer overlay ΓÇö side-by-side comparison of responses.
+//! Diff viewer overlay — side-by-side comparison of responses.
 //!
 //! Supports LCS-based line diff, hunk collapsing, char-level highlighting,
 //! side-by-side and changes-only view modes, scrolling, and keyboard navigation.
+#![allow(dead_code)]
 
 use ratatui::{
     Frame,

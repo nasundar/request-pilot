@@ -4,7 +4,7 @@ use std::sync::Arc;
 use request_pilot_core::http_parser::{TestSuite, parse_test_suite, generate_http_content};
 use request_pilot_core::test_runner::{BlockProgress, ProgressHandler, TestRunResults, BlockResult};
 use request_pilot_core::history::{HistoryStore, HistoryEntry};
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 use request_pilot_core::azure_auth::AzureToken;
@@ -131,6 +131,7 @@ pub struct LogEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum LogLevel {
     Debug,
     Info,
@@ -1060,7 +1061,9 @@ impl App {
             // Poll events with 100ms timeout
             if event::poll(std::time::Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
-                    events::handle_key(self, key);
+                    if key.kind == KeyEventKind::Press {
+                        events::handle_key(self, key);
+                    }
                 }
             }
 
