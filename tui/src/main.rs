@@ -73,9 +73,8 @@ async fn main() -> color_eyre::Result<()> {
     // Enter TUI
     let mut terminal = ui::init_terminal()?;
 
-    // Splash screen
-    ui::draw_splash(&mut terminal)?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // Animated splash screen
+    ui::draw_splash(&mut terminal).await?;
 
     let result = app.run(terminal).await;
     ui::restore_terminal()?;
