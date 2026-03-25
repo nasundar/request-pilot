@@ -79,11 +79,11 @@ fn detect_content_kind(headers: &[(String, String)], body: &str) -> ContentKind 
 
 fn content_kind_badge(kind: ContentKind) -> (&'static str, ratatui::style::Color) {
     match kind {
-        ContentKind::Json => ("JSON", theme::PEACH),
-        ContentKind::Xml => ("XML", theme::SAPPHIRE),
-        ContentKind::Html => ("HTML", theme::LAVENDER),
-        ContentKind::Yaml => ("YAML", theme::MAUVE),
-        ContentKind::Text => ("TEXT", theme::TEXT_DIM),
+        ContentKind::Json => ("JSON", theme::PEACH()),
+        ContentKind::Xml => ("XML", theme::SAPPHIRE()),
+        ContentKind::Html => ("HTML", theme::LAVENDER()),
+        ContentKind::Yaml => ("YAML", theme::MAUVE()),
+        ContentKind::Text => ("TEXT", theme::TEXT_DIM()),
     }
 }
 
@@ -249,7 +249,7 @@ fn highlight_xml_line(line: &str) -> Line<'static> {
                 i += 1;
             }
             let tag: String = chars[start..i].iter().collect();
-            spans.push(Span::styled(tag, Style::default().fg(theme::BLUE)));
+            spans.push(Span::styled(tag, Style::default().fg(theme::BLUE())));
             while i < chars.len() && chars[i] != '>' {
                 if chars[i] == '"' {
                     let qs = i;
@@ -261,9 +261,9 @@ fn highlight_xml_line(line: &str) -> Line<'static> {
                         i += 1;
                     }
                     let av: String = chars[qs..i].iter().collect();
-                    spans.push(Span::styled(av, Style::default().fg(theme::GREEN)));
+                    spans.push(Span::styled(av, Style::default().fg(theme::GREEN())));
                 } else if chars[i] == ' ' {
-                    spans.push(Span::styled(" ", Style::default().fg(theme::TEXT)));
+                    spans.push(Span::styled(" ", Style::default().fg(theme::TEXT())));
                     i += 1;
                     let attr_start = i;
                     while i < chars.len()
@@ -275,22 +275,22 @@ fn highlight_xml_line(line: &str) -> Line<'static> {
                     }
                     if i > attr_start {
                         let an: String = chars[attr_start..i].iter().collect();
-                        spans.push(Span::styled(an, Style::default().fg(theme::SAPPHIRE)));
+                        spans.push(Span::styled(an, Style::default().fg(theme::SAPPHIRE())));
                     }
                     if i < chars.len() && chars[i] == '=' {
-                        spans.push(Span::styled("=", Style::default().fg(theme::TEXT_DIM)));
+                        spans.push(Span::styled("=", Style::default().fg(theme::TEXT_DIM())));
                         i += 1;
                     }
                 } else {
                     spans.push(Span::styled(
                         chars[i].to_string(),
-                        Style::default().fg(theme::TEXT),
+                        Style::default().fg(theme::TEXT()),
                     ));
                     i += 1;
                 }
             }
             if i < chars.len() && chars[i] == '>' {
-                spans.push(Span::styled(">", Style::default().fg(theme::BLUE)));
+                spans.push(Span::styled(">", Style::default().fg(theme::BLUE())));
                 i += 1;
             }
         } else {
@@ -299,7 +299,7 @@ fn highlight_xml_line(line: &str) -> Line<'static> {
                 i += 1;
             }
             let t: String = chars[start..i].iter().collect();
-            spans.push(Span::styled(t, Style::default().fg(theme::TEXT)));
+            spans.push(Span::styled(t, Style::default().fg(theme::TEXT())));
         }
     }
     Line::from(spans)
@@ -308,46 +308,46 @@ fn highlight_xml_line(line: &str) -> Line<'static> {
 fn highlight_yaml_line(line: &str) -> Line<'static> {
     if let Some(cp) = line.find(':') {
         Line::from(vec![
-            Span::styled(line[..cp].to_string(), Style::default().fg(theme::BLUE)),
-            Span::styled(line[cp..].to_string(), Style::default().fg(theme::TEXT)),
+            Span::styled(line[..cp].to_string(), Style::default().fg(theme::BLUE())),
+            Span::styled(line[cp..].to_string(), Style::default().fg(theme::TEXT())),
         ])
     } else if line.trim_start().starts_with('#') {
         Line::from(Span::styled(
             line.to_string(),
-            Style::default().fg(theme::TEXT_FAINT),
+            Style::default().fg(theme::TEXT_FAINT()),
         ))
     } else {
         Line::from(Span::styled(
             line.to_string(),
-            Style::default().fg(theme::TEXT),
+            Style::default().fg(theme::TEXT()),
         ))
     }
 }
 
 fn http_status_color(status: u16) -> ratatui::style::Color {
     match status {
-        200..=299 => theme::GREEN,
-        300..=399 => theme::BLUE,
-        400..=499 => theme::YELLOW,
-        500..=599 => theme::RED,
-        _ => theme::TEXT,
+        200..=299 => theme::GREEN(),
+        300..=399 => theme::BLUE(),
+        400..=499 => theme::YELLOW(),
+        500..=599 => theme::RED(),
+        _ => theme::TEXT(),
     }
 }
 
 pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
     let border_style = if app.focus == Focus::Response {
-        Style::default().fg(theme::BLUE)
+        Style::default().fg(theme::BLUE())
     } else {
-        Style::default().fg(theme::TEXT_FAINT)
+        Style::default().fg(theme::TEXT_FAINT())
     };
     let tab_style = |tab: ResponseTab| {
         if tab == app.response_tab {
             Style::default()
-                .fg(theme::BG_DARK)
-                .bg(theme::BLUE)
+                .fg(theme::BG_DARK())
+                .bg(theme::BLUE())
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::TEXT_FAINT)
+            Style::default().fg(theme::TEXT_FAINT())
         }
     };
     let title_line = Line::from(vec![
@@ -371,7 +371,7 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
                     if br.status == "pending" {
                         let msg = Paragraph::new("Run tests to see responses here")
                             .block(block_widget)
-                            .style(Style::default().fg(theme::TEXT_FAINT));
+                            .style(Style::default().fg(theme::TEXT_FAINT()));
                         frame.render_widget(msg, area);
                         return;
                     }
@@ -379,15 +379,15 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
                     match app.response_tab {
                         ResponseTab::Body => {
                             let sc = match br.status.as_str() {
-                                "passed" => theme::GREEN,
-                                "failed" | "error" => theme::RED,
-                                "skipped" => theme::YELLOW,
-                                _ => theme::TEXT,
+                                "passed" => theme::GREEN(),
+                                "failed" | "error" => theme::RED(),
+                                "skipped" => theme::YELLOW(),
+                                _ => theme::TEXT(),
                             };
                             let mut ss = vec![Span::styled(
                                 format!(" {} ", br.status.to_uppercase()),
                                 Style::default()
-                                    .fg(theme::BG_DARK)
+                                    .fg(theme::BG_DARK())
                                     .bg(sc)
                                     .add_modifier(Modifier::BOLD),
                             )];
@@ -398,14 +398,14 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
                                 ss.push(Span::styled(
                                     format!(" {} ", bt),
                                     Style::default()
-                                        .fg(theme::BG_DARK)
+                                        .fg(theme::BG_DARK())
                                         .bg(bc)
                                         .add_modifier(Modifier::BOLD),
                                 ));
                             }
                             ss.push(Span::styled(
                                 format!(" \u{00b7} {}ms", br.time_ms),
-                                Style::default().fg(theme::TEXT_DIM),
+                                Style::default().fg(theme::TEXT_DIM()),
                             ));
                             if let Some(ref resp) = br.response {
                                 if resp.size_bytes > 0 {
@@ -414,7 +414,7 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
                                             " \u{00b7} {}",
                                             format_size(resp.size_bytes)
                                         ),
-                                        Style::default().fg(theme::TEXT_DIM),
+                                        Style::default().fg(theme::TEXT_DIM()),
                                     ));
                                 }
                             }
@@ -424,7 +424,7 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
                                 lines.push(Line::from(vec![
                                     Span::styled(
                                         "HTTP ",
-                                        Style::default().fg(theme::TEXT_FAINT),
+                                        Style::default().fg(theme::TEXT_FAINT()),
                                     ),
                                     Span::styled(
                                         format!("{} {}", resp.status, resp.status_text),
@@ -445,7 +445,7 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
                                                 format_size(blen)
                                             ),
                                             Style::default()
-                                                .fg(theme::YELLOW)
+                                                .fg(theme::YELLOW())
                                                 .add_modifier(Modifier::BOLD),
                                         )));
                                         lines.push(Line::from(""));
@@ -475,7 +475,7 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
                                 lines.push(Line::from(vec![
                                     Span::styled(
                                         "HTTP ",
-                                        Style::default().fg(theme::TEXT_FAINT),
+                                        Style::default().fg(theme::TEXT_FAINT()),
                                     ),
                                     Span::styled(
                                         format!("{} {}", resp.status, resp.status_text),
@@ -488,19 +488,19 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
                                     lines.push(Line::from(vec![
                                         Span::styled(
                                             k.to_string(),
-                                            Style::default().fg(theme::LAVENDER),
+                                            Style::default().fg(theme::LAVENDER()),
                                         ),
                                         Span::raw(": "),
                                         Span::styled(
                                             v.to_string(),
-                                            Style::default().fg(theme::TEXT_DIM),
+                                            Style::default().fg(theme::TEXT_DIM()),
                                         ),
                                     ]));
                                 }
                             } else {
                                 lines.push(Line::from(Span::styled(
                                     "No response headers",
-                                    Style::default().fg(theme::TEXT_FAINT),
+                                    Style::default().fg(theme::TEXT_FAINT()),
                                 )));
                             }
                         }
@@ -508,9 +508,9 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
                             if !br.assertion_results.is_empty() {
                                 for ar in &br.assertion_results {
                                     let (icon, color) = if ar.passed {
-                                        ("\u{2713}", theme::GREEN)
+                                        ("\u{2713}", theme::GREEN())
                                     } else {
-                                        ("\u{2717}", theme::RED)
+                                        ("\u{2717}", theme::RED())
                                     };
                                     lines.push(Line::from(Span::styled(
                                         format!(" {} {}", icon, ar.assertion),
@@ -522,14 +522,14 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
                             } else {
                                 lines.push(Line::from(Span::styled(
                                     "No assertions defined",
-                                    Style::default().fg(theme::TEXT_FAINT),
+                                    Style::default().fg(theme::TEXT_FAINT()),
                                 )));
                             }
                             if !br.extract_results.is_empty() {
                                 lines.push(Line::from(""));
                                 lines.push(Line::from(Span::styled(
                                     "\u{2500}\u{2500}\u{2500} Extracts \u{2500}\u{2500}\u{2500}",
-                                    Style::default().fg(theme::TEXT_FAINT),
+                                    Style::default().fg(theme::TEXT_FAINT()),
                                 )));
                                 for er in &br.extract_results {
                                     let vs =
@@ -537,15 +537,15 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
                                     lines.push(Line::from(vec![
                                         Span::styled(
                                             er.variable.to_string(),
-                                            Style::default().fg(theme::MAUVE),
+                                            Style::default().fg(theme::MAUVE()),
                                         ),
                                         Span::styled(
                                             " = ",
-                                            Style::default().fg(theme::TEXT_FAINT),
+                                            Style::default().fg(theme::TEXT_FAINT()),
                                         ),
                                         Span::styled(
                                             vs.to_string(),
-                                            Style::default().fg(theme::TEXT),
+                                            Style::default().fg(theme::TEXT()),
                                         ),
                                     ]));
                                 }
@@ -564,7 +564,7 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
     }
     let msg = Paragraph::new("Run tests to see responses here")
         .block(block_widget)
-        .style(Style::default().fg(theme::TEXT_FAINT));
+        .style(Style::default().fg(theme::TEXT_FAINT()));
     frame.render_widget(msg, area);
 }
 
@@ -590,7 +590,7 @@ fn render_body_content(
             for l in body.lines() {
                 lines.push(Line::from(Span::styled(
                     l.to_string(),
-                    Style::default().fg(theme::TEXT),
+                    Style::default().fg(theme::TEXT()),
                 )));
             }
         }
@@ -601,7 +601,7 @@ fn render_json_tree(app: &App, lines: &mut Vec<Line<'static>>) {
     if app.json_tree_nodes.is_empty() {
         lines.push(Line::from(Span::styled(
             "(empty JSON)",
-            Style::default().fg(theme::TEXT_FAINT),
+            Style::default().fg(theme::TEXT_FAINT()),
         )));
         return;
     }
@@ -619,19 +619,19 @@ fn render_json_tree(app: &App, lines: &mut Vec<Line<'static>>) {
         let is_cursor = app.focus == Focus::Response
             && app.response_tab == ResponseTab::Body
             && idx == app.json_cursor;
-        let ks = Style::default().fg(theme::BLUE);
+        let ks = Style::default().fg(theme::BLUE());
         let vs = match node.node_type {
-            JsonNodeType::String => Style::default().fg(theme::GREEN),
-            JsonNodeType::Number => Style::default().fg(theme::PEACH),
-            JsonNodeType::Bool => Style::default().fg(theme::MAUVE),
-            JsonNodeType::Null => Style::default().fg(theme::TEXT_DIM),
+            JsonNodeType::String => Style::default().fg(theme::GREEN()),
+            JsonNodeType::Number => Style::default().fg(theme::PEACH()),
+            JsonNodeType::Bool => Style::default().fg(theme::MAUVE()),
+            JsonNodeType::Null => Style::default().fg(theme::TEXT_DIM()),
             JsonNodeType::Object | JsonNodeType::Array => {
-                Style::default().fg(theme::TEXT_DIM)
+                Style::default().fg(theme::TEXT_DIM())
             }
         };
         let mut spans = vec![
             Span::styled(indent, Style::default()),
-            Span::styled(toggle.to_string(), Style::default().fg(theme::TEXT_FAINT)),
+            Span::styled(toggle.to_string(), Style::default().fg(theme::TEXT_FAINT())),
         ];
         if node.depth == 0 && node.key == "root" {
             spans.push(Span::styled(node.value_preview.clone(), vs));
@@ -643,7 +643,7 @@ fn render_json_tree(app: &App, lines: &mut Vec<Line<'static>>) {
         if is_cursor {
             line = line.patch_style(
                 Style::default()
-                    .bg(theme::BG_SURFACE)
+                    .bg(theme::BG_SURFACE())
                     .add_modifier(Modifier::BOLD),
             );
         }
@@ -807,10 +807,20 @@ fn load_full_body(app: &mut App) {
 
 fn copy_body(app: &mut App) {
     if let Some(body) = get_current_body(app) {
-        app.set_status(format!(
-            "Copied response body ({}) to clipboard",
-            format_size(body.len())
-        ));
+        match std::process::Command::new("clip")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.as_mut().unwrap().write_all(body.as_bytes())?;
+                child.wait()
+            }) {
+            Ok(_) => app.set_status(format!(
+                "Copied response body ({}) to clipboard",
+                format_size(body.len())
+            )),
+            Err(e) => app.set_status(format!("Copy failed: {}", e)),
+        }
     } else {
         app.set_status("No response body to copy".to_string());
     }

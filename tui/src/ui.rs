@@ -10,30 +10,183 @@ use crate::components;
 use crate::toolbar;
 use request_pilot_core::history::HistoryFilter;
 
-// Catppuccin Mocha-inspired palette
+// Runtime-switchable color palettes
+#[allow(non_snake_case)]
 pub mod theme {
     use ratatui::style::Color;
+    use std::sync::atomic::{AtomicU8, Ordering};
 
-    pub const BG_DARK: Color = Color::Rgb(30, 30, 46);
-    pub const BG_BASE: Color = Color::Rgb(36, 39, 58);
-    pub const BG_SURFACE: Color = Color::Rgb(49, 50, 68);
-    pub const BG_OVERLAY: Color = Color::Rgb(69, 71, 90);
-    pub const BG_HIGHLIGHT: Color = Color::Rgb(88, 91, 112);
+    static ACTIVE: AtomicU8 = AtomicU8::new(0);
 
-    pub const TEXT: Color = Color::Rgb(205, 214, 244);
-    pub const TEXT_DIM: Color = Color::Rgb(147, 153, 178);
-    pub const TEXT_FAINT: Color = Color::Rgb(108, 112, 134);
+    #[derive(Clone, Copy)]
+    pub struct Palette {
+        pub bg_dark: Color,
+        pub bg_base: Color,
+        pub bg_surface: Color,
+        pub bg_overlay: Color,
+        pub bg_highlight: Color,
+        pub text: Color,
+        pub text_dim: Color,
+        pub text_faint: Color,
+        pub blue: Color,
+        pub lavender: Color,
+        pub sapphire: Color,
+        pub green: Color,
+        pub yellow: Color,
+        pub peach: Color,
+        pub red: Color,
+        pub pink: Color,
+        pub mauve: Color,
+        pub sky: Color,
+    }
 
-    pub const BLUE: Color = Color::Rgb(137, 180, 250);
-    pub const LAVENDER: Color = Color::Rgb(180, 190, 254);
-    pub const SAPPHIRE: Color = Color::Rgb(116, 199, 236);
-    pub const GREEN: Color = Color::Rgb(166, 227, 161);
-    pub const YELLOW: Color = Color::Rgb(249, 226, 175);
-    pub const PEACH: Color = Color::Rgb(250, 179, 135);
-    pub const RED: Color = Color::Rgb(243, 139, 168);
-    pub const PINK: Color = Color::Rgb(245, 194, 231);
-    pub const MAUVE: Color = Color::Rgb(203, 166, 247);
-    pub const SKY: Color = Color::Rgb(137, 220, 235);
+    pub const PALETTE_COUNT: usize = 5;
+
+    pub const PALETTES: [Palette; PALETTE_COUNT] = [
+        // 0: Tokyo Night
+        Palette {
+            bg_dark:      Color::Rgb(26, 27, 38),
+            bg_base:      Color::Rgb(30, 31, 43),
+            bg_surface:   Color::Rgb(42, 44, 60),
+            bg_overlay:   Color::Rgb(55, 58, 77),
+            bg_highlight: Color::Rgb(73, 77, 100),
+            text:         Color::Rgb(169, 177, 214),
+            text_dim:     Color::Rgb(120, 130, 165),
+            text_faint:   Color::Rgb(86, 95, 137),
+            blue:         Color::Rgb(122, 162, 247),
+            lavender:     Color::Rgb(187, 154, 247),
+            sapphire:     Color::Rgb(125, 207, 255),
+            green:        Color::Rgb(158, 206, 106),
+            yellow:       Color::Rgb(224, 175, 104),
+            peach:        Color::Rgb(255, 158, 100),
+            red:          Color::Rgb(247, 118, 142),
+            pink:         Color::Rgb(255, 117, 127),
+            mauve:        Color::Rgb(187, 154, 247),
+            sky:          Color::Rgb(125, 207, 255),
+        },
+        // 1: Dracula
+        Palette {
+            bg_dark:      Color::Rgb(40, 42, 54),
+            bg_base:      Color::Rgb(44, 47, 60),
+            bg_surface:   Color::Rgb(55, 58, 74),
+            bg_overlay:   Color::Rgb(68, 71, 90),
+            bg_highlight: Color::Rgb(98, 114, 164),
+            text:         Color::Rgb(248, 248, 242),
+            text_dim:     Color::Rgb(189, 147, 249),
+            text_faint:   Color::Rgb(98, 114, 164),
+            blue:         Color::Rgb(139, 233, 253),
+            lavender:     Color::Rgb(189, 147, 249),
+            sapphire:     Color::Rgb(139, 233, 253),
+            green:        Color::Rgb(80, 250, 123),
+            yellow:       Color::Rgb(241, 250, 140),
+            peach:        Color::Rgb(255, 184, 108),
+            red:          Color::Rgb(255, 85, 85),
+            pink:         Color::Rgb(255, 121, 198),
+            mauve:        Color::Rgb(189, 147, 249),
+            sky:          Color::Rgb(139, 233, 253),
+        },
+        // 2: Gruvbox Dark
+        Palette {
+            bg_dark:      Color::Rgb(40, 40, 40),
+            bg_base:      Color::Rgb(50, 48, 47),
+            bg_surface:   Color::Rgb(60, 56, 54),
+            bg_overlay:   Color::Rgb(80, 73, 69),
+            bg_highlight: Color::Rgb(102, 92, 84),
+            text:         Color::Rgb(235, 219, 178),
+            text_dim:     Color::Rgb(189, 174, 147),
+            text_faint:   Color::Rgb(146, 131, 116),
+            blue:         Color::Rgb(131, 165, 152),
+            lavender:     Color::Rgb(211, 134, 155),
+            sapphire:     Color::Rgb(131, 165, 152),
+            green:        Color::Rgb(184, 187, 38),
+            yellow:       Color::Rgb(250, 189, 47),
+            peach:        Color::Rgb(254, 128, 25),
+            red:          Color::Rgb(251, 73, 52),
+            pink:         Color::Rgb(211, 134, 155),
+            mauve:        Color::Rgb(211, 134, 155),
+            sky:          Color::Rgb(131, 165, 152),
+        },
+        // 3: Nord
+        Palette {
+            bg_dark:      Color::Rgb(46, 52, 64),
+            bg_base:      Color::Rgb(52, 59, 73),
+            bg_surface:   Color::Rgb(59, 66, 82),
+            bg_overlay:   Color::Rgb(67, 76, 94),
+            bg_highlight: Color::Rgb(76, 86, 106),
+            text:         Color::Rgb(216, 222, 233),
+            text_dim:     Color::Rgb(171, 178, 191),
+            text_faint:   Color::Rgb(127, 140, 160),
+            blue:         Color::Rgb(136, 192, 208),
+            lavender:     Color::Rgb(180, 142, 173),
+            sapphire:     Color::Rgb(129, 161, 193),
+            green:        Color::Rgb(163, 190, 140),
+            yellow:       Color::Rgb(235, 203, 139),
+            peach:        Color::Rgb(208, 135, 112),
+            red:          Color::Rgb(191, 97, 106),
+            pink:         Color::Rgb(180, 142, 173),
+            mauve:        Color::Rgb(180, 142, 173),
+            sky:          Color::Rgb(136, 192, 208),
+        },
+        // 4: One Dark
+        Palette {
+            bg_dark:      Color::Rgb(33, 37, 43),
+            bg_base:      Color::Rgb(40, 44, 52),
+            bg_surface:   Color::Rgb(50, 55, 65),
+            bg_overlay:   Color::Rgb(62, 68, 81),
+            bg_highlight: Color::Rgb(78, 86, 102),
+            text:         Color::Rgb(171, 178, 191),
+            text_dim:     Color::Rgb(130, 137, 151),
+            text_faint:   Color::Rgb(92, 99, 112),
+            blue:         Color::Rgb(97, 175, 239),
+            lavender:     Color::Rgb(198, 120, 221),
+            sapphire:     Color::Rgb(86, 182, 194),
+            green:        Color::Rgb(152, 195, 121),
+            yellow:       Color::Rgb(229, 192, 123),
+            peach:        Color::Rgb(209, 154, 102),
+            red:          Color::Rgb(224, 108, 117),
+            pink:         Color::Rgb(198, 120, 221),
+            mauve:        Color::Rgb(198, 120, 221),
+            sky:          Color::Rgb(86, 182, 194),
+        },
+    ];
+
+    pub const PALETTE_NAMES: [&str; PALETTE_COUNT] = [
+        "Tokyo Night", "Dracula", "Gruvbox Dark", "Nord", "One Dark",
+    ];
+
+    fn p() -> &'static Palette {
+        &PALETTES[ACTIVE.load(Ordering::Relaxed) as usize]
+    }
+
+    pub fn active_name() -> &'static str {
+        PALETTE_NAMES[ACTIVE.load(Ordering::Relaxed) as usize]
+    }
+
+    pub fn cycle_next() {
+        ACTIVE.store(
+            ((ACTIVE.load(Ordering::Relaxed) as usize + 1) % PALETTE_COUNT) as u8,
+            Ordering::Relaxed,
+        );
+    }
+
+    pub fn BG_DARK() -> Color { p().bg_dark }
+    pub fn BG_BASE() -> Color { p().bg_base }
+    pub fn BG_SURFACE() -> Color { p().bg_surface }
+    pub fn BG_OVERLAY() -> Color { p().bg_overlay }
+    pub fn BG_HIGHLIGHT() -> Color { p().bg_highlight }
+    pub fn TEXT() -> Color { p().text }
+    pub fn TEXT_DIM() -> Color { p().text_dim }
+    pub fn TEXT_FAINT() -> Color { p().text_faint }
+    pub fn BLUE() -> Color { p().blue }
+    pub fn LAVENDER() -> Color { p().lavender }
+    pub fn SAPPHIRE() -> Color { p().sapphire }
+    pub fn GREEN() -> Color { p().green }
+    pub fn YELLOW() -> Color { p().yellow }
+    pub fn PEACH() -> Color { p().peach }
+    pub fn RED() -> Color { p().red }
+    pub fn PINK() -> Color { p().pink }
+    pub fn MAUVE() -> Color { p().mauve }
+    pub fn SKY() -> Color { p().sky }
 }
 
 pub fn init_terminal() -> color_eyre::Result<ratatui::DefaultTerminal> {
@@ -109,14 +262,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
 fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mode_style = |m: Mode, current: Mode| {
         if m == current {
-            Style::default().fg(theme::BG_DARK).bg(theme::BLUE).add_modifier(Modifier::BOLD)
+            Style::default().fg(theme::BG_DARK()).bg(theme::BLUE()).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::TEXT_FAINT)
+            Style::default().fg(theme::TEXT_FAINT())
         }
     };
 
     let mut spans = vec![
-        Span::styled(" ✈ Request Pilot ", Style::default().fg(theme::BLUE).add_modifier(Modifier::BOLD)),
+        Span::styled(" ✈ Request Pilot ", Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD)),
         Span::raw(" "),
         Span::styled(" f Files ", mode_style(Mode::Files, app.mode)),
         Span::raw(" "),
@@ -126,14 +279,16 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         Span::styled(" l Logs ", mode_style(Mode::Logs, app.mode)),
         Span::raw("  "),
-        Span::styled("R Run All", Style::default().fg(theme::GREEN)),
+        Span::styled("R Run All", Style::default().fg(theme::GREEN())),
         Span::raw("  "),
-        Span::styled("? Help", Style::default().fg(theme::TEXT_FAINT)),
+        Span::styled("? Help", Style::default().fg(theme::TEXT_FAINT())),
+        Span::raw("  "),
+        Span::styled(format!("\u{1f3a8} {} ", theme::active_name()), Style::default().fg(theme::TEXT_DIM())),
         Span::raw("  "),
     ];
     spans.extend(toolbar::toolbar_badges(app));
     let line = Line::from(spans);
-    frame.render_widget(Paragraph::new(line).style(Style::default().bg(theme::BG_BASE)), area);
+    frame.render_widget(Paragraph::new(line).style(Style::default().bg(theme::BG_BASE())), area);
 }
 
 fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
@@ -153,12 +308,12 @@ fn draw_input_bar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let line = Line::from(vec![
-        Span::styled(prompt, Style::default().fg(theme::PEACH).add_modifier(Modifier::BOLD)),
-        Span::styled(buffer, Style::default().fg(theme::TEXT)),
-        Span::styled("\u{2588}", Style::default().fg(theme::BLUE)),
+        Span::styled(prompt, Style::default().fg(theme::PEACH()).add_modifier(Modifier::BOLD)),
+        Span::styled(buffer, Style::default().fg(theme::TEXT())),
+        Span::styled("\u{2588}", Style::default().fg(theme::BLUE())),
     ]);
     frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(theme::BG_SURFACE)),
+        Paragraph::new(line).style(Style::default().bg(theme::BG_SURFACE())),
         area,
     );
 }
@@ -209,8 +364,11 @@ fn draw_history_detail(frame: &mut Frame, app: &App, area: Rect, idx: usize) {
         None => return,
     };
 
-    let popup_width = (area.width - 4).min(100);
-    let popup_height = (area.height - 4).min(40);
+    let w = area.width.saturating_sub(4);
+    let h = area.height.saturating_sub(4);
+    if w < 10 || h < 3 { return; }
+    let popup_width = w.min(100);
+    let popup_height = h.min(40);
     let x = (area.width - popup_width) / 2;
     let y = (area.height - popup_height) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -221,36 +379,36 @@ fn draw_history_detail(frame: &mut Frame, app: &App, area: Rect, idx: usize) {
 
     // Request info
     let method_color = match entry.method.as_str() {
-        "GET" => theme::GREEN,
-        "POST" => theme::BLUE,
-        "PUT" => theme::YELLOW,
-        "PATCH" => theme::PINK,
-        "DELETE" => theme::RED,
-        _ => theme::TEXT,
+        "GET" => theme::GREEN(),
+        "POST" => theme::BLUE(),
+        "PUT" => theme::YELLOW(),
+        "PATCH" => theme::PINK(),
+        "DELETE" => theme::RED(),
+        _ => theme::TEXT(),
     };
 
     lines.push(Line::from(vec![
         Span::styled(&entry.method, Style::default().fg(method_color).add_modifier(Modifier::BOLD)),
         Span::raw(" "),
-        Span::styled(&entry.url, Style::default().fg(theme::TEXT)),
+        Span::styled(&entry.url, Style::default().fg(theme::TEXT())),
     ]));
 
-    let status_color = if entry.status < 300 { theme::GREEN } else if entry.status < 400 { theme::YELLOW } else { theme::RED };
+    let status_color = if entry.status < 300 { theme::GREEN() } else if entry.status < 400 { theme::YELLOW() } else { theme::RED() };
     lines.push(Line::from(vec![
         Span::styled(format!("Status: {}", entry.status), Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("  \u{00b7} {}ms  \u{00b7} {} bytes", entry.response_time_ms, entry.response_size_bytes), Style::default().fg(theme::TEXT_DIM)),
+        Span::styled(format!("  \u{00b7} {}ms  \u{00b7} {} bytes", entry.response_time_ms, entry.response_size_bytes), Style::default().fg(theme::TEXT_DIM())),
     ]));
-    lines.push(Line::from(Span::styled(format!("Time: {}", entry.timestamp), Style::default().fg(theme::TEXT_FAINT))));
+    lines.push(Line::from(Span::styled(format!("Time: {}", entry.timestamp), Style::default().fg(theme::TEXT_FAINT()))));
 
     // Request headers
     if !entry.request_headers.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("\u{2500}\u{2500}\u{2500} Request Headers \u{2500}\u{2500}\u{2500}", Style::default().fg(theme::TEXT_FAINT))));
+        lines.push(Line::from(Span::styled("\u{2500}\u{2500}\u{2500} Request Headers \u{2500}\u{2500}\u{2500}", Style::default().fg(theme::TEXT_FAINT()))));
         for (k, v) in &entry.request_headers {
             lines.push(Line::from(vec![
-                Span::styled(k, Style::default().fg(theme::LAVENDER)),
+                Span::styled(k, Style::default().fg(theme::LAVENDER())),
                 Span::raw(": "),
-                Span::styled(v, Style::default().fg(theme::TEXT_DIM)),
+                Span::styled(v, Style::default().fg(theme::TEXT_DIM())),
             ]));
         }
     }
@@ -259,9 +417,9 @@ fn draw_history_detail(frame: &mut Frame, app: &App, area: Rect, idx: usize) {
     if let Some(ref body) = entry.request_body {
         if !body.is_empty() {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("\u{2500}\u{2500}\u{2500} Request Body \u{2500}\u{2500}\u{2500}", Style::default().fg(theme::TEXT_FAINT))));
+            lines.push(Line::from(Span::styled("\u{2500}\u{2500}\u{2500} Request Body \u{2500}\u{2500}\u{2500}", Style::default().fg(theme::TEXT_FAINT()))));
             for line in body.lines().take(10) {
-                lines.push(Line::from(Span::styled(line, Style::default().fg(theme::TEXT))));
+                lines.push(Line::from(Span::styled(line, Style::default().fg(theme::TEXT()))));
             }
         }
     }
@@ -269,12 +427,12 @@ fn draw_history_detail(frame: &mut Frame, app: &App, area: Rect, idx: usize) {
     // Response headers
     if !entry.response_headers.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("\u{2500}\u{2500}\u{2500} Response Headers \u{2500}\u{2500}\u{2500}", Style::default().fg(theme::TEXT_FAINT))));
+        lines.push(Line::from(Span::styled("\u{2500}\u{2500}\u{2500} Response Headers \u{2500}\u{2500}\u{2500}", Style::default().fg(theme::TEXT_FAINT()))));
         for (k, v) in &entry.response_headers {
             lines.push(Line::from(vec![
-                Span::styled(k, Style::default().fg(theme::LAVENDER)),
+                Span::styled(k, Style::default().fg(theme::LAVENDER())),
                 Span::raw(": "),
-                Span::styled(v, Style::default().fg(theme::TEXT_DIM)),
+                Span::styled(v, Style::default().fg(theme::TEXT_DIM())),
             ]));
         }
     }
@@ -283,10 +441,10 @@ fn draw_history_detail(frame: &mut Frame, app: &App, area: Rect, idx: usize) {
     if let Some(ref body) = entry.response_body {
         if !body.is_empty() {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("\u{2500}\u{2500}\u{2500} Response Body \u{2500}\u{2500}\u{2500}", Style::default().fg(theme::TEXT_FAINT))));
+            lines.push(Line::from(Span::styled("\u{2500}\u{2500}\u{2500} Response Body \u{2500}\u{2500}\u{2500}", Style::default().fg(theme::TEXT_FAINT()))));
             let preview = if body.len() > 1500 { &body[..1500] } else { body.as_str() };
             for line in preview.lines().take(20) {
-                lines.push(Line::from(Span::styled(line, Style::default().fg(theme::TEXT))));
+                lines.push(Line::from(Span::styled(line, Style::default().fg(theme::TEXT()))));
             }
         }
     }
@@ -294,8 +452,8 @@ fn draw_history_detail(frame: &mut Frame, app: &App, area: Rect, idx: usize) {
     let block = Block::default()
         .title(" \u{1f4cb} Request Detail (Esc to close) ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BLUE))
-        .style(Style::default().bg(theme::BG_OVERLAY));
+        .border_style(Style::default().fg(theme::BLUE()))
+        .style(Style::default().bg(theme::BG_OVERLAY()));
 
     let paragraph = Paragraph::new(lines)
         .block(block)
@@ -311,12 +469,12 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         if app.progress_total > 0 {
             spans.push(Span::styled(
                 format!(" {} Running {}/{}... ", spinner, app.progress_current, app.progress_total),
-                Style::default().fg(theme::SKY).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD),
             ));
         } else {
             spans.push(Span::styled(
                 format!(" {} Running... ", spinner),
-                Style::default().fg(theme::SKY).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD),
             ));
         }
     } else if let Some(fi) = app.active_file_idx {
@@ -325,24 +483,24 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 if r.passed > 0 {
                     spans.push(Span::styled(
                         format!(" \u{2713} {} passed ", r.passed),
-                        Style::default().fg(theme::GREEN).add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme::GREEN()).add_modifier(Modifier::BOLD),
                     ));
                 }
                 if r.failed > 0 {
                     spans.push(Span::styled(
                         format!(" \u{2717} {} failed ", r.failed),
-                        Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme::RED()).add_modifier(Modifier::BOLD),
                     ));
                 }
                 if r.skipped > 0 {
                     spans.push(Span::styled(
                         format!(" \u{2298} {} skipped ", r.skipped),
-                        Style::default().fg(theme::YELLOW),
+                        Style::default().fg(theme::YELLOW()),
                     ));
                 }
                 spans.push(Span::styled(
                     format!(" \u{00b7} {}ms ", r.total_time_ms),
-                    Style::default().fg(theme::TEXT_FAINT),
+                    Style::default().fg(theme::TEXT_FAINT()),
                 ));
             }
         }
@@ -350,7 +508,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     if let Some((ref msg, _)) = app.status_message {
         if spans.is_empty() {
-            spans.push(Span::styled(format!(" {} ", msg), Style::default().fg(theme::TEXT_DIM)));
+            spans.push(Span::styled(format!(" {} ", msg), Style::default().fg(theme::TEXT_DIM())));
         }
     }
 
@@ -361,11 +519,11 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         let pad = available - used - hints.len();
         spans.push(Span::raw(" ".repeat(pad)));
     }
-    spans.push(Span::styled(hints, Style::default().fg(theme::TEXT_FAINT)));
+    spans.push(Span::styled(hints, Style::default().fg(theme::TEXT_FAINT())));
 
     let line = Line::from(spans);
     frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(theme::BG_BASE)),
+        Paragraph::new(line).style(Style::default().bg(theme::BG_BASE())),
         area,
     );
 }

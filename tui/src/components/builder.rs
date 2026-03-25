@@ -15,14 +15,14 @@ const METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPT
 
 fn method_color(method: &str) -> ratatui::style::Color {
     match method {
-        "GET" => theme::GREEN,
-        "POST" => theme::BLUE,
-        "PUT" => theme::YELLOW,
-        "PATCH" => theme::PINK,
-        "DELETE" => theme::RED,
-        "HEAD" => theme::SKY,
-        "OPTIONS" => theme::LAVENDER,
-        _ => theme::TEXT,
+        "GET" => theme::GREEN(),
+        "POST" => theme::BLUE(),
+        "PUT" => theme::YELLOW(),
+        "PATCH" => theme::PINK(),
+        "DELETE" => theme::RED(),
+        "HEAD" => theme::SKY(),
+        "OPTIONS" => theme::LAVENDER(),
+        _ => theme::TEXT(),
     }
 }
 
@@ -37,11 +37,11 @@ pub fn render_builder(frame: &mut Frame, app: &App, area: Rect) {
             let block = Block::default()
                 .title(" Builder ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::TEXT_FAINT));
+                .border_style(Style::default().fg(theme::TEXT_FAINT()));
             frame.render_widget(
                 Paragraph::new("Select a block from the file tree")
                     .block(block)
-                    .style(Style::default().fg(theme::TEXT_FAINT)),
+                    .style(Style::default().fg(theme::TEXT_FAINT())),
                 area,
             );
             return;
@@ -84,9 +84,9 @@ fn render_method_url(
     let is_focused = app.builder_focus == BuilderFocus::Method
         || app.builder_focus == BuilderFocus::Url;
     let border_style = if is_focused {
-        Style::default().fg(theme::BLUE)
+        Style::default().fg(theme::BLUE())
     } else {
-        Style::default().fg(theme::TEXT_FAINT)
+        Style::default().fg(theme::TEXT_FAINT())
     };
 
     let block = Block::default()
@@ -96,7 +96,7 @@ fn render_method_url(
 
     let method_style = if app.builder_focus == BuilderFocus::Method {
         Style::default()
-            .fg(theme::BG_DARK)
+            .fg(theme::BG_DARK())
             .bg(method_color(&blk.request.method))
             .add_modifier(Modifier::BOLD)
     } else {
@@ -115,7 +115,7 @@ fn render_method_url(
     spans.extend(url_spans);
 
     if app.builder_focus == BuilderFocus::Url {
-        spans.push(Span::styled("█", Style::default().fg(theme::BLUE)));
+        spans.push(Span::styled("█", Style::default().fg(theme::BLUE())));
     }
 
     let line = Line::from(spans);
@@ -124,12 +124,12 @@ fn render_method_url(
 
 fn highlight_variables(text: &str, focused: bool) -> Vec<Span<'_>> {
     let base_style = if focused {
-        Style::default().fg(theme::TEXT)
+        Style::default().fg(theme::TEXT())
     } else {
-        Style::default().fg(theme::TEXT_DIM)
+        Style::default().fg(theme::TEXT_DIM())
     };
     let var_style = Style::default()
-        .fg(theme::MAUVE)
+        .fg(theme::MAUVE())
         .add_modifier(Modifier::BOLD);
 
     let mut spans = Vec::new();
@@ -163,9 +163,9 @@ fn render_headers(
 ) {
     let is_focused = app.builder_focus == BuilderFocus::Headers;
     let border_style = if is_focused {
-        Style::default().fg(theme::BLUE)
+        Style::default().fg(theme::BLUE())
     } else {
-        Style::default().fg(theme::TEXT_FAINT)
+        Style::default().fg(theme::TEXT_FAINT())
     };
 
     let block = Block::default()
@@ -177,7 +177,7 @@ fn render_headers(
         frame.render_widget(
             Paragraph::new("  (no headers)")
                 .block(block)
-                .style(Style::default().fg(theme::TEXT_FAINT)),
+                .style(Style::default().fg(theme::TEXT_FAINT())),
             area,
         );
         return;
@@ -191,17 +191,17 @@ fn render_headers(
         .map(|(i, (k, v))| {
             let is_sel = is_focused && i == app.builder_header_cursor;
             let bg = if is_sel {
-                theme::BG_HIGHLIGHT
+                theme::BG_HIGHLIGHT()
             } else {
                 ratatui::style::Color::Reset
             };
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("  {}", k),
-                    Style::default().fg(theme::LAVENDER).bg(bg),
+                    Style::default().fg(theme::LAVENDER()).bg(bg),
                 ),
-                Span::styled(": ", Style::default().fg(theme::TEXT_FAINT).bg(bg)),
-                Span::styled(v, Style::default().fg(theme::TEXT).bg(bg)),
+                Span::styled(": ", Style::default().fg(theme::TEXT_FAINT()).bg(bg)),
+                Span::styled(v, Style::default().fg(theme::TEXT()).bg(bg)),
             ]))
         })
         .collect();
@@ -217,9 +217,9 @@ fn render_body(
 ) {
     let is_focused = app.builder_focus == BuilderFocus::Body;
     let border_style = if is_focused {
-        Style::default().fg(theme::BLUE)
+        Style::default().fg(theme::BLUE())
     } else {
-        Style::default().fg(theme::TEXT_FAINT)
+        Style::default().fg(theme::TEXT_FAINT())
     };
 
     let block = Block::default()
@@ -235,9 +235,9 @@ fn render_body(
                 .map(|(i, line)| {
                     let ln = Span::styled(
                         format!("{:>3} ", i + 1),
-                        Style::default().fg(theme::TEXT_FAINT),
+                        Style::default().fg(theme::TEXT_FAINT()),
                     );
-                    let content = Span::styled(line, Style::default().fg(theme::TEXT));
+                    let content = Span::styled(line, Style::default().fg(theme::TEXT()));
                     Line::from(vec![ln, content])
                 })
                 .collect();
@@ -253,7 +253,7 @@ fn render_body(
             frame.render_widget(
                 Paragraph::new("  (no body)")
                     .block(block)
-                    .style(Style::default().fg(theme::TEXT_FAINT)),
+                    .style(Style::default().fg(theme::TEXT_FAINT())),
                 area,
             );
         }
@@ -268,13 +268,13 @@ fn render_assertions(
     let block = Block::default()
         .title(format!(" Assertions ({}) ", blk.assertions.len()))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::TEXT_FAINT));
+        .border_style(Style::default().fg(theme::TEXT_FAINT()));
 
     if blk.assertions.is_empty() {
         frame.render_widget(
             Paragraph::new("  (none)")
                 .block(block)
-                .style(Style::default().fg(theme::TEXT_FAINT)),
+                .style(Style::default().fg(theme::TEXT_FAINT())),
             area,
         );
         return;
@@ -285,10 +285,10 @@ fn render_assertions(
         .iter()
         .map(|a| {
             ListItem::new(Line::from(vec![
-                Span::styled("  ● ", Style::default().fg(theme::YELLOW)),
+                Span::styled("  ● ", Style::default().fg(theme::YELLOW())),
                 Span::styled(
                     format!("{} {} {}", a.left, a.operator, a.right),
-                    Style::default().fg(theme::TEXT),
+                    Style::default().fg(theme::TEXT()),
                 ),
             ]))
         })
@@ -305,13 +305,13 @@ fn render_extracts(
     let block = Block::default()
         .title(format!(" Extracts ({}) ", blk.extracts.len()))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::TEXT_FAINT));
+        .border_style(Style::default().fg(theme::TEXT_FAINT()));
 
     if blk.extracts.is_empty() {
         frame.render_widget(
             Paragraph::new("  (none)")
                 .block(block)
-                .style(Style::default().fg(theme::TEXT_FAINT)),
+                .style(Style::default().fg(theme::TEXT_FAINT())),
             area,
         );
         return;
@@ -322,10 +322,10 @@ fn render_extracts(
         .iter()
         .map(|e| {
             ListItem::new(Line::from(vec![
-                Span::styled("  ⇐ ", Style::default().fg(theme::MAUVE)),
-                Span::styled(&e.variable_name, Style::default().fg(theme::MAUVE)),
-                Span::styled(" = ", Style::default().fg(theme::TEXT_FAINT)),
-                Span::styled(&e.source_path, Style::default().fg(theme::TEXT)),
+                Span::styled("  ⇐ ", Style::default().fg(theme::MAUVE())),
+                Span::styled(&e.variable_name, Style::default().fg(theme::MAUVE())),
+                Span::styled(" = ", Style::default().fg(theme::TEXT_FAINT())),
+                Span::styled(&e.source_path, Style::default().fg(theme::TEXT())),
             ]))
         })
         .collect();
@@ -408,16 +408,16 @@ fn handle_url_keys(app: &mut App, key: KeyEvent) {
             if let Some(blk) = file.suite.blocks.get_mut(bi) {
                 match key.code {
                     KeyCode::Char(c) => {
-                        let pos = app.builder_url_cursor.min(blk.request.url.len());
-                        blk.request.url.insert(pos, c);
-                        app.builder_url_cursor = pos + 1;
+                        let byte_pos = blk.request.url.char_indices().nth(app.builder_url_cursor).map(|(i, _)| i).unwrap_or(blk.request.url.len());
+                        blk.request.url.insert(byte_pos, c);
+                        app.builder_url_cursor += 1;
                     }
                     KeyCode::Backspace => {
                         if app.builder_url_cursor > 0 {
-                            let pos = app.builder_url_cursor.min(blk.request.url.len());
-                            if pos > 0 {
-                                blk.request.url.remove(pos - 1);
-                                app.builder_url_cursor = pos - 1;
+                            let byte_pos = blk.request.url.char_indices().nth(app.builder_url_cursor - 1).map(|(i, _)| i).unwrap_or(blk.request.url.len());
+                            if byte_pos < blk.request.url.len() {
+                                blk.request.url.remove(byte_pos);
+                                app.builder_url_cursor -= 1;
                             }
                         }
                     }
@@ -426,13 +426,13 @@ fn handle_url_keys(app: &mut App, key: KeyEvent) {
                     }
                     KeyCode::Right => {
                         app.builder_url_cursor =
-                            (app.builder_url_cursor + 1).min(blk.request.url.len());
+                            (app.builder_url_cursor + 1).min(blk.request.url.chars().count());
                     }
                     KeyCode::Home => {
                         app.builder_url_cursor = 0;
                     }
                     KeyCode::End => {
-                        app.builder_url_cursor = blk.request.url.len();
+                        app.builder_url_cursor = blk.request.url.chars().count();
                     }
                     _ => {}
                 }

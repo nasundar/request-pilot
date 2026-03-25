@@ -22,14 +22,14 @@ const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD",
 
 fn method_color(method: &str) -> ratatui::style::Color {
     match method {
-        "GET" => theme::GREEN,
-        "POST" => theme::BLUE,
-        "PUT" => theme::YELLOW,
-        "PATCH" => theme::PINK,
-        "DELETE" => theme::RED,
-        "HEAD" => theme::SKY,
-        "OPTIONS" => theme::LAVENDER,
-        _ => theme::TEXT,
+        "GET" => theme::GREEN(),
+        "POST" => theme::BLUE(),
+        "PUT" => theme::YELLOW(),
+        "PATCH" => theme::PINK(),
+        "DELETE" => theme::RED(),
+        "HEAD" => theme::SKY(),
+        "OPTIONS" => theme::LAVENDER(),
+        _ => theme::TEXT(),
     }
 }
 
@@ -43,7 +43,7 @@ fn highlight_variables(text: &str, base_style: Style) -> Vec<Span<'static>> {
             }
             spans.push(Span::styled(
                 rest[start..start + end + 2].to_string(),
-                Style::default().fg(theme::PEACH),
+                Style::default().fg(theme::PEACH()),
             ));
             rest = &rest[start + end + 2..];
         } else {
@@ -62,22 +62,22 @@ fn highlight_line(line: &str, in_body: bool) -> Vec<Span<'static>> {
     if trimmed.starts_with("###") {
         return vec![Span::styled(
             line.to_string(),
-            Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::YELLOW()).add_modifier(Modifier::BOLD),
         )];
     }
 
     for d in DIRECTIVES {
         if trimmed.starts_with(d) {
-            return vec![Span::styled(line.to_string(), Style::default().fg(theme::MAUVE))];
+            return vec![Span::styled(line.to_string(), Style::default().fg(theme::MAUVE()))];
         }
     }
 
     if trimmed.starts_with('@') {
-        return highlight_variables(line, Style::default().fg(theme::MAUVE));
+        return highlight_variables(line, Style::default().fg(theme::MAUVE()));
     }
 
     if trimmed.starts_with('#') {
-        return vec![Span::styled(line.to_string(), Style::default().fg(theme::GREEN))];
+        return vec![Span::styled(line.to_string(), Style::default().fg(theme::GREEN()))];
     }
 
     for m in HTTP_METHODS {
@@ -95,7 +95,7 @@ fn highlight_line(line: &str, in_body: bool) -> Vec<Span<'static>> {
                 ));
                 let url_part = &line[leading_len + m.len()..];
                 if !url_part.is_empty() {
-                    spans.extend(highlight_variables(url_part, Style::default().fg(theme::TEXT)));
+                    spans.extend(highlight_variables(url_part, Style::default().fg(theme::TEXT())));
                 }
                 return spans;
             }
@@ -111,9 +111,9 @@ fn highlight_line(line: &str, in_body: bool) -> Vec<Span<'static>> {
             if leading_len > 0 {
                 spans.push(Span::styled(line[..leading_len].to_string(), Style::default()));
             }
-            spans.push(Span::styled(key.to_string(), Style::default().fg(theme::BLUE)));
-            spans.push(Span::styled(": ".to_string(), Style::default().fg(theme::TEXT_DIM)));
-            spans.extend(highlight_variables(value, Style::default().fg(theme::TEXT)));
+            spans.push(Span::styled(key.to_string(), Style::default().fg(theme::BLUE())));
+            spans.push(Span::styled(": ".to_string(), Style::default().fg(theme::TEXT_DIM())));
+            spans.extend(highlight_variables(value, Style::default().fg(theme::TEXT())));
             return spans;
         }
     }
@@ -122,7 +122,7 @@ fn highlight_line(line: &str, in_body: bool) -> Vec<Span<'static>> {
         return highlight_json_line(line);
     }
 
-    highlight_variables(line, Style::default().fg(theme::TEXT))
+    highlight_variables(line, Style::default().fg(theme::TEXT()))
 }
 
 fn highlight_json_line(line: &str) -> Vec<Span<'static>> {
@@ -134,7 +134,7 @@ fn highlight_json_line(line: &str) -> Vec<Span<'static>> {
         match ch {
             '"' => {
                 if !buf.is_empty() {
-                    spans.push(Span::styled(buf.clone(), Style::default().fg(theme::TEXT)));
+                    spans.push(Span::styled(buf.clone(), Style::default().fg(theme::TEXT())));
                     buf.clear();
                 }
                 let mut s = String::new();
@@ -163,11 +163,11 @@ fn highlight_json_line(line: &str) -> Vec<Span<'static>> {
                 }
                 let rest = &line[i + s.len()..];
                 if rest.trim_start().starts_with(':') {
-                    spans.push(Span::styled(s, Style::default().fg(theme::BLUE)));
+                    spans.push(Span::styled(s, Style::default().fg(theme::BLUE())));
                 } else if s.contains("{{") {
-                    spans.extend(highlight_variables(&s, Style::default().fg(theme::GREEN)));
+                    spans.extend(highlight_variables(&s, Style::default().fg(theme::GREEN())));
                 } else {
-                    spans.push(Span::styled(s, Style::default().fg(theme::GREEN)));
+                    spans.push(Span::styled(s, Style::default().fg(theme::GREEN())));
                 }
             }
             '0'..='9' | '-'
@@ -175,7 +175,7 @@ fn highlight_json_line(line: &str) -> Vec<Span<'static>> {
                     || buf.ends_with(|c: char| c == ':' || c == ' ' || c == ',' || c == '[') =>
             {
                 if !buf.is_empty() {
-                    spans.push(Span::styled(buf.clone(), Style::default().fg(theme::TEXT)));
+                    spans.push(Span::styled(buf.clone(), Style::default().fg(theme::TEXT())));
                     buf.clear();
                 }
                 let mut num = String::new();
@@ -187,15 +187,15 @@ fn highlight_json_line(line: &str) -> Vec<Span<'static>> {
                         break;
                     }
                 }
-                spans.push(Span::styled(num, Style::default().fg(theme::PEACH)));
+                spans.push(Span::styled(num, Style::default().fg(theme::PEACH())));
                 continue;
             }
             '{' | '}' | '[' | ']' | ',' | ':' => {
                 if !buf.is_empty() {
-                    spans.push(Span::styled(buf.clone(), Style::default().fg(theme::TEXT)));
+                    spans.push(Span::styled(buf.clone(), Style::default().fg(theme::TEXT())));
                     buf.clear();
                 }
-                spans.push(Span::styled(ch.to_string(), Style::default().fg(theme::TEXT_DIM)));
+                spans.push(Span::styled(ch.to_string(), Style::default().fg(theme::TEXT_DIM())));
                 chars.next();
             }
             _ => {
@@ -207,10 +207,10 @@ fn highlight_json_line(line: &str) -> Vec<Span<'static>> {
                         if prefix_len > 0 {
                             spans.push(Span::styled(
                                 buf[..prefix_len].to_string(),
-                                Style::default().fg(theme::TEXT),
+                                Style::default().fg(theme::TEXT()),
                             ));
                         }
-                        spans.push(Span::styled(kw.to_string(), Style::default().fg(theme::MAUVE)));
+                        spans.push(Span::styled(kw.to_string(), Style::default().fg(theme::MAUVE())));
                         buf.clear();
                         break;
                     }
@@ -220,13 +220,13 @@ fn highlight_json_line(line: &str) -> Vec<Span<'static>> {
     }
     if !buf.is_empty() {
         if buf.contains("{{") {
-            spans.extend(highlight_variables(&buf, Style::default().fg(theme::TEXT)));
+            spans.extend(highlight_variables(&buf, Style::default().fg(theme::TEXT())));
         } else {
-            spans.push(Span::styled(buf, Style::default().fg(theme::TEXT)));
+            spans.push(Span::styled(buf, Style::default().fg(theme::TEXT())));
         }
     }
     if spans.is_empty() {
-        spans.push(Span::styled(line.to_string(), Style::default().fg(theme::TEXT)));
+        spans.push(Span::styled(line.to_string(), Style::default().fg(theme::TEXT())));
     }
     spans
 }
@@ -302,16 +302,16 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
         let is_cursor_line = i == app.code_editor_cursor_line;
         let is_active_block = active_range.map_or(false, |(s, e)| i >= s && i < e);
         let bg = if is_cursor_line {
-            theme::BG_OVERLAY
+            theme::BG_OVERLAY()
         } else if is_active_block {
-            theme::BG_SURFACE
+            theme::BG_SURFACE()
         } else {
-            theme::BG_DARK
+            theme::BG_DARK()
         };
         let num_style = if is_cursor_line {
-            Style::default().fg(theme::YELLOW).bg(bg)
+            Style::default().fg(theme::YELLOW()).bg(bg)
         } else {
-            Style::default().fg(theme::TEXT_FAINT).bg(bg)
+            Style::default().fg(theme::TEXT_FAINT()).bg(bg)
         };
         let gutter = format!("{:>w$} ", i + 1, w = gutter_width as usize - 1);
         let mut spans = vec![Span::styled(gutter, num_style)];
@@ -342,19 +342,19 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
     let title_line = Line::from(vec![
         Span::styled(
             " \u{270e} Code Editor",
-            Style::default().fg(theme::BLUE).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(title, Style::default().fg(theme::TEXT)),
-        Span::styled(" Esc=exit Ctrl+S=save ", Style::default().fg(theme::TEXT_FAINT)),
+        Span::styled(title, Style::default().fg(theme::TEXT())),
+        Span::styled(" Esc=exit Ctrl+S=save ", Style::default().fg(theme::TEXT_FAINT())),
     ]);
     let hints_line = Line::from(vec![Span::styled(
         " \u{2191}\u{2193}=move  Ctrl+U/D=half-page  Type to edit ",
-        Style::default().fg(theme::TEXT_FAINT),
+        Style::default().fg(theme::TEXT_FAINT()),
     )]);
 
     let title_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
     frame.render_widget(
-        Paragraph::new(title_line).style(Style::default().bg(theme::BG_BASE)),
+        Paragraph::new(title_line).style(Style::default().bg(theme::BG_BASE())),
         title_area,
     );
     let content_area = Rect {
@@ -364,7 +364,7 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
         height: area.height.saturating_sub(2),
     };
     frame.render_widget(
-        Paragraph::new(display_lines).style(Style::default().bg(theme::BG_DARK)),
+        Paragraph::new(display_lines).style(Style::default().bg(theme::BG_DARK())),
         content_area,
     );
     let bottom_area = Rect {
@@ -374,7 +374,7 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
         height: 1,
     };
     frame.render_widget(
-        Paragraph::new(hints_line).style(Style::default().bg(theme::BG_BASE)),
+        Paragraph::new(hints_line).style(Style::default().bg(theme::BG_BASE())),
         bottom_area,
     );
 }
@@ -510,14 +510,15 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
 }
 
 fn get_line_len(content: &str, line_idx: usize) -> usize {
-    content.split('\n').nth(line_idx).map_or(0, |l| l.len())
+    content.split('\n').nth(line_idx).map_or(0, |l| l.chars().count())
 }
 
 fn line_col_to_offset(content: &str, line: usize, col: usize) -> usize {
     let mut offset = 0;
     for (i, l) in content.split('\n').enumerate() {
         if i == line {
-            return offset + col.min(l.len());
+            let char_offset = l.char_indices().nth(col.min(l.chars().count())).map(|(idx, _)| idx).unwrap_or(l.len());
+            return offset + char_offset;
         }
         offset += l.len() + 1;
     }

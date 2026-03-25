@@ -73,34 +73,34 @@ fn source_label(source: &str) -> &str {
 
 fn source_badge_color(source: &str) -> Color {
     match source {
-        "tui" | "test-run" => theme::SAPPHIRE,
-        "extension-live" | "manual" => theme::PEACH,
-        "live" => theme::GREEN,
-        _ => theme::TEXT_FAINT,
+        "tui" | "test-run" => theme::SAPPHIRE(),
+        "extension-live" | "manual" => theme::PEACH(),
+        "live" => theme::GREEN(),
+        _ => theme::TEXT_FAINT(),
     }
 }
 
 fn time_color(ms: u64) -> Color {
-    if ms < 200 { theme::GREEN }
-    else if ms < 500 { theme::YELLOW }
-    else { theme::RED }
+    if ms < 200 { theme::GREEN() }
+    else if ms < 500 { theme::YELLOW() }
+    else { theme::RED() }
 }
 
 fn method_color(method: &str) -> Color {
     match method {
-        "GET" => theme::GREEN,
-        "POST" => theme::BLUE,
-        "PUT" => theme::YELLOW,
-        "PATCH" => theme::PINK,
-        "DELETE" => theme::RED,
-        _ => theme::TEXT,
+        "GET" => theme::GREEN(),
+        "POST" => theme::BLUE(),
+        "PUT" => theme::YELLOW(),
+        "PATCH" => theme::PINK(),
+        "DELETE" => theme::RED(),
+        _ => theme::TEXT(),
     }
 }
 
 fn status_color(status: u16) -> Color {
-    if status < 300 { theme::GREEN }
-    else if status < 400 { theme::YELLOW }
-    else { theme::RED }
+    if status < 300 { theme::GREEN() }
+    else if status < 400 { theme::YELLOW() }
+    else { theme::RED() }
 }
 
 fn percentile(sorted: &[u64], p: f64) -> u64 {
@@ -217,11 +217,11 @@ fn render_history_stats(frame: &mut Frame, app: &App, area: Rect, entries: &[&Hi
         app.history_method_filter.as_deref().unwrap_or("All"),
         app.history_status_filter.as_deref().unwrap_or("All"));
     let block = Block::default().title(title).borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BLUE));
+        .border_style(Style::default().fg(theme::BLUE()));
     let total = entries.len();
     if total == 0 {
         frame.render_widget(Paragraph::new("No history entries yet. Run some tests!")
-            .block(block).style(Style::default().fg(theme::TEXT_FAINT)), area);
+            .block(block).style(Style::default().fg(theme::TEXT_FAINT())), area);
         return;
     }
     let success_count = entries.iter().filter(|e| e.status < 400).count();
@@ -239,33 +239,33 @@ fn render_history_stats(frame: &mut Frame, app: &App, area: Rect, entries: &[&Hi
     let max_t = times.last().copied().unwrap_or(0);
     let lines = vec![
         Line::from(vec![
-            Span::styled("  Total: ", Style::default().fg(theme::TEXT_DIM)),
-            Span::styled(format!("{}", total), Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)),
+            Span::styled("  Total: ", Style::default().fg(theme::TEXT_DIM())),
+            Span::styled(format!("{}", total), Style::default().fg(theme::TEXT()).add_modifier(Modifier::BOLD)),
             Span::raw("  "),
-            Span::styled("\u{2713} ", Style::default().fg(theme::GREEN)),
-            Span::styled(format!("{}", success_count), Style::default().fg(theme::GREEN)),
+            Span::styled("\u{2713} ", Style::default().fg(theme::GREEN())),
+            Span::styled(format!("{}", success_count), Style::default().fg(theme::GREEN())),
             Span::raw("  "),
-            Span::styled("\u{2717} ", Style::default().fg(theme::RED)),
-            Span::styled(format!("{}", error_count), Style::default().fg(theme::RED)),
+            Span::styled("\u{2717} ", Style::default().fg(theme::RED())),
+            Span::styled(format!("{}", error_count), Style::default().fg(theme::RED())),
             Span::raw("    "),
-            Span::styled("Pass rate: ", Style::default().fg(theme::TEXT_DIM)),
+            Span::styled("Pass rate: ", Style::default().fg(theme::TEXT_DIM())),
             Span::styled(format!("{:.1}%", pass_rate),
-                Style::default().fg(if pass_rate >= 80.0 { theme::GREEN } else if pass_rate >= 50.0 { theme::YELLOW } else { theme::RED }).add_modifier(Modifier::BOLD)),
+                Style::default().fg(if pass_rate >= 80.0 { theme::GREEN() } else if pass_rate >= 50.0 { theme::YELLOW() } else { theme::RED() }).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
-            Span::styled("  Methods: ", Style::default().fg(theme::TEXT_DIM)),
-            Span::styled(method_parts.join(", "), Style::default().fg(theme::TEXT)),
+            Span::styled("  Methods: ", Style::default().fg(theme::TEXT_DIM())),
+            Span::styled(method_parts.join(", "), Style::default().fg(theme::TEXT())),
         ]),
         Line::from(vec![
-            Span::styled("  Timing: ", Style::default().fg(theme::TEXT_DIM)),
+            Span::styled("  Timing: ", Style::default().fg(theme::TEXT_DIM())),
             Span::styled(format!("avg {}ms", avg), Style::default().fg(time_color(avg))),
-            Span::styled("  p50 ", Style::default().fg(theme::TEXT_DIM)),
+            Span::styled("  p50 ", Style::default().fg(theme::TEXT_DIM())),
             Span::styled(format!("{}ms", p50), Style::default().fg(time_color(p50))),
-            Span::styled("  p90 ", Style::default().fg(theme::TEXT_DIM)),
+            Span::styled("  p90 ", Style::default().fg(theme::TEXT_DIM())),
             Span::styled(format!("{}ms", p90), Style::default().fg(time_color(p90))),
-            Span::styled("  p99 ", Style::default().fg(theme::TEXT_DIM)),
+            Span::styled("  p99 ", Style::default().fg(theme::TEXT_DIM())),
             Span::styled(format!("{}ms", p99), Style::default().fg(time_color(p99))),
-            Span::styled("  max ", Style::default().fg(theme::TEXT_DIM)),
+            Span::styled("  max ", Style::default().fg(theme::TEXT_DIM())),
             Span::styled(format!("{}ms", max_t), Style::default().fg(time_color(max_t))),
         ]),
     ];
@@ -273,7 +273,7 @@ fn render_history_stats(frame: &mut Frame, app: &App, area: Rect, entries: &[&Hi
 }
 
 fn render_history_filter(frame: &mut Frame, app: &App, area: Rect) {
-    let border_style = if app.focus == Focus::FilterInput { Style::default().fg(theme::BLUE) } else { Style::default().fg(theme::TEXT_FAINT) };
+    let border_style = if app.focus == Focus::FilterInput { Style::default().fg(theme::BLUE()) } else { Style::default().fg(theme::TEXT_FAINT()) };
     let mut af: Vec<String> = Vec::new();
     if let Some(ref m) = app.history_method_filter { af.push(format!("method={}", m)); }
     if let Some(ref s) = app.history_status_filter { af.push(format!("status={}", s)); }
@@ -283,17 +283,17 @@ fn render_history_filter(frame: &mut Frame, app: &App, area: Rect) {
     let text = if app.filter_text.is_empty() {
         if app.focus == Focus::FilterInput { "Type to filter..." } else { "Press / to filter" }
     } else { &app.filter_text };
-    let style = if app.filter_text.is_empty() { Style::default().fg(theme::TEXT_FAINT) } else { Style::default().fg(theme::TEXT) };
+    let style = if app.filter_text.is_empty() { Style::default().fg(theme::TEXT_FAINT()) } else { Style::default().fg(theme::TEXT()) };
     frame.render_widget(Paragraph::new(Span::styled(text, style)).block(block), area);
 }
 fn render_history_list(frame: &mut Frame, app: &App, area: Rect, entries: &[&HistoryEntry]) {
-    let border_style = if app.focus == Focus::HistoryList { Style::default().fg(theme::BLUE) } else { Style::default().fg(theme::TEXT_FAINT) };
+    let border_style = if app.focus == Focus::HistoryList { Style::default().fg(theme::BLUE()) } else { Style::default().fg(theme::TEXT_FAINT()) };
     let ci = if !app.history_selected_seqs.is_empty() { format!(" ({}/2 selected)", app.history_selected_seqs.len()) } else { String::new() };
     let title = format!(" History \u{2014} {} [g cycle, Space sel, d diff]{} ", app.history_group_by.label(), ci);
     let block = Block::default().title(title).borders(Borders::ALL).border_style(border_style);
     if entries.is_empty() {
         let msg = if app.filter_text.is_empty() && app.history_method_filter.is_none() && app.history_status_filter.is_none() { "No history entries. Run tests to populate." } else { "No matching entries." };
-        frame.render_widget(Paragraph::new(msg).block(block).style(Style::default().fg(theme::TEXT_FAINT)), area);
+        frame.render_widget(Paragraph::new(msg).block(block).style(Style::default().fg(theme::TEXT_FAINT())), area);
         return;
     }
     let rows = build_display_rows(app, entries);
@@ -301,35 +301,35 @@ fn render_history_list(frame: &mut Frame, app: &App, area: Rect, entries: &[&His
         match row {
             DisplayRow::GroupHeader { label, count } => {
                 let is_sel = i == app.history_cursor;
-                let bg = if is_sel { theme::BG_HIGHLIGHT } else { Color::Reset };
+                let bg = if is_sel { theme::BG_HIGHLIGHT() } else { Color::Reset };
                 let is_col = app.history_groups_collapsed.contains(label);
                 let marker = if is_col { "\u{25b6}" } else { "\u{25bc}" };
                 let display = group_display_label(label);
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!(" {} {} ", marker, display), Style::default().fg(theme::LAVENDER).bg(bg).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("({})", count), Style::default().fg(theme::TEXT_DIM).bg(bg)),
+                    Span::styled(format!(" {} {} ", marker, display), Style::default().fg(theme::LAVENDER()).bg(bg).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("({})", count), Style::default().fg(theme::TEXT_DIM()).bg(bg)),
                 ]))
             }
             DisplayRow::Entry { entry, .. } => {
                 let is_sel = i == app.history_cursor;
                 let is_cmp = app.history_selected_seqs.contains(&entry.seq);
-                let bg = if is_sel { theme::BG_HIGHLIGHT } else if is_cmp { theme::BG_OVERLAY } else { Color::Reset };
+                let bg = if is_sel { theme::BG_HIGHLIGHT() } else if is_cmp { theme::BG_OVERLAY() } else { Color::Reset };
                 let cm = if is_cmp { "\u{25c6} " } else { "  " };
                 let ts = if entry.timestamp.len() >= 19 { &entry.timestamp[11..19] } else { &entry.timestamp };
                 let badge = source_label(&entry.source);
                 let bc = source_badge_color(&entry.source);
                 ListItem::new(Line::from(vec![
-                    Span::styled(cm, Style::default().fg(theme::MAUVE).bg(bg)),
-                    Span::styled(format!(" {} ", entry.status), Style::default().fg(theme::BG_DARK).bg(status_color(entry.status))),
+                    Span::styled(cm, Style::default().fg(theme::MAUVE()).bg(bg)),
+                    Span::styled(format!(" {} ", entry.status), Style::default().fg(theme::BG_DARK()).bg(status_color(entry.status))),
                     Span::styled(" ", Style::default().bg(bg)),
                     Span::styled(format!("{:<7}", entry.method), Style::default().fg(method_color(&entry.method)).bg(bg)),
-                    Span::styled(&entry.url, Style::default().fg(theme::TEXT).bg(bg)),
+                    Span::styled(&entry.url, Style::default().fg(theme::TEXT()).bg(bg)),
                     Span::styled("  ", Style::default().bg(bg)),
                     Span::styled(format!("{}ms", entry.response_time_ms), Style::default().fg(time_color(entry.response_time_ms)).bg(bg)),
                     Span::styled("  ", Style::default().bg(bg)),
                     Span::styled(format!("[{}]", badge), Style::default().fg(bc).bg(bg)),
                     Span::styled("  ", Style::default().bg(bg)),
-                    Span::styled(ts, Style::default().fg(theme::TEXT_FAINT).bg(bg)),
+                    Span::styled(ts, Style::default().fg(theme::TEXT_FAINT()).bg(bg)),
                 ]))
             }
         }
@@ -349,10 +349,10 @@ fn render_filter_popup(frame: &mut Frame, area: Rect, popup: &HistoryPopup) {
     let pa = Rect::new(x, y, pw, ph);
     frame.render_widget(ratatui::widgets::Clear, pa);
     let block = Block::default().title(format!(" {} ", title)).borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BLUE)).style(Style::default().bg(theme::BG_OVERLAY));
+        .border_style(Style::default().fg(theme::BLUE())).style(Style::default().bg(theme::BG_OVERLAY()));
     let items: Vec<ListItem> = options.iter().enumerate().map(|(i, opt)| {
         let is_sel = i == cursor;
-        let style = if is_sel { Style::default().fg(theme::BG_DARK).bg(theme::BLUE).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme::TEXT) };
+        let style = if is_sel { Style::default().fg(theme::BG_DARK()).bg(theme::BLUE()).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme::TEXT()) };
         let m = if is_sel { "\u{25b8} " } else { "  " };
         ListItem::new(Line::from(Span::styled(format!("{}{}", m, opt), style)))
     }).collect();

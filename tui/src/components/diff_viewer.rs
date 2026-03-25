@@ -326,8 +326,8 @@ pub fn render_diff_overlay(frame: &mut Frame, app: &App, area: Rect) {
             data.stats.modified,
             mode_label,
         ))
-        .border_style(Style::default().fg(theme::LAVENDER))
-        .style(Style::default().bg(theme::BG_DARK));
+        .border_style(Style::default().fg(theme::LAVENDER()))
+        .style(Style::default().bg(theme::BG_DARK()));
 
     let content_area = block.inner(inner);
     frame.render_widget(block, inner);
@@ -348,19 +348,19 @@ pub fn render_diff_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let header = Line::from(vec![
         Span::styled(
             format!(" {:<w$}", data.label_a, w = half_w as usize - 1),
-            Style::default().fg(theme::PEACH).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::PEACH()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             "\u{2502}",
-            Style::default().fg(theme::BG_OVERLAY),
+            Style::default().fg(theme::BG_OVERLAY()),
         ),
         Span::styled(
             format!(" {}", data.label_b),
-            Style::default().fg(theme::GREEN).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::GREEN()).add_modifier(Modifier::BOLD),
         ),
     ]);
     frame.render_widget(
-        Paragraph::new(header).style(Style::default().bg(theme::BG_SURFACE)),
+        Paragraph::new(header).style(Style::default().bg(theme::BG_SURFACE())),
         header_area,
     );
 
@@ -369,14 +369,14 @@ pub fn render_diff_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let total = data.display_lines.len();
     let start = data.scroll.min(total.saturating_sub(visible));
 
-    let style_same = Style::default().fg(theme::TEXT_DIM).bg(theme::BG_DARK);
-    let style_add = Style::default().fg(theme::GREEN).bg(theme::BG_DARK);
-    let style_rem = Style::default().fg(theme::RED).bg(theme::BG_DARK);
-    let style_mod_old = Style::default().fg(theme::PEACH).bg(theme::BG_DARK);
-    let style_mod_new = Style::default().fg(theme::YELLOW).bg(theme::BG_DARK);
+    let style_same = Style::default().fg(theme::TEXT_DIM()).bg(theme::BG_DARK());
+    let style_add = Style::default().fg(theme::GREEN()).bg(theme::BG_DARK());
+    let style_rem = Style::default().fg(theme::RED()).bg(theme::BG_DARK());
+    let style_mod_old = Style::default().fg(theme::PEACH()).bg(theme::BG_DARK());
+    let style_mod_new = Style::default().fg(theme::YELLOW()).bg(theme::BG_DARK());
     let style_hl = Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-    let style_sep = Style::default().fg(theme::TEXT_FAINT).bg(theme::BG_BASE);
-    let style_divider = Style::default().fg(theme::BG_OVERLAY);
+    let style_sep = Style::default().fg(theme::TEXT_FAINT()).bg(theme::BG_BASE());
+    let style_divider = Style::default().fg(theme::BG_OVERLAY());
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible);
     for idx in start..total.min(start + visible) {
@@ -432,7 +432,7 @@ pub fn render_diff_overlay(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(line);
     }
 
-    let para = Paragraph::new(lines).style(Style::default().bg(theme::BG_DARK));
+    let para = Paragraph::new(lines).style(Style::default().bg(theme::BG_DARK()));
     frame.render_widget(para, body_area);
 }
 

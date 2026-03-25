@@ -28,22 +28,22 @@ pub fn toolbar_badges(app: &App) -> Vec<Span<'static>> {
     if !app.extra_headers.is_empty() {
         spans.push(Span::styled(
             format!(" H:{} ", enabled),
-            Style::default().fg(theme::PEACH).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::PEACH()).add_modifier(Modifier::BOLD),
         ));
     }
     match app.azure_state {
         AzureAuthState::Off => {
-            spans.push(Span::styled(" \u{1f512} ", Style::default().fg(theme::TEXT_FAINT)));
+            spans.push(Span::styled(" \u{1f512} ", Style::default().fg(theme::TEXT_FAINT())));
         }
         AzureAuthState::Authenticated => {
-            spans.push(Span::styled(" \u{2713}Az ", Style::default().fg(theme::GREEN).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(" \u{2713}Az ", Style::default().fg(theme::GREEN()).add_modifier(Modifier::BOLD)));
         }
         AzureAuthState::Expired => {
-            spans.push(Span::styled(" \u{26a0}Az ", Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(" \u{26a0}Az ", Style::default().fg(theme::YELLOW()).add_modifier(Modifier::BOLD)));
         }
     }
     if app.otel_enabled {
-        spans.push(Span::styled(" \u{1f4e1} ", Style::default().fg(theme::SKY).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(" \u{1f4e1} ", Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD)));
     }
     spans
 }
@@ -52,23 +52,23 @@ pub fn render_extra_headers_popup(frame: &mut Frame, app: &App, area: Rect) {
     let popup = centered_popup(area, 64, 22);
     frame.render_widget(Clear, popup);
     let mut lines: Vec<Line<'_>> = Vec::new();
-    lines.push(Line::from(Span::styled("Extra Headers", Style::default().fg(theme::BLUE).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(Span::styled("Extra Headers", Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD))));
     lines.push(Line::from(""));
     if app.extra_headers.is_empty() {
-        lines.push(Line::from(Span::styled("  (no extra headers)", Style::default().fg(theme::TEXT_FAINT))));
+        lines.push(Line::from(Span::styled("  (no extra headers)", Style::default().fg(theme::TEXT_FAINT()))));
     } else {
         for (i, (key, val, en)) in app.extra_headers.iter().enumerate() {
             let marker = if i == app.extra_headers_cursor { "\u{25b8} " } else { "  " };
             let check = if *en { "\u{2611}" } else { "\u{2610}" };
             let style = if i == app.extra_headers_cursor {
-                Style::default().fg(theme::TEXT).bg(theme::BG_OVERLAY)
+                Style::default().fg(theme::TEXT()).bg(theme::BG_OVERLAY())
             } else {
-                Style::default().fg(theme::TEXT)
+                Style::default().fg(theme::TEXT())
             };
             lines.push(Line::from(vec![
                 Span::styled(format!("{}{} ", marker, check), style),
-                Span::styled(format!("{}: ", key), Style::default().fg(theme::PEACH)),
-                Span::styled(val.clone(), Style::default().fg(theme::TEXT_DIM)),
+                Span::styled(format!("{}: ", key), Style::default().fg(theme::PEACH())),
+                Span::styled(val.clone(), Style::default().fg(theme::TEXT_DIM())),
             ]));
         }
     }
@@ -78,20 +78,20 @@ pub fn render_extra_headers_popup(frame: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from(""));
             let (ks, vs) = match field {
                 HeaderEditField::Key => (
-                    Style::default().fg(theme::GREEN).add_modifier(Modifier::UNDERLINED),
-                    Style::default().fg(theme::TEXT_FAINT),
+                    Style::default().fg(theme::GREEN()).add_modifier(Modifier::UNDERLINED),
+                    Style::default().fg(theme::TEXT_FAINT()),
                 ),
                 HeaderEditField::Value => (
-                    Style::default().fg(theme::GREEN),
-                    Style::default().fg(theme::GREEN).add_modifier(Modifier::UNDERLINED),
+                    Style::default().fg(theme::GREEN()),
+                    Style::default().fg(theme::GREEN()).add_modifier(Modifier::UNDERLINED),
                 ),
             };
             lines.push(Line::from(vec![
-                Span::styled("  Key: ", Style::default().fg(theme::TEXT_DIM)),
+                Span::styled("  Key: ", Style::default().fg(theme::TEXT_DIM())),
                 Span::styled(format!("{}\u{2588}", key_buf), ks),
             ]));
             lines.push(Line::from(vec![
-                Span::styled("  Val: ", Style::default().fg(theme::TEXT_DIM)),
+                Span::styled("  Val: ", Style::default().fg(theme::TEXT_DIM())),
                 Span::styled(format!("{}\u{2588}", val_buf), vs),
             ]));
         }
@@ -99,42 +99,42 @@ pub fn render_extra_headers_popup(frame: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from(""));
             let (ks, vs) = match field {
                 HeaderEditField::Key => (
-                    Style::default().fg(theme::YELLOW).add_modifier(Modifier::UNDERLINED),
-                    Style::default().fg(theme::TEXT_FAINT),
+                    Style::default().fg(theme::YELLOW()).add_modifier(Modifier::UNDERLINED),
+                    Style::default().fg(theme::TEXT_FAINT()),
                 ),
                 HeaderEditField::Value => (
-                    Style::default().fg(theme::YELLOW),
-                    Style::default().fg(theme::YELLOW).add_modifier(Modifier::UNDERLINED),
+                    Style::default().fg(theme::YELLOW()),
+                    Style::default().fg(theme::YELLOW()).add_modifier(Modifier::UNDERLINED),
                 ),
             };
             lines.push(Line::from(vec![
-                Span::styled("  Key: ", Style::default().fg(theme::TEXT_DIM)),
+                Span::styled("  Key: ", Style::default().fg(theme::TEXT_DIM())),
                 Span::styled(format!("{}\u{2588}", key_buf), ks),
             ]));
             lines.push(Line::from(vec![
-                Span::styled("  Val: ", Style::default().fg(theme::TEXT_DIM)),
+                Span::styled("  Val: ", Style::default().fg(theme::TEXT_DIM())),
                 Span::styled(format!("{}\u{2588}", val_buf), vs),
             ]));
         }
     }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled(" a", Style::default().fg(theme::PEACH)),
-        Span::styled("=add ", Style::default().fg(theme::TEXT_FAINT)),
-        Span::styled("d", Style::default().fg(theme::PEACH)),
-        Span::styled("=del ", Style::default().fg(theme::TEXT_FAINT)),
-        Span::styled("e", Style::default().fg(theme::PEACH)),
-        Span::styled("=edit ", Style::default().fg(theme::TEXT_FAINT)),
-        Span::styled("Space", Style::default().fg(theme::PEACH)),
-        Span::styled("=toggle ", Style::default().fg(theme::TEXT_FAINT)),
-        Span::styled("Esc", Style::default().fg(theme::PEACH)),
-        Span::styled("=close", Style::default().fg(theme::TEXT_FAINT)),
+        Span::styled(" a", Style::default().fg(theme::PEACH())),
+        Span::styled("=add ", Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled("d", Style::default().fg(theme::PEACH())),
+        Span::styled("=del ", Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled("e", Style::default().fg(theme::PEACH())),
+        Span::styled("=edit ", Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled("Space", Style::default().fg(theme::PEACH())),
+        Span::styled("=toggle ", Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled("Esc", Style::default().fg(theme::PEACH())),
+        Span::styled("=close", Style::default().fg(theme::TEXT_FAINT())),
     ]));
     let block = Block::default()
         .title(" \u{2708} Extra Headers ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BLUE))
-        .style(Style::default().bg(theme::BG_SURFACE));
+        .border_style(Style::default().fg(theme::BLUE()))
+        .style(Style::default().bg(theme::BG_SURFACE()));
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
@@ -142,50 +142,50 @@ pub fn render_azure_popup(frame: &mut Frame, app: &App, area: Rect) {
     let popup = centered_popup(area, 56, 16);
     frame.render_widget(Clear, popup);
     let mut lines: Vec<Line<'_>> = Vec::new();
-    lines.push(Line::from(Span::styled("Azure Authentication", Style::default().fg(theme::BLUE).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(Span::styled("Azure Authentication", Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD))));
     lines.push(Line::from(""));
     let (state_label, state_style) = match app.azure_state {
-        AzureAuthState::Off => ("Off", Style::default().fg(theme::TEXT_FAINT)),
-        AzureAuthState::Authenticated => ("Authenticated", Style::default().fg(theme::GREEN).add_modifier(Modifier::BOLD)),
-        AzureAuthState::Expired => ("Expired", Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD)),
+        AzureAuthState::Off => ("Off", Style::default().fg(theme::TEXT_FAINT())),
+        AzureAuthState::Authenticated => ("Authenticated", Style::default().fg(theme::GREEN()).add_modifier(Modifier::BOLD)),
+        AzureAuthState::Expired => ("Expired", Style::default().fg(theme::YELLOW()).add_modifier(Modifier::BOLD)),
     };
     lines.push(Line::from(vec![
-        Span::styled("  Status: ", Style::default().fg(theme::TEXT_DIM)),
+        Span::styled("  Status: ", Style::default().fg(theme::TEXT_DIM())),
         Span::styled(state_label, state_style),
     ]));
     let cli_ok = request_pilot_core::azure_auth::is_az_cli_available();
     lines.push(Line::from(vec![
-        Span::styled("  Az CLI: ", Style::default().fg(theme::TEXT_DIM)),
-        if cli_ok { Span::styled("Available", Style::default().fg(theme::GREEN)) }
-        else { Span::styled("Not found", Style::default().fg(theme::RED)) },
+        Span::styled("  Az CLI: ", Style::default().fg(theme::TEXT_DIM())),
+        if cli_ok { Span::styled("Available", Style::default().fg(theme::GREEN())) }
+        else { Span::styled("Not found", Style::default().fg(theme::RED())) },
     ]));
     if let Some(ref token) = app.azure_token {
         lines.push(Line::from(""));
         if let Some(ref tenant) = token.tenant {
             lines.push(Line::from(vec![
-                Span::styled("  Tenant: ", Style::default().fg(theme::TEXT_DIM)),
-                Span::styled(tenant.clone(), Style::default().fg(theme::TEXT)),
+                Span::styled("  Tenant: ", Style::default().fg(theme::TEXT_DIM())),
+                Span::styled(tenant.clone(), Style::default().fg(theme::TEXT())),
             ]));
         }
         lines.push(Line::from(vec![
-            Span::styled("  Expires: ", Style::default().fg(theme::TEXT_DIM)),
-            Span::styled(token.expires_on.clone(), Style::default().fg(theme::TEXT)),
+            Span::styled("  Expires: ", Style::default().fg(theme::TEXT_DIM())),
+            Span::styled(token.expires_on.clone(), Style::default().fg(theme::TEXT())),
         ]));
     }
     if app.azure_loading {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("  Authenticating...", Style::default().fg(theme::SKY).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled("  Authenticating...", Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD))));
     }
     lines.push(Line::from(""));
     if cli_ok && !app.azure_loading {
-        lines.push(Line::from(Span::styled("  Press Enter to authenticate", Style::default().fg(theme::GREEN))));
+        lines.push(Line::from(Span::styled("  Press Enter to authenticate", Style::default().fg(theme::GREEN()))));
     }
-    lines.push(Line::from(Span::styled("  Esc=close", Style::default().fg(theme::TEXT_FAINT))));
+    lines.push(Line::from(Span::styled("  Esc=close", Style::default().fg(theme::TEXT_FAINT()))));
     let block = Block::default()
         .title(" \u{1f512} Azure Auth ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BLUE))
-        .style(Style::default().bg(theme::BG_SURFACE));
+        .border_style(Style::default().fg(theme::BLUE()))
+        .style(Style::default().bg(theme::BG_SURFACE()));
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
@@ -193,57 +193,57 @@ pub fn render_otel_popup(frame: &mut Frame, app: &App, area: Rect) {
     let popup = centered_popup(area, 52, 16);
     frame.render_widget(Clear, popup);
     let mut lines: Vec<Line<'_>> = Vec::new();
-    lines.push(Line::from(Span::styled("OpenTelemetry Status", Style::default().fg(theme::BLUE).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(Span::styled("OpenTelemetry Status", Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD))));
     lines.push(Line::from(""));
     let (el, es) = if app.otel_enabled {
-        ("Enabled", Style::default().fg(theme::GREEN).add_modifier(Modifier::BOLD))
+        ("Enabled", Style::default().fg(theme::GREEN()).add_modifier(Modifier::BOLD))
     } else {
-        ("Disabled", Style::default().fg(theme::TEXT_FAINT))
+        ("Disabled", Style::default().fg(theme::TEXT_FAINT()))
     };
     lines.push(Line::from(vec![
-        Span::styled("  Status: ", Style::default().fg(theme::TEXT_DIM)),
+        Span::styled("  Status: ", Style::default().fg(theme::TEXT_DIM())),
         Span::styled(el, es),
     ]));
     if let Some(ref stats) = app.otel_stats {
         lines.push(Line::from(vec![
-            Span::styled("  Endpoint: ", Style::default().fg(theme::TEXT_DIM)),
-            Span::styled(stats.endpoint.clone(), Style::default().fg(theme::TEXT)),
+            Span::styled("  Endpoint: ", Style::default().fg(theme::TEXT_DIM())),
+            Span::styled(stats.endpoint.clone(), Style::default().fg(theme::TEXT())),
         ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("  Traces sent:  ", Style::default().fg(theme::TEXT_DIM)),
-            Span::styled(stats.traces_sent.to_string(), Style::default().fg(theme::PEACH)),
+            Span::styled("  Traces sent:  ", Style::default().fg(theme::TEXT_DIM())),
+            Span::styled(stats.traces_sent.to_string(), Style::default().fg(theme::PEACH())),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("  Metrics sent: ", Style::default().fg(theme::TEXT_DIM)),
-            Span::styled(stats.metrics_sent.to_string(), Style::default().fg(theme::PEACH)),
+            Span::styled("  Metrics sent: ", Style::default().fg(theme::TEXT_DIM())),
+            Span::styled(stats.metrics_sent.to_string(), Style::default().fg(theme::PEACH())),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("  Logs sent:    ", Style::default().fg(theme::TEXT_DIM)),
-            Span::styled(stats.logs_sent.to_string(), Style::default().fg(theme::PEACH)),
+            Span::styled("  Logs sent:    ", Style::default().fg(theme::TEXT_DIM())),
+            Span::styled(stats.logs_sent.to_string(), Style::default().fg(theme::PEACH())),
         ]));
         if !stats.errors.is_empty() {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(format!("  Errors: {}", stats.errors.len()), Style::default().fg(theme::RED))));
+            lines.push(Line::from(Span::styled(format!("  Errors: {}", stats.errors.len()), Style::default().fg(theme::RED()))));
         }
     } else {
         lines.push(Line::from(vec![
-            Span::styled("  Endpoint: ", Style::default().fg(theme::TEXT_DIM)),
-            Span::styled("(not configured)", Style::default().fg(theme::TEXT_FAINT)),
+            Span::styled("  Endpoint: ", Style::default().fg(theme::TEXT_DIM())),
+            Span::styled("(not configured)", Style::default().fg(theme::TEXT_FAINT())),
         ]));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled(" Space", Style::default().fg(theme::PEACH)),
-        Span::styled("=toggle ", Style::default().fg(theme::TEXT_FAINT)),
-        Span::styled("Esc", Style::default().fg(theme::PEACH)),
-        Span::styled("=close", Style::default().fg(theme::TEXT_FAINT)),
+        Span::styled(" Space", Style::default().fg(theme::PEACH())),
+        Span::styled("=toggle ", Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled("Esc", Style::default().fg(theme::PEACH())),
+        Span::styled("=close", Style::default().fg(theme::TEXT_FAINT())),
     ]));
     let block = Block::default()
         .title(" \u{1f4e1} Telemetry ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BLUE))
-        .style(Style::default().bg(theme::BG_SURFACE));
+        .border_style(Style::default().fg(theme::BLUE()))
+        .style(Style::default().bg(theme::BG_SURFACE()));
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 

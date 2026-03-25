@@ -14,9 +14,9 @@ use crate::ui::theme;
 pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     let is_focused = matches!(app.focus, Focus::FileTree | Focus::Variables);
     let border_style = if is_focused {
-        Style::default().fg(theme::BLUE)
+        Style::default().fg(theme::BLUE())
     } else {
-        Style::default().fg(theme::TEXT_FAINT)
+        Style::default().fg(theme::TEXT_FAINT())
     };
 
     let title = match app.sidebar_tab {
@@ -34,7 +34,7 @@ pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
             if app.tree_nodes.is_empty() {
                 let msg = Paragraph::new("No files loaded.\nPress 'o' to open a file.")
                     .block(block)
-                    .style(Style::default().fg(theme::TEXT_FAINT));
+                    .style(Style::default().fg(theme::TEXT_FAINT()));
                 frame.render_widget(msg, area);
                 return;
             }
@@ -44,13 +44,13 @@ pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                     TreeNode::File { file_idx } => {
                         let f = &app.loaded_files[*file_idx];
                         let chevron = if f.expanded { "\u{25bc}" } else { "\u{25b6}" };
-                        (format!("{} \u{1f4c4} ", chevron), f.name.clone(), Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD))
+                        (format!("{} \u{1f4c4} ", chevron), f.name.clone(), Style::default().fg(theme::TEXT()).add_modifier(Modifier::BOLD))
                     }
                     TreeNode::Group { file_idx, group_name } => {
                         let f = &app.loaded_files[*file_idx];
                         let expanded = f.group_expanded.get(group_name).copied().unwrap_or(true);
                         let chevron = if expanded { "\u{25bc}" } else { "\u{25b6}" };
-                        (format!("  {} ", chevron), group_name.clone(), Style::default().fg(theme::SAPPHIRE))
+                        (format!("  {} ", chevron), group_name.clone(), Style::default().fg(theme::SAPPHIRE()))
                     }
                     TreeNode::Block { file_idx, block_idx } => {
                         let f = &app.loaded_files[*file_idx];
@@ -64,13 +64,13 @@ pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                         let status = get_block_status(f, *block_idx);
                         let disabled_mark = if blk.disabled { " \u{d8}" } else { "" };
                         let indent = if blk.group.is_some() { "      " } else { "    " };
-                        (format!("{}{} {} ", indent, status, icon), format!("{}{}", blk.name, disabled_mark), Style::default().fg(theme::TEXT))
+                        (format!("{}{} {} ", indent, status, icon), format!("{}{}", blk.name, disabled_mark), Style::default().fg(theme::TEXT()))
                     }
                 };
 
                 let is_selected = i == app.tree_cursor;
                 let final_style = if is_selected {
-                    style.bg(theme::BG_HIGHLIGHT)
+                    style.bg(theme::BG_HIGHLIGHT())
                 } else {
                     style
                 };
@@ -98,18 +98,18 @@ pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
             let items: Vec<ListItem> = sorted_vars.iter().enumerate().map(|(i, k)| {
                 let v = app.env_vars.get(k).map(|s| s.as_str()).unwrap_or("");
                 let name_color = if extract_vars.contains(k.as_str()) {
-                    theme::MAUVE
+                    theme::MAUVE()
                 } else {
-                    theme::SAPPHIRE
+                    theme::SAPPHIRE()
                 };
                 let prefix = if extract_vars.contains(k.as_str()) { "\u{21d0} " } else { "  " };
                 let is_selected = i == app.vars_cursor;
-                let bg = if is_selected { theme::BG_HIGHLIGHT } else { ratatui::style::Color::Reset };
+                let bg = if is_selected { theme::BG_HIGHLIGHT() } else { ratatui::style::Color::Reset };
                 ListItem::new(Line::from(vec![
                     Span::styled(prefix, Style::default().fg(name_color).bg(bg)),
                     Span::styled(k, Style::default().fg(name_color).bg(bg)),
-                    Span::styled(" = ", Style::default().fg(theme::TEXT_FAINT).bg(bg)),
-                    Span::styled(v, Style::default().fg(theme::TEXT).bg(bg)),
+                    Span::styled(" = ", Style::default().fg(theme::TEXT_FAINT()).bg(bg)),
+                    Span::styled(v, Style::default().fg(theme::TEXT()).bg(bg)),
                 ]))
             }).collect();
 

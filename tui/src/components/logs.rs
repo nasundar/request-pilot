@@ -20,10 +20,10 @@ const MAX_LOG_ENTRIES: usize = 2000;
 
 fn level_style(level: &LogLevel) -> Style {
     match level {
-        LogLevel::Debug => Style::default().fg(theme::TEXT_FAINT),
-        LogLevel::Info => Style::default().fg(theme::BLUE),
-        LogLevel::Warn => Style::default().fg(theme::YELLOW),
-        LogLevel::Error => Style::default().fg(theme::RED),
+        LogLevel::Debug => Style::default().fg(theme::TEXT_FAINT()),
+        LogLevel::Info => Style::default().fg(theme::BLUE()),
+        LogLevel::Warn => Style::default().fg(theme::YELLOW()),
+        LogLevel::Error => Style::default().fg(theme::RED()),
     }
 }
 
@@ -108,7 +108,7 @@ fn render_log_toolbar(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(" 📋 Logs ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BLUE));
+        .border_style(Style::default().fg(theme::BLUE()));
 
     let filter_label = match app.log_filter {
         LogFilter::All => "All",
@@ -134,23 +134,23 @@ fn render_log_toolbar(frame: &mut Frame, app: &App, area: Rect) {
     let line = Line::from(vec![
         Span::styled(
             format!("  Filter: {} ", filter_label),
-            Style::default().fg(theme::PEACH).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::PEACH()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  {}/{} entries  ", visible, total),
-            Style::default().fg(theme::TEXT_DIM),
+            Style::default().fg(theme::TEXT_DIM()),
         ),
         Span::styled(
             format!("  {}  ", auto_label),
             Style::default().fg(if app.log_auto_scroll {
-                theme::GREEN
+                theme::GREEN()
             } else {
-                theme::TEXT_FAINT
+                theme::TEXT_FAINT()
             }),
         ),
         Span::styled(
             "  f=filter  c=clear  a=auto-scroll  ",
-            Style::default().fg(theme::TEXT_FAINT),
+            Style::default().fg(theme::TEXT_FAINT()),
         ),
     ]);
 
@@ -160,7 +160,7 @@ fn render_log_toolbar(frame: &mut Frame, app: &App, area: Rect) {
 fn render_log_entries(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::TEXT_FAINT));
+        .border_style(Style::default().fg(theme::TEXT_FAINT()));
 
     let filtered: Vec<&LogEntry> = app
         .log_entries
@@ -172,7 +172,7 @@ fn render_log_entries(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(
             Paragraph::new("  No log entries. Logs will appear as you use the app.")
                 .block(block)
-                .style(Style::default().fg(theme::TEXT_FAINT)),
+                .style(Style::default().fg(theme::TEXT_FAINT())),
             area,
         );
         return;
@@ -192,12 +192,12 @@ fn render_log_entries(frame: &mut Frame, app: &App, area: Rect) {
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!(" {} ", &entry.timestamp),
-                    Style::default().fg(theme::TEXT_FAINT),
+                    Style::default().fg(theme::TEXT_FAINT()),
                 ),
                 Span::styled(format!("[{}]", badge), badge_style),
                 Span::styled(
                     format!(" {}", &entry.message),
-                    Style::default().fg(theme::TEXT),
+                    Style::default().fg(theme::TEXT()),
                 ),
             ]))
         })

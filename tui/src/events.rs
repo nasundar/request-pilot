@@ -106,6 +106,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             app.enter_code_editor();
             return;
         }
+        KeyCode::Char('T') if !in_text_input => {
+            crate::ui::theme::cycle_next();
+            return;
+        }
         KeyCode::Tab if app.mode != Mode::Logs && app.focus != Focus::Builder => {
             cycle_focus(app);
             return;
