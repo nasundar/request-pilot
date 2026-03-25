@@ -996,7 +996,7 @@ GET https://example.com/third
         attach_result(&mut app, r#"{"ok":true}"#, &[("content-type", "application/json")]);
         app.response_scroll = 8;
 
-        response::handle_response_keys(&mut app, key_char('h'));
+        response::handle_response_keys(&mut app, key_char('H'));
         assert_eq!(app.response_tab, ResponseTab::Headers);
         assert_eq!(app.response_scroll, 0);
 

@@ -46,9 +46,6 @@ pub fn toolbar_badges(app: &App) -> Vec<Span<'static>> {
     if app.dev_mode {
         spans.push(Span::styled(" DEV ", Style::default().fg(theme::BG_DARK()).bg(theme::PEACH()).add_modifier(Modifier::BOLD)));
     }
-    if app.otel_enabled {
-        spans.push(Span::styled(" \u{26a1} ", Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD)));
-    }
     spans
 }
 

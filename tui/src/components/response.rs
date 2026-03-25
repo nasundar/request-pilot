@@ -355,7 +355,7 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         Span::styled(" Body(b) ", tab_style(ResponseTab::Body)),
         Span::raw(" "),
-        Span::styled(" Headers(h) ", tab_style(ResponseTab::Headers)),
+        Span::styled(" Headers(H) ", tab_style(ResponseTab::Headers)),
         Span::raw(" "),
         Span::styled(" Assertions(a) ", tab_style(ResponseTab::Assertions)),
         Span::raw(" "),
@@ -720,7 +720,7 @@ pub fn handle_response_keys(app: &mut App, key: KeyEvent) {
             app.response_scroll = 0;
             try_rebuild_json_tree(app);
         }
-        KeyCode::Char('h') => {
+        KeyCode::Char('H') => {
             app.response_tab = ResponseTab::Headers;
             app.response_scroll = 0;
         }

@@ -54,7 +54,7 @@ pub fn render_help_popup(frame: &mut Frame, area: Rect) {
         Line::from(vec![Span::styled("d             ", kb), Span::styled("Delete variable", Style::default().fg(theme::TEXT()))]),
         Line::from(""),
         Line::from(Span::styled("\u{2500}\u{2500} Response \u{2500}\u{2500}", dim)),
-        Line::from(vec![Span::styled("b / h / a     ", kb), Span::styled("Body / Headers / Assertions tab", Style::default().fg(theme::TEXT()))]),
+        Line::from(vec![Span::styled("b / H / a     ", kb), Span::styled("Body / Headers / Assertions tab", Style::default().fg(theme::TEXT()))]),
         Line::from(vec![Span::styled("y             ", kb), Span::styled("Copy response body", Style::default().fg(theme::TEXT()))]),
         Line::from(""),
         Line::from(Span::styled("\u{2500}\u{2500} Modes & Panels \u{2500}\u{2500}", dim)),

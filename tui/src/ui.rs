@@ -344,9 +344,9 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("R Run All", Style::default().fg(theme::GREEN())),
         Span::raw("  "),
         Span::styled(
-            if app.otel_enabled { "⚡OTEL" } else { "⚡OTEL" },
+            "⚡OTEL",
             if app.otel_enabled {
-                Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD)
+                Style::default().fg(theme::BG_DARK()).bg(theme::SKY()).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme::TEXT_FAINT())
             },
@@ -448,6 +448,120 @@ fn draw_files_mode(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_response_view(frame: &mut Frame, app: &App, area: Rect) {
     crate::components::response::render_response(frame, app, area);
+}
+
+fn render_history_headers(title: &str, headers: &[(String, String)], lines: &mut Vec<Line<'static>>) {
+    lines.push(Line::from(Span::styled(
+        format!("─── {} ({}) ───", title, headers.len()),
+        Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    if headers.is_empty() {
+        lines.push(Line::from(Span::styled("  (none)", Style::default().fg(theme::TEXT_FAINT()))));
+    } else {
+        for (k, v) in headers {
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(k.to_string(), Style::default().fg(theme::LAVENDER()).add_modifier(Modifier::BOLD)),
+                Span::styled(": ", Style::default().fg(theme::TEXT_FAINT())),
+                Span::styled(v.to_string(), Style::default().fg(theme::TEXT())),
+            ]));
+        }
+    }
+}
+
+fn render_history_body(title: &str, body: &Option<String>, lines: &mut Vec<Line<'static>>) {
+    lines.push(Line::from(Span::styled(
+        format!("─── {} ───", title),
+        Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    match body {
+        None => {
+            lines.push(Line::from(Span::styled("  (no body)", Style::default().fg(theme::TEXT_FAINT()))));
+        }
+        Some(b) if b.is_empty() => {
+            lines.push(Line::from(Span::styled("  (empty)", Style::default().fg(theme::TEXT_FAINT()))));
+        }
+        Some(b) => {
+            // Try to pretty-print JSON
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(b) {
+                let pretty = serde_json::to_string_pretty(&parsed).unwrap_or_else(|_| b.clone());
+                for line in pretty.lines() {
+                    lines.push(highlight_json_line(line));
+                }
+            } else {
+                // Plain text
+                for line in b.lines() {
+                    lines.push(Line::from(Span::styled(format!("  {}", line), Style::default().fg(theme::TEXT()))));
+                }
+            }
+        }
+    }
+}
+
+fn highlight_json_line(line: &str) -> Line<'static> {
+    let trimmed = line.trim();
+    let indent = line.len() - line.trim_start().len();
+    let pad = " ".repeat(indent + 2);
+
+    // Key-value pairs: "key": value
+    if let Some(colon_pos) = trimmed.find(": ") {
+        if trimmed.starts_with('"') {
+            let key = &trimmed[..colon_pos];
+            let val = trimmed[colon_pos + 2..].trim_end_matches(',');
+            let trailing = if trimmed.ends_with(',') { "," } else { "" };
+            let val_style = if val.starts_with('"') {
+                Style::default().fg(theme::GREEN())
+            } else if val == "null" {
+                Style::default().fg(theme::TEXT_DIM())
+            } else if val == "true" || val == "false" {
+                Style::default().fg(theme::MAUVE())
+            } else {
+                Style::default().fg(theme::PEACH())
+            };
+            return Line::from(vec![
+                Span::styled(pad, Style::default()),
+                Span::styled(key.to_string(), Style::default().fg(theme::BLUE())),
+                Span::styled(": ", Style::default().fg(theme::TEXT_FAINT())),
+                Span::styled(val.to_string(), val_style),
+                Span::styled(trailing.to_string(), Style::default().fg(theme::TEXT_FAINT())),
+            ]);
+        }
+    }
+
+    // Standalone values, braces, brackets
+    let style = if trimmed.starts_with('{') || trimmed.starts_with('}')
+        || trimmed.starts_with('[') || trimmed.starts_with(']') {
+        Style::default().fg(theme::TEXT_FAINT())
+    } else if trimmed.starts_with('"') {
+        Style::default().fg(theme::GREEN())
+    } else {
+        Style::default().fg(theme::TEXT())
+    };
+    Line::from(Span::styled(format!("{}{}", pad, trimmed), style))
+}
+
+fn http_status_text(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "",
+    }
 }
 
 fn draw_history_detail(frame: &mut Frame, app: &App, area: Rect, idx: usize) {
@@ -572,78 +686,23 @@ fn draw_history_detail(frame: &mut Frame, app: &App, area: Rect, idx: usize) {
 
     if app.history_detail_tab == 0 {
         // ── Request tab ──
-        lines.push(Line::from(Span::styled(
-            "─── Headers ───",
-            Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
-        )));
+        render_history_headers("Request Headers", &entry.request_headers, &mut lines);
         lines.push(Line::from(""));
-        if entry.request_headers.is_empty() {
-            lines.push(Line::from(Span::styled("  (none)", Style::default().fg(theme::TEXT_FAINT()))));
-        } else {
-            for (k, v) in &entry.request_headers {
-                lines.push(Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(k, Style::default().fg(theme::LAVENDER()).add_modifier(Modifier::BOLD)),
-                    Span::styled(": ", Style::default().fg(theme::TEXT_FAINT())),
-                    Span::styled(v, Style::default().fg(theme::TEXT())),
-                ]));
-            }
-        }
-
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "─── Body ───",
-            Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(""));
-        if let Some(ref body) = entry.request_body {
-            if body.is_empty() {
-                lines.push(Line::from(Span::styled("  (empty)", Style::default().fg(theme::TEXT_FAINT()))));
-            } else {
-                for line in body.lines() {
-                    lines.push(Line::from(Span::styled(format!("  {}", line), Style::default().fg(theme::TEXT()))));
-                }
-            }
-        } else {
-            lines.push(Line::from(Span::styled("  (no body)", Style::default().fg(theme::TEXT_FAINT()))));
-        }
+        render_history_body("Request Body", &entry.request_body, &mut lines);
     } else {
         // ── Response tab ──
-        lines.push(Line::from(Span::styled(
-            "─── Headers ───",
-            Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
-        )));
+        // Status line
+        lines.push(Line::from(vec![
+            Span::styled("HTTP ", Style::default().fg(theme::TEXT_FAINT())),
+            Span::styled(
+                format!("{} {}", entry.status, http_status_text(entry.status)),
+                Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+            ),
+        ]));
         lines.push(Line::from(""));
-        if entry.response_headers.is_empty() {
-            lines.push(Line::from(Span::styled("  (none)", Style::default().fg(theme::TEXT_FAINT()))));
-        } else {
-            for (k, v) in &entry.response_headers {
-                lines.push(Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(k, Style::default().fg(theme::LAVENDER()).add_modifier(Modifier::BOLD)),
-                    Span::styled(": ", Style::default().fg(theme::TEXT_FAINT())),
-                    Span::styled(v, Style::default().fg(theme::TEXT())),
-                ]));
-            }
-        }
-
+        render_history_headers("Response Headers", &entry.response_headers, &mut lines);
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "─── Body ───",
-            Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(""));
-        if let Some(ref body) = entry.response_body {
-            if body.is_empty() {
-                lines.push(Line::from(Span::styled("  (empty)", Style::default().fg(theme::TEXT_FAINT()))));
-            } else {
-                for line in body.lines() {
-                    lines.push(Line::from(Span::styled(format!("  {}", line), Style::default().fg(theme::TEXT()))));
-                }
-            }
-        } else {
-            lines.push(Line::from(Span::styled("  (no body)", Style::default().fg(theme::TEXT_FAINT()))));
-        }
+        render_history_body("Response Body", &entry.response_body, &mut lines);
     }
 
     let scroll = app.history_detail_scroll;
@@ -671,7 +730,7 @@ fn get_keyhints(app: &App) -> String {
             }
             Focus::Variables => " ↑↓=nav  a=add  e=edit  d=delete  V=files  Esc=quit ".to_string(),
             Focus::Builder => " Tab=cycle  ←→=method  Enter=edit  Ctrl+Enter=send  Esc=back ".to_string(),
-            Focus::Response => " ↑↓=nav  Enter=expand  E=all  C=collapse  b=body  h=hdrs  y=copy  Esc=back ".to_string(),
+            Focus::Response => " ↑↓=nav  Enter=expand  E=all  C=collapse  b=body  H=hdrs  y=copy  Esc=back ".to_string(),
             _ => " q=quit  Tab=focus  r=run  ?=help ".to_string(),
         },
         Mode::History => " ↑↓=nav  g=group  m=method  s=status  Enter=detail  Space=compare  Esc=files ".to_string(),

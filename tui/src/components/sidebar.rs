@@ -64,8 +64,16 @@ pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                         };
                         let status = get_block_status(f, *block_idx);
                         let disabled_mark = if blk.disabled { " \u{d8}" } else { "" };
+                        // Show @mode app blocks as dimmed/skipped when dev mode is on
+                        let dev_skip = app.dev_mode && blk.mode.as_deref() == Some("app");
+                        let dev_mark = if dev_skip { " [skip:dev]" } else { "" };
                         let indent = if blk.group.is_some() { "      " } else { "    " };
-                        (format!("{}{} {} ", indent, status, icon), format!("{}{}", blk.name, disabled_mark), Style::default().fg(theme::TEXT()))
+                        let style = if dev_skip {
+                            Style::default().fg(theme::TEXT_FAINT())
+                        } else {
+                            Style::default().fg(theme::TEXT())
+                        };
+                        (format!("{}{} {} ", indent, status, icon), format!("{}{}{}", blk.name, disabled_mark, dev_mark), style)
                     }
                 };
 
