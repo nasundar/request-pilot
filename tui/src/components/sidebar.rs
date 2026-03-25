@@ -91,7 +91,16 @@ pub fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
                 ]))
             }).collect();
 
-            let list = List::new(items).block(block);
+            // Compute scroll offset to keep tree_cursor visible
+            let visible_h = area.height.saturating_sub(2) as usize; // minus borders
+            let scroll = if visible_h > 0 && app.tree_cursor >= visible_h {
+                app.tree_cursor - visible_h + 1
+            } else {
+                0
+            };
+            let visible_items: Vec<ListItem> = items.into_iter().skip(scroll).collect();
+
+            let list = List::new(visible_items).block(block);
             frame.render_widget(list, area);
         }
         SidebarTab::Variables => {

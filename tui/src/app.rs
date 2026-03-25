@@ -891,6 +891,36 @@ impl App {
             _ => return,
         };
 
+        // Record in history
+        let seq = self.history.next_seq();
+        let req_headers: Vec<(String, String)> = req.request_headers.iter()
+            .map(|h| (h.name.clone(), h.value.clone()))
+            .collect();
+        let resp_headers: Vec<(String, String)> = req.response_headers.iter()
+            .map(|h| (h.name.clone(), h.value.clone()))
+            .collect();
+        let entry = HistoryEntry {
+            seq,
+            id: request_pilot_core::uuid::Uuid::new_v4().to_string(),
+            run_id: None,
+            source: "live-capture".to_string(),
+            file_name: Some("📡 live-capture.http".to_string()),
+            group: None,
+            block_name: None,
+            compare_step: None,
+            method: req.method.clone(),
+            url: req.url.clone(),
+            request_headers: req_headers,
+            request_body: req.request_body.clone(),
+            status: req.status_code.unwrap_or(0),
+            response_headers: resp_headers,
+            response_body: req.response_body.clone(),
+            response_time_ms: req.duration.unwrap_or(0),
+            response_size_bytes: req.response_body.as_ref().map(|b| b.len()).unwrap_or(0),
+            timestamp: request_pilot_core::chrono::Utc::now().to_rfc3339(),
+        };
+        self.history.add(entry);
+
         // Build .http block from captured request (same logic as desktop)
         let label = if let Some(pos) = req.url.find("://") {
             let after = &req.url[pos + 3..];
