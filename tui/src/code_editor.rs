@@ -262,11 +262,28 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
     let raw_lines: Vec<&str> = content.split('\n').collect();
     let total_lines = raw_lines.len();
     let gutter_width: u16 = (total_lines.to_string().len() as u16).max(3) + 1;
-    let visible_height = area.height.saturating_sub(2) as usize;
+    let has_search_bar = app.editor_search_active
+        || !app.editor_search_matches.is_empty()
+        || app.editor_goto_active;
+    let chrome_rows: u16 = if has_search_bar { 3 } else { 2 };
+    let visible_height = area.height.saturating_sub(chrome_rows) as usize;
     let scroll = app.code_editor_scroll as usize;
     let area_width = area.width as usize;
 
     let active_range = find_active_block_range(&raw_lines, app.code_editor_cursor_line);
+
+    // Build a set of search match positions for fast lookup
+    let search_positions: std::collections::HashMap<(usize, usize), bool> = {
+        let mut map = std::collections::HashMap::new();
+        let query_len = app.editor_search_query.len();
+        if query_len > 0 {
+            for (idx, &(line, col)) in app.editor_search_matches.iter().enumerate() {
+                let is_current = idx == app.editor_search_idx;
+                map.insert((line, col), is_current);
+            }
+        }
+        map
+    };
 
     let mut in_body_flags = vec![false; total_lines];
     {
@@ -296,6 +313,8 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
+    let query_char_len = app.editor_search_query.chars().count();
+
     let mut display_lines: Vec<Line<'static>> = Vec::with_capacity(visible_height);
     for i in scroll..total_lines.min(scroll + visible_height) {
         let raw = raw_lines[i];
@@ -315,9 +334,68 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
         };
         let gutter = format!("{:>w$} ", i + 1, w = gutter_width as usize - 1);
         let mut spans = vec![Span::styled(gutter, num_style)];
-        for s in highlight_line(raw, in_body_flags[i]) {
-            spans.push(Span::styled(s.content.to_string(), s.style.bg(bg)));
+
+        // Collect matches on this line for highlight overlay
+        let line_matches: Vec<(usize, bool)> = if !search_positions.is_empty() {
+            app.editor_search_matches
+                .iter()
+                .enumerate()
+                .filter(|(_, &(line, _))| line == i)
+                .map(|(idx, &(_, col))| (col, idx == app.editor_search_idx))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        if line_matches.is_empty() {
+            for s in highlight_line(raw, in_body_flags[i]) {
+                spans.push(Span::styled(s.content.to_string(), s.style.bg(bg)));
+            }
+        } else {
+            // Render with search highlights overlaid
+            let base_spans = highlight_line(raw, in_body_flags[i]);
+            let chars: Vec<char> = raw.chars().collect();
+            let mut char_styles: Vec<Style> = vec![Style::default().fg(theme::TEXT()).bg(bg); chars.len()];
+            {
+                let mut char_idx = 0;
+                for s in &base_spans {
+                    let span_chars: Vec<char> = s.content.chars().collect();
+                    for _ in &span_chars {
+                        if char_idx < char_styles.len() {
+                            char_styles[char_idx] = s.style.bg(bg);
+                        }
+                        char_idx += 1;
+                    }
+                }
+            }
+            // Apply search highlight
+            for &(col, is_current) in &line_matches {
+                let hl_bg = if is_current { theme::PEACH() } else { theme::YELLOW() };
+                let hl_fg = theme::BG_DARK();
+                for offset in 0..query_char_len {
+                    let ci = col + offset;
+                    if ci < char_styles.len() {
+                        char_styles[ci] = Style::default().fg(hl_fg).bg(hl_bg);
+                    }
+                }
+            }
+            // Build spans from per-char styles
+            if !chars.is_empty() {
+                let mut run_start = 0;
+                let mut current_style = char_styles[0];
+                for ci in 1..chars.len() {
+                    if char_styles[ci] != current_style {
+                        let text: String = chars[run_start..ci].iter().collect();
+                        spans.push(Span::styled(text, current_style));
+                        run_start = ci;
+                        current_style = char_styles[ci];
+                    }
+                }
+                let text: String = chars[run_start..].iter().collect();
+                spans.push(Span::styled(text, current_style));
+            }
         }
+
         if is_cursor_line {
             let w: usize = spans.iter().map(|s| s.width()).sum();
             if w < area_width {
@@ -345,10 +423,10 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(title, Style::default().fg(theme::TEXT())),
-        Span::styled(" Esc=exit Ctrl+S=save ", Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled(" Esc=exit Ctrl+S=save /=search Ctrl+G=goto ", Style::default().fg(theme::TEXT_FAINT())),
     ]);
     let hints_line = Line::from(vec![Span::styled(
-        " \u{2191}\u{2193}=move  Ctrl+U/D=half-page  Type to edit ",
+        " \u{2191}\u{2193}=move  Ctrl+U/D=half-page  n/N=next/prev match  Type to edit ",
         Style::default().fg(theme::TEXT_FAINT()),
     )]);
 
@@ -361,26 +439,173 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
         x: area.x,
         y: area.y + 1,
         width: area.width,
-        height: area.height.saturating_sub(2),
+        height: area.height.saturating_sub(chrome_rows),
     };
     frame.render_widget(
         Paragraph::new(display_lines).style(Style::default().bg(theme::BG_DARK())),
         content_area,
     );
+
+    // Search/goto bar or hints bar at the bottom
     let bottom_area = Rect {
         x: area.x,
         y: area.y + area.height.saturating_sub(1),
         width: area.width,
         height: 1,
     };
-    frame.render_widget(
-        Paragraph::new(hints_line).style(Style::default().bg(theme::BG_BASE())),
-        bottom_area,
-    );
+
+    if app.editor_search_active {
+        let match_info = if app.editor_search_matches.is_empty() {
+            if app.editor_search_query.is_empty() {
+                String::new()
+            } else {
+                " (no matches)".to_string()
+            }
+        } else {
+            format!(" ({} matches)", app.editor_search_matches.len())
+        };
+        let search_line = Line::from(vec![
+            Span::styled(" /", Style::default().fg(theme::PEACH()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                app.editor_search_query.clone(),
+                Style::default().fg(theme::TEXT()),
+            ),
+            Span::styled("\u{2588}", Style::default().fg(theme::BLUE())),
+            Span::styled(match_info, Style::default().fg(theme::TEXT_DIM())),
+        ]);
+        frame.render_widget(
+            Paragraph::new(search_line).style(Style::default().bg(theme::BG_SURFACE())),
+            bottom_area,
+        );
+    } else if app.editor_goto_active {
+        let goto_line = Line::from(vec![
+            Span::styled(
+                " Go to line: ",
+                Style::default().fg(theme::PEACH()).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                app.editor_goto_buffer.clone(),
+                Style::default().fg(theme::TEXT()),
+            ),
+            Span::styled("\u{2588}", Style::default().fg(theme::BLUE())),
+        ]);
+        frame.render_widget(
+            Paragraph::new(goto_line).style(Style::default().bg(theme::BG_SURFACE())),
+            bottom_area,
+        );
+    } else if !app.editor_search_matches.is_empty() {
+        let info_line = Line::from(vec![
+            Span::styled(
+                format!(
+                    " /{} \u{2014} {}/{} matches  n=next N=prev Esc=clear ",
+                    app.editor_search_query,
+                    app.editor_search_idx + 1,
+                    app.editor_search_matches.len()
+                ),
+                Style::default().fg(theme::TEXT_DIM()),
+            ),
+        ]);
+        frame.render_widget(
+            Paragraph::new(info_line).style(Style::default().bg(theme::BG_BASE())),
+            bottom_area,
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(hints_line).style(Style::default().bg(theme::BG_BASE())),
+            bottom_area,
+        );
+    }
+}
+
+fn compute_search_matches(content: &str, query: &str) -> Vec<(usize, usize)> {
+    let mut matches = Vec::new();
+    if query.is_empty() {
+        return matches;
+    }
+    let query_lower = query.to_lowercase();
+    for (line_idx, line) in content.split('\n').enumerate() {
+        let line_lower = line.to_lowercase();
+        let mut start = 0;
+        while let Some(pos) = line_lower[start..].find(&query_lower) {
+            matches.push((line_idx, start + pos));
+            start += pos + 1;
+        }
+    }
+    matches
 }
 
 pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
     let total_lines = app.code_editor_content.split('\n').count();
+
+    // Goto-line mini-input mode
+    if app.editor_goto_active {
+        match key.code {
+            KeyCode::Esc => {
+                app.editor_goto_active = false;
+                app.editor_goto_buffer.clear();
+            }
+            KeyCode::Enter => {
+                if let Ok(line_num) = app.editor_goto_buffer.parse::<usize>() {
+                    let target = line_num.saturating_sub(1).min(total_lines.saturating_sub(1));
+                    app.code_editor_cursor_line = target;
+                    app.code_editor_cursor_col = 0;
+                    ensure_cursor_visible(app);
+                }
+                app.editor_goto_active = false;
+                app.editor_goto_buffer.clear();
+            }
+            KeyCode::Backspace => {
+                app.editor_goto_buffer.pop();
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                app.editor_goto_buffer.push(c);
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Search input mode
+    if app.editor_search_active {
+        match key.code {
+            KeyCode::Esc => {
+                app.editor_search_active = false;
+                app.editor_search_query.clear();
+                app.editor_search_matches.clear();
+                app.editor_search_idx = 0;
+            }
+            KeyCode::Enter => {
+                app.editor_search_active = false;
+                if !app.editor_search_matches.is_empty() {
+                    // Find the first match at or after the cursor
+                    let start_idx = app
+                        .editor_search_matches
+                        .iter()
+                        .position(|&(line, _)| line >= app.code_editor_cursor_line)
+                        .unwrap_or(0);
+                    app.editor_search_idx = start_idx;
+                    let (line, _col) = app.editor_search_matches[start_idx];
+                    app.code_editor_cursor_line = line;
+                    clamp_cursor_col(app);
+                    ensure_cursor_visible(app);
+                }
+            }
+            KeyCode::Backspace => {
+                app.editor_search_query.pop();
+                app.editor_search_matches =
+                    compute_search_matches(&app.code_editor_content, &app.editor_search_query);
+                app.editor_search_idx = 0;
+            }
+            KeyCode::Char(c) => {
+                app.editor_search_query.push(c);
+                app.editor_search_matches =
+                    compute_search_matches(&app.code_editor_content, &app.editor_search_query);
+                app.editor_search_idx = 0;
+            }
+            _ => {}
+        }
+        return;
+    }
 
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
@@ -396,6 +621,10 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
                 clamp_cursor_col(app);
                 ensure_cursor_visible(app);
             }
+            KeyCode::Char('g') => {
+                app.editor_goto_active = true;
+                app.editor_goto_buffer.clear();
+            }
             _ => {}
         }
         return;
@@ -403,8 +632,39 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
 
     match key.code {
         KeyCode::Esc => {
-            app.mode = Mode::Files;
-            app.focus = Focus::FileTree;
+            if !app.editor_search_matches.is_empty() {
+                app.editor_search_query.clear();
+                app.editor_search_matches.clear();
+                app.editor_search_idx = 0;
+            } else {
+                app.mode = Mode::Files;
+                app.focus = Focus::FileTree;
+            }
+        }
+        KeyCode::Char('/') => {
+            app.editor_search_active = true;
+            app.editor_search_query.clear();
+            app.editor_search_matches.clear();
+            app.editor_search_idx = 0;
+        }
+        KeyCode::Char('n')
+            if !app.editor_search_matches.is_empty()
+                && !key.modifiers.contains(KeyModifiers::SHIFT) =>
+        {
+            app.editor_search_idx =
+                (app.editor_search_idx + 1) % app.editor_search_matches.len();
+            let (line, _col) = app.editor_search_matches[app.editor_search_idx];
+            app.code_editor_cursor_line = line;
+            clamp_cursor_col(app);
+            ensure_cursor_visible(app);
+        }
+        KeyCode::Char('N') if !app.editor_search_matches.is_empty() => {
+            let len = app.editor_search_matches.len();
+            app.editor_search_idx = (app.editor_search_idx + len - 1) % len;
+            let (line, _col) = app.editor_search_matches[app.editor_search_idx];
+            app.code_editor_cursor_line = line;
+            clamp_cursor_col(app);
+            ensure_cursor_visible(app);
         }
         KeyCode::Up => {
             if app.code_editor_cursor_line > 0 {

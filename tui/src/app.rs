@@ -239,6 +239,8 @@ pub struct App {
     pub run_group_queued: Option<(usize, Vec<usize>)>,
     pub is_running: bool,
     pub show_help: bool,
+    pub run_progress_lines: Vec<(String, String)>,
+    pub run_start_time: Option<std::time::Instant>,
 
     // New state
     pub input_mode: InputMode,
@@ -317,6 +319,18 @@ pub struct App {
     pub log_filter: LogFilter,
     pub log_auto_scroll: bool,
 
+    // File autocomplete state
+    pub autocomplete_suggestions: Vec<String>,
+    pub autocomplete_idx: Option<usize>,
+
+    // Code editor search state
+    pub editor_search_query: String,
+    pub editor_search_active: bool,
+    pub editor_search_matches: Vec<(usize, usize)>,
+    pub editor_search_idx: usize,
+    pub editor_goto_active: bool,
+    pub editor_goto_buffer: String,
+
     // Channel receiver (set up in run())
     runner_rx: Option<mpsc::UnboundedReceiver<RunnerMessage>>,
     runner_tx: mpsc::UnboundedSender<RunnerMessage>,
@@ -345,6 +359,8 @@ impl App {
             run_group_queued: None,
             is_running: false,
             show_help: false,
+            run_progress_lines: Vec::new(),
+            run_start_time: None,
             input_mode: InputMode::Normal,
             response_tab: ResponseTab::Body,
             history_detail_idx: None,
@@ -396,6 +412,14 @@ impl App {
             log_scroll: 0,
             log_filter: LogFilter::All,
             log_auto_scroll: true,
+            autocomplete_suggestions: Vec::new(),
+            autocomplete_idx: None,
+            editor_search_query: String::new(),
+            editor_search_active: false,
+            editor_search_matches: Vec::new(),
+            editor_search_idx: 0,
+            editor_goto_active: false,
+            editor_goto_buffer: String::new(),
             runner_rx: Some(rx),
             runner_tx: tx,
             next_file_id: 0,
@@ -766,6 +790,47 @@ impl App {
         names
     }
 
+    pub fn compute_file_completions(&mut self, partial: &str) {
+        use std::path::Path;
+        let path = Path::new(partial);
+        let (dir, prefix) = if partial.ends_with('/') || partial.ends_with('\\') {
+            (path.to_path_buf(), "")
+        } else {
+            (
+                path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                path.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+            )
+        };
+
+        self.autocomplete_suggestions.clear();
+        self.autocomplete_idx = None;
+
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.to_lowercase().starts_with(&prefix.to_lowercase()) {
+                    let full = if dir == Path::new(".") {
+                        name.clone()
+                    } else {
+                        dir.join(&name).to_string_lossy().to_string()
+                    };
+                    let display = if entry.path().is_dir() {
+                        format!("{}/", full)
+                    } else {
+                        full
+                    };
+                    if entry.path().is_dir()
+                        || name.ends_with(".http")
+                        || name.ends_with(".env")
+                    {
+                        self.autocomplete_suggestions.push(display);
+                    }
+                }
+            }
+        }
+        self.autocomplete_suggestions.sort();
+    }
+
     pub fn submit_input(&mut self, purpose: InputPurpose, value: String) {
         match purpose {
             InputPurpose::OpenFile => {
@@ -826,6 +891,8 @@ impl App {
         self.progress_current = 0;
         self.progress_total = self.loaded_files[fi].suite.blocks.len();
         self.spinner_tick = 0;
+        self.run_progress_lines.clear();
+        self.run_start_time = Some(std::time::Instant::now());
 
         let fid = self.loaded_files[fi].id;
         let suite = self.loaded_files[fi].suite.clone();
@@ -861,6 +928,8 @@ impl App {
             self.progress_current = 0;
             self.progress_total = 1;
             self.spinner_tick = 0;
+            self.run_progress_lines.clear();
+            self.run_start_time = Some(std::time::Instant::now());
             self.set_status(format!("Running: {}...", block_name));
 
             let extra_vars: Vec<(String, String)> = self.env_vars.iter()
@@ -934,6 +1003,8 @@ impl App {
             self.progress_current = 0;
             self.progress_total = group_suite.blocks.len();
             self.spinner_tick = 0;
+            self.run_progress_lines.clear();
+            self.run_start_time = Some(std::time::Instant::now());
             self.set_status("Running group...".to_string());
 
             let extra_vars: Vec<(String, String)> = self.env_vars.iter()
@@ -1017,6 +1088,7 @@ impl App {
                             "skipped" => "\u{2298}",
                             _ => "\u{00b7}",
                         };
+                        self.run_progress_lines.push((icon.to_string(), progress.name.clone()));
                         self.set_status(format!(
                             "{} {} ({}/{})",
                             icon, progress.name, self.progress_current, self.progress_total
@@ -1043,6 +1115,7 @@ impl App {
                         self.is_running = false;
                         self.progress_current = 0;
                         self.progress_total = 0;
+                        self.run_start_time = None;
                     }
                 }
             }

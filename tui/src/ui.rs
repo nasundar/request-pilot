@@ -5,7 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
-use crate::app::{App, Mode, InputMode};
+use crate::app::{App, Mode, Focus, SidebarTab, InputMode};
 use crate::components;
 use crate::toolbar;
 use request_pilot_core::history::HistoryFilter;
@@ -16,7 +16,7 @@ pub mod theme {
     use ratatui::style::Color;
     use std::sync::atomic::{AtomicU8, Ordering};
 
-    static ACTIVE: AtomicU8 = AtomicU8::new(0);
+    static ACTIVE: AtomicU8 = AtomicU8::new(2);
 
     #[derive(Clone, Copy)]
     pub struct Palette {
@@ -40,7 +40,7 @@ pub mod theme {
         pub sky: Color,
     }
 
-    pub const PALETTE_COUNT: usize = 5;
+    pub const PALETTE_COUNT: usize = 7;
 
     pub const PALETTES: [Palette; PALETTE_COUNT] = [
         // 0: Tokyo Night
@@ -148,10 +148,52 @@ pub mod theme {
             mauve:        Color::Rgb(198, 120, 221),
             sky:          Color::Rgb(86, 182, 194),
         },
+        // 5: Everforest
+        Palette {
+            bg_dark:      Color::Rgb(39, 46, 34),
+            bg_base:      Color::Rgb(45, 53, 39),
+            bg_surface:   Color::Rgb(52, 61, 46),
+            bg_overlay:   Color::Rgb(68, 78, 60),
+            bg_highlight: Color::Rgb(90, 101, 80),
+            text:         Color::Rgb(211, 198, 170),
+            text_dim:     Color::Rgb(168, 159, 138),
+            text_faint:   Color::Rgb(127, 120, 105),
+            blue:         Color::Rgb(127, 187, 179),
+            lavender:     Color::Rgb(214, 153, 182),
+            sapphire:     Color::Rgb(131, 192, 146),
+            green:        Color::Rgb(167, 192, 128),
+            yellow:       Color::Rgb(219, 188, 127),
+            peach:        Color::Rgb(230, 152, 117),
+            red:          Color::Rgb(230, 126, 128),
+            pink:         Color::Rgb(214, 153, 182),
+            mauve:        Color::Rgb(214, 153, 182),
+            sky:          Color::Rgb(131, 192, 146),
+        },
+        // 6: Kanagawa
+        Palette {
+            bg_dark:      Color::Rgb(22, 22, 29),
+            bg_base:      Color::Rgb(30, 30, 41),
+            bg_surface:   Color::Rgb(42, 42, 55),
+            bg_overlay:   Color::Rgb(54, 54, 70),
+            bg_highlight: Color::Rgb(73, 73, 95),
+            text:         Color::Rgb(220, 215, 186),
+            text_dim:     Color::Rgb(168, 162, 138),
+            text_faint:   Color::Rgb(114, 108, 92),
+            blue:         Color::Rgb(127, 180, 202),
+            lavender:     Color::Rgb(149, 127, 184),
+            sapphire:     Color::Rgb(106, 149, 137),
+            green:        Color::Rgb(152, 187, 108),
+            yellow:       Color::Rgb(226, 194, 110),
+            peach:        Color::Rgb(255, 160, 102),
+            red:          Color::Rgb(195, 64, 67),
+            pink:         Color::Rgb(214, 126, 162),
+            mauve:        Color::Rgb(149, 127, 184),
+            sky:          Color::Rgb(106, 149, 137),
+        },
     ];
 
     pub const PALETTE_NAMES: [&str; PALETTE_COUNT] = [
-        "Tokyo Night", "Dracula", "Gruvbox Dark", "Nord", "One Dark",
+        "Tokyo Night", "Dracula", "Gruvbox Dark", "Nord", "One Dark", "Everforest", "Kanagawa",
     ];
 
     fn p() -> &'static Palette {
@@ -232,6 +274,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     } else {
         draw_main(frame, app, chunks[1]);
         draw_status_bar(frame, app, chunks[2]);
+    }
+
+    // Test progress overlay (before help so help can go on top)
+    if app.is_running {
+        render_test_progress_overlay(frame, app, frame.area());
     }
 
     if app.show_help {
@@ -316,6 +363,38 @@ fn draw_input_bar(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(line).style(Style::default().bg(theme::BG_SURFACE())),
         area,
     );
+
+    // Autocomplete dropdown
+    if !app.autocomplete_suggestions.is_empty() && app.autocomplete_idx.is_some() {
+        let max_show = 8usize;
+        let count = app.autocomplete_suggestions.len().min(max_show);
+        let popup_height = count as u16 + 2; // +2 for borders
+        let popup_width = area.width.min(60);
+        let popup_y = area.y.saturating_sub(popup_height);
+        let popup_area = Rect::new(area.x, popup_y, popup_width, popup_height);
+
+        frame.render_widget(ratatui::widgets::Clear, popup_area);
+
+        let selected = app.autocomplete_idx.unwrap_or(0);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for (i, suggestion) in app.autocomplete_suggestions.iter().take(max_show).enumerate() {
+            let is_dir = suggestion.ends_with('/');
+            let icon = if is_dir { "\u{1f4c1} " } else { "\u{1f4c4} " };
+            let style = if i == selected {
+                Style::default().fg(theme::BG_DARK()).bg(theme::BLUE()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::TEXT()).bg(theme::BG_OVERLAY())
+            };
+            lines.push(Line::from(Span::styled(format!("{}{}", icon, suggestion), style)));
+        }
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::BLUE()))
+            .style(Style::default().bg(theme::BG_OVERLAY()));
+        let paragraph = Paragraph::new(lines).block(block);
+        frame.render_widget(paragraph, popup_area);
+    }
 }
 
 fn draw_files_mode(frame: &mut Frame, app: &App, area: Rect) {
@@ -461,6 +540,33 @@ fn draw_history_detail(frame: &mut Frame, app: &App, area: Rect, idx: usize) {
     frame.render_widget(paragraph, popup_area);
 }
 
+fn get_keyhints(app: &App) -> String {
+    if app.show_help {
+        return " Esc=close ".to_string();
+    }
+    if !matches!(app.input_mode, InputMode::Normal) {
+        return " Type...  Tab=complete  Enter=submit  Esc=cancel ".to_string();
+    }
+    match app.mode {
+        Mode::Files => match app.focus {
+            Focus::FileTree | Focus::CodeView => {
+                if app.sidebar_tab == SidebarTab::Variables {
+                    " \u{2191}\u{2193}=nav  a=add  e=edit  d=delete  Ctrl+V=files  Esc=quit ".to_string()
+                } else {
+                    " \u{2191}\u{2193}=nav  Enter=select  o=open  r=run  R=RunAll  t=toggle  Ctrl+V=vars  Esc=quit ".to_string()
+                }
+            }
+            Focus::Variables => " \u{2191}\u{2193}=nav  a=add  e=edit  d=delete  Ctrl+V=files  Esc=quit ".to_string(),
+            Focus::Builder => " Tab=cycle  \u{2190}\u{2192}=method  Enter=edit  Ctrl+Enter=send  Esc=back ".to_string(),
+            Focus::Response => " \u{2191}\u{2193}=nav  Enter=expand  E=all  C=collapse  b=body  h=hdrs  y=copy  Esc=back ".to_string(),
+            _ => " q=quit  Tab=focus  r=run  ?=help ".to_string(),
+        },
+        Mode::History => " \u{2191}\u{2193}=nav  g=group  m=method  s=status  Enter=detail  Space=compare  Esc=files ".to_string(),
+        Mode::Code => " Type to edit  Ctrl+S=save  Ctrl+D/U=scroll  /=search  Esc=exit ".to_string(),
+        Mode::Logs => " \u{2191}\u{2193}=scroll  f=filter  c=clear  Esc=files ".to_string(),
+    }
+}
+
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![];
 
@@ -512,18 +618,94 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let hints = " q=quit Tab=focus r=run ?=help ";
+    let hints = get_keyhints(app);
     let used: usize = spans.iter().map(|s| s.width()).sum();
     let available = area.width as usize;
     if available > used + hints.len() {
         let pad = available - used - hints.len();
         spans.push(Span::raw(" ".repeat(pad)));
     }
-    spans.push(Span::styled(hints, Style::default().fg(theme::TEXT_FAINT())));
+    spans.push(Span::styled(hints.as_str(), Style::default().fg(theme::TEXT_FAINT())));
 
     let line = Line::from(spans);
     frame.render_widget(
         Paragraph::new(line).style(Style::default().bg(theme::BG_BASE())),
         area,
+    );
+}
+
+fn render_test_progress_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    let width = (area.width / 2).max(40).min(area.width);
+    let height = 10u16.min(area.height);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let popup_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::SKY()))
+            .title(" \u{27F3} Running Tests ")
+            .title_style(Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD))
+            .style(Style::default().bg(theme::BG_OVERLAY())),
+        popup_area,
+    );
+
+    let inner = Rect::new(popup_area.x + 2, popup_area.y + 1, popup_area.width.saturating_sub(4), popup_area.height.saturating_sub(2));
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    let elapsed = app.run_start_time
+        .map(|t| t.elapsed().as_secs())
+        .unwrap_or(0);
+
+    if app.progress_total > 0 {
+        let pct = app.progress_current as f64 / app.progress_total as f64;
+        let bar_width = (inner.width as usize).saturating_sub(2);
+        let filled = (pct * bar_width as f64) as usize;
+        let empty = bar_width.saturating_sub(filled);
+        let bar = format!("{}{}", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty));
+        lines.push(Line::from(vec![
+            Span::styled(bar, Style::default().fg(theme::GREEN())),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{}/{} blocks  \u{00b7} {}s elapsed", app.progress_current, app.progress_total, elapsed),
+                Style::default().fg(theme::TEXT_DIM()),
+            ),
+        ]));
+    } else {
+        let spinner = app.spinner_char();
+        lines.push(Line::from(Span::styled(
+            format!("{} Preparing...  \u{00b7} {}s elapsed", spinner, elapsed),
+            Style::default().fg(theme::SKY()),
+        )));
+    }
+
+    let available_rows = inner.height.saturating_sub(lines.len() as u16) as usize;
+    if available_rows > 0 && !app.run_progress_lines.is_empty() {
+        lines.push(Line::from(Span::raw("")));
+        let skip = app.run_progress_lines.len().saturating_sub(available_rows.saturating_sub(1));
+        for (icon, name) in app.run_progress_lines.iter().skip(skip) {
+            let color = if icon == "\u{2713}" {
+                theme::GREEN()
+            } else if icon == "\u{2717}" {
+                theme::RED()
+            } else {
+                theme::YELLOW()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {} ", icon), Style::default().fg(color)),
+                Span::styled(name.as_str(), Style::default().fg(theme::TEXT())),
+            ]));
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::BG_OVERLAY())),
+        inner,
     );
 }

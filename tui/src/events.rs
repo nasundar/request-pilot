@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use crate::app::{App, Focus, Mode, SidebarTab, InputMode, InputPurpose};
+use crate::app::{App, BuilderFocus, Focus, Mode, SidebarTab, InputMode, InputPurpose};
 use crate::toolbar;
 use crate::components;
 
@@ -169,28 +169,71 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_input_mode(app: &mut App, key: KeyEvent) {
-    let (purpose, buffer) = match &mut app.input_mode {
-        InputMode::Input { purpose, buffer, .. } => (purpose.clone(), buffer),
+    // Extract purpose and buffer to avoid borrow conflicts
+    let (purpose, mut buffer) = match &app.input_mode {
+        InputMode::Input { purpose, buffer, .. } => (purpose.clone(), buffer.clone()),
         _ => return,
     };
 
     match key.code {
         KeyCode::Esc => {
+            app.autocomplete_suggestions.clear();
+            app.autocomplete_idx = None;
             app.input_mode = InputMode::Normal;
+            return;
         }
         KeyCode::Enter => {
-            let value = buffer.clone();
-            let p = purpose.clone();
+            app.autocomplete_suggestions.clear();
+            app.autocomplete_idx = None;
+            let value = buffer;
             app.input_mode = InputMode::Normal;
-            app.submit_input(p, value);
+            app.submit_input(purpose, value);
+            return;
+        }
+        KeyCode::Tab => {
+            if matches!(purpose, InputPurpose::OpenFile | InputPurpose::LoadEnv) {
+                if app.autocomplete_suggestions.is_empty() || app.autocomplete_idx.is_none() {
+                    app.compute_file_completions(&buffer);
+                }
+                if !app.autocomplete_suggestions.is_empty() {
+                    let idx = app
+                        .autocomplete_idx
+                        .map(|i| (i + 1) % app.autocomplete_suggestions.len())
+                        .unwrap_or(0);
+                    app.autocomplete_idx = Some(idx);
+                    buffer = app.autocomplete_suggestions[idx].clone();
+                }
+            }
+        }
+        KeyCode::BackTab => {
+            if matches!(purpose, InputPurpose::OpenFile | InputPurpose::LoadEnv)
+                && !app.autocomplete_suggestions.is_empty()
+            {
+                let len = app.autocomplete_suggestions.len();
+                let idx = app
+                    .autocomplete_idx
+                    .map(|i| (i + len - 1) % len)
+                    .unwrap_or(len - 1);
+                app.autocomplete_idx = Some(idx);
+                buffer = app.autocomplete_suggestions[idx].clone();
+            }
         }
         KeyCode::Backspace => {
             buffer.pop();
+            app.autocomplete_suggestions.clear();
+            app.autocomplete_idx = None;
         }
         KeyCode::Char(c) => {
             buffer.push(c);
+            app.autocomplete_suggestions.clear();
+            app.autocomplete_idx = None;
         }
         _ => {}
+    }
+
+    // Write buffer back
+    if let InputMode::Input { buffer: ref mut buf, .. } = app.input_mode {
+        *buf = buffer;
     }
 }
 
@@ -244,6 +287,46 @@ fn handle_files_mode(app: &mut App, key: KeyEvent) {
             }
         };
         return;
+    }
+
+    // Esc navigates back one level
+    if key.code == KeyCode::Esc {
+        match app.focus {
+            Focus::Builder => { app.focus = Focus::FileTree; }
+            Focus::Response => { app.focus = Focus::Builder; }
+            Focus::Variables => {
+                app.focus = Focus::FileTree;
+                app.sidebar_tab = SidebarTab::Files;
+            }
+            Focus::CodeView => { app.focus = Focus::FileTree; }
+            Focus::FileTree => { app.should_quit = true; }
+            _ => {}
+        }
+        return;
+    }
+
+    // Arrow key pane navigation (skip when editing URL in builder)
+    let in_url_edit = app.focus == Focus::Builder && app.builder_focus == BuilderFocus::Url;
+    if !in_url_edit {
+        match key.code {
+            KeyCode::Left if matches!(app.focus, Focus::Builder | Focus::Response | Focus::CodeView) => {
+                app.focus = Focus::FileTree;
+                return;
+            }
+            KeyCode::Right if app.focus == Focus::FileTree => {
+                app.focus = Focus::Builder;
+                return;
+            }
+            KeyCode::Up if app.focus == Focus::Response => {
+                app.focus = Focus::Builder;
+                return;
+            }
+            KeyCode::Down if app.focus == Focus::Builder => {
+                app.focus = Focus::Response;
+                return;
+            }
+            _ => {}
+        }
     }
 
     match app.focus {
