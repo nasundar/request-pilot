@@ -308,6 +308,7 @@ pub struct App {
     pub history_groups_collapsed: HashSet<String>,
     pub history_selected_seqs: Vec<u64>,
     pub history_detail_scroll: u16,
+    pub history_detail_tab: u8, // 0 = Request, 1 = Response
 
     // Diff viewer state
     pub diff_viewer_open: bool,
@@ -455,6 +456,7 @@ impl App {
             history_groups_collapsed: HashSet::new(),
             history_selected_seqs: Vec::new(),
             history_detail_scroll: 0,
+            history_detail_tab: 0,
             diff_viewer_open: false,
             diff_viewer_data: None,
             builder_focus: BuilderFocus::Method,

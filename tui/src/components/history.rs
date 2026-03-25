@@ -464,6 +464,7 @@ pub fn handle_history_keys(app: &mut App, key: KeyEvent) {
                         DisplayRow::Entry { flat_idx, .. } => {
                             app.history_detail_idx = Some(*flat_idx);
                             app.history_detail_scroll = 0;
+                            app.history_detail_tab = 0;
                         }
                         DisplayRow::GroupHeader { label, .. } => {
                             let label = label.clone();

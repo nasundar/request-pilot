@@ -331,8 +331,8 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let mut spans = vec![
-        Span::styled(" ✈ Request Pilot ", Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD)),
-        Span::raw(" "),
+        Span::styled(" 🚀  Request Pilot ", Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
         Span::styled(" f Files ", mode_style(Mode::Files, app.mode)),
         Span::raw(" "),
         Span::styled(" h History ", mode_style(Mode::History, app.mode)),
@@ -342,6 +342,15 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(" l Logs ", mode_style(Mode::Logs, app.mode)),
         Span::raw("  "),
         Span::styled("R Run All", Style::default().fg(theme::GREEN())),
+        Span::raw("  "),
+        Span::styled(
+            if app.otel_enabled { "📡 OTEL" } else { "📡 OTEL" },
+            if app.otel_enabled {
+                Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::TEXT_FAINT())
+            },
+        ),
         Span::raw("  "),
         Span::styled("? Help", Style::default().fg(theme::TEXT_FAINT())),
         Span::raw("  "),
@@ -469,9 +478,7 @@ fn draw_history_detail(frame: &mut Frame, app: &App, area: Rect, idx: usize) {
 
     frame.render_widget(ratatui::widgets::Clear, popup_area);
 
-    let mut lines = Vec::new();
-
-    // Request info
+    // Method + URL header
     let method_color = match entry.method.as_str() {
         "GET" => theme::GREEN(),
         "POST" => theme::BLUE(),
@@ -480,79 +487,169 @@ fn draw_history_detail(frame: &mut Frame, app: &App, area: Rect, idx: usize) {
         "DELETE" => theme::RED(),
         _ => theme::TEXT(),
     };
-
-    lines.push(Line::from(vec![
-        Span::styled(&entry.method, Style::default().fg(method_color).add_modifier(Modifier::BOLD)),
-        Span::raw(" "),
-        Span::styled(&entry.url, Style::default().fg(theme::TEXT())),
-    ]));
-
     let status_color = if entry.status < 300 { theme::GREEN() } else if entry.status < 400 { theme::YELLOW() } else { theme::RED() };
-    lines.push(Line::from(vec![
-        Span::styled(format!("Status: {}", entry.status), Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("  \u{00b7} {}ms  \u{00b7} {} bytes", entry.response_time_ms, entry.response_size_bytes), Style::default().fg(theme::TEXT_DIM())),
-    ]));
-    lines.push(Line::from(Span::styled(format!("Time: {}", entry.timestamp), Style::default().fg(theme::TEXT_FAINT()))));
 
-    // Request headers
-    if !entry.request_headers.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("\u{2500}\u{2500}\u{2500} Request Headers \u{2500}\u{2500}\u{2500}", Style::default().fg(theme::TEXT_FAINT()))));
-        for (k, v) in &entry.request_headers {
-            lines.push(Line::from(vec![
-                Span::styled(k, Style::default().fg(theme::LAVENDER())),
-                Span::raw(": "),
-                Span::styled(v, Style::default().fg(theme::TEXT_DIM())),
-            ]));
-        }
-    }
+    // Layout: header (3 lines) + tabs (1 line) + content (rest)
+    let inner_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4), // header + status + timestamp
+            Constraint::Length(1), // tab bar
+            Constraint::Min(3),   // tab content
+        ])
+        .split(popup_area);
 
-    // Request body
-    if let Some(ref body) = entry.request_body {
-        if !body.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("\u{2500}\u{2500}\u{2500} Request Body \u{2500}\u{2500}\u{2500}", Style::default().fg(theme::TEXT_FAINT()))));
-            for line in body.lines().take(10) {
-                lines.push(Line::from(Span::styled(line, Style::default().fg(theme::TEXT()))));
-            }
-        }
-    }
-
-    // Response headers
-    if !entry.response_headers.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("\u{2500}\u{2500}\u{2500} Response Headers \u{2500}\u{2500}\u{2500}", Style::default().fg(theme::TEXT_FAINT()))));
-        for (k, v) in &entry.response_headers {
-            lines.push(Line::from(vec![
-                Span::styled(k, Style::default().fg(theme::LAVENDER())),
-                Span::raw(": "),
-                Span::styled(v, Style::default().fg(theme::TEXT_DIM())),
-            ]));
-        }
-    }
-
-    // Response body
-    if let Some(ref body) = entry.response_body {
-        if !body.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("\u{2500}\u{2500}\u{2500} Response Body \u{2500}\u{2500}\u{2500}", Style::default().fg(theme::TEXT_FAINT()))));
-            let preview = if body.len() > 1500 { &body[..1500] } else { body.as_str() };
-            for line in preview.lines().take(20) {
-                lines.push(Line::from(Span::styled(line, Style::default().fg(theme::TEXT()))));
-            }
-        }
-    }
-
+    // Outer block
     let block = Block::default()
-        .title(" \u{1f4cb} Request Detail (Esc to close) ")
+        .title(" 📋 Request Detail ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BLUE()))
         .style(Style::default().bg(theme::BG_OVERLAY()));
+    frame.render_widget(block, popup_area);
 
+    // Header lines
+    let header_area = Rect::new(
+        inner_chunks[0].x + 1,
+        inner_chunks[0].y + 1,
+        inner_chunks[0].width.saturating_sub(2),
+        inner_chunks[0].height.saturating_sub(1),
+    );
+    let header_lines = vec![
+        Line::from(vec![
+            Span::styled(&entry.method, Style::default().fg(method_color).add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled(&entry.url, Style::default().fg(theme::TEXT())),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{}", entry.status), Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  ·  {}ms  ·  {} bytes", entry.response_time_ms, entry.response_size_bytes), Style::default().fg(theme::TEXT_DIM())),
+        ]),
+        Line::from(Span::styled(format!("{}", entry.timestamp), Style::default().fg(theme::TEXT_FAINT()))),
+    ];
+    frame.render_widget(Paragraph::new(header_lines), header_area);
+
+    // Tab bar
+    let tab_area = Rect::new(
+        inner_chunks[1].x + 1,
+        inner_chunks[1].y,
+        inner_chunks[1].width.saturating_sub(2),
+        1,
+    );
+    let req_style = if app.history_detail_tab == 0 {
+        Style::default().fg(theme::BG_DARK()).bg(theme::BLUE()).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::TEXT_FAINT())
+    };
+    let resp_style = if app.history_detail_tab == 1 {
+        Style::default().fg(theme::BG_DARK()).bg(theme::BLUE()).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::TEXT_FAINT())
+    };
+    let tab_line = Line::from(vec![
+        Span::styled(" Request ", req_style),
+        Span::raw("  "),
+        Span::styled(" Response ", resp_style),
+        Span::raw("    "),
+        Span::styled("Tab", Style::default().fg(theme::PEACH())),
+        Span::styled("=switch  ", Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled("↑↓", Style::default().fg(theme::PEACH())),
+        Span::styled("=scroll  ", Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled("Esc", Style::default().fg(theme::PEACH())),
+        Span::styled("=close", Style::default().fg(theme::TEXT_FAINT())),
+    ]);
+    frame.render_widget(Paragraph::new(tab_line), tab_area);
+
+    // Content area
+    let content_area = Rect::new(
+        inner_chunks[2].x + 1,
+        inner_chunks[2].y,
+        inner_chunks[2].width.saturating_sub(2),
+        inner_chunks[2].height.saturating_sub(1),
+    );
+
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    if app.history_detail_tab == 0 {
+        // ── Request tab ──
+        lines.push(Line::from(Span::styled(
+            "─── Headers ───",
+            Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        if entry.request_headers.is_empty() {
+            lines.push(Line::from(Span::styled("  (none)", Style::default().fg(theme::TEXT_FAINT()))));
+        } else {
+            for (k, v) in &entry.request_headers {
+                lines.push(Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(k, Style::default().fg(theme::LAVENDER()).add_modifier(Modifier::BOLD)),
+                    Span::styled(": ", Style::default().fg(theme::TEXT_FAINT())),
+                    Span::styled(v, Style::default().fg(theme::TEXT())),
+                ]));
+            }
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "─── Body ───",
+            Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        if let Some(ref body) = entry.request_body {
+            if body.is_empty() {
+                lines.push(Line::from(Span::styled("  (empty)", Style::default().fg(theme::TEXT_FAINT()))));
+            } else {
+                for line in body.lines() {
+                    lines.push(Line::from(Span::styled(format!("  {}", line), Style::default().fg(theme::TEXT()))));
+                }
+            }
+        } else {
+            lines.push(Line::from(Span::styled("  (no body)", Style::default().fg(theme::TEXT_FAINT()))));
+        }
+    } else {
+        // ── Response tab ──
+        lines.push(Line::from(Span::styled(
+            "─── Headers ───",
+            Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        if entry.response_headers.is_empty() {
+            lines.push(Line::from(Span::styled("  (none)", Style::default().fg(theme::TEXT_FAINT()))));
+        } else {
+            for (k, v) in &entry.response_headers {
+                lines.push(Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(k, Style::default().fg(theme::LAVENDER()).add_modifier(Modifier::BOLD)),
+                    Span::styled(": ", Style::default().fg(theme::TEXT_FAINT())),
+                    Span::styled(v, Style::default().fg(theme::TEXT())),
+                ]));
+            }
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "─── Body ───",
+            Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        if let Some(ref body) = entry.response_body {
+            if body.is_empty() {
+                lines.push(Line::from(Span::styled("  (empty)", Style::default().fg(theme::TEXT_FAINT()))));
+            } else {
+                for line in body.lines() {
+                    lines.push(Line::from(Span::styled(format!("  {}", line), Style::default().fg(theme::TEXT()))));
+                }
+            }
+        } else {
+            lines.push(Line::from(Span::styled("  (no body)", Style::default().fg(theme::TEXT_FAINT()))));
+        }
+    }
+
+    let scroll = app.history_detail_scroll;
     let paragraph = Paragraph::new(lines)
-        .block(block)
+        .scroll((scroll, 0))
         .wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, popup_area);
+    frame.render_widget(paragraph, content_area);
 }
 
 fn get_keyhints(app: &App) -> String {

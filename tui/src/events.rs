@@ -50,8 +50,19 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 
     // 6. History detail overlay
     if app.history_detail_idx.is_some() {
-        if matches!(key.code, KeyCode::Esc | KeyCode::Backspace) {
-            app.history_detail_idx = None;
+        match key.code {
+            KeyCode::Esc | KeyCode::Backspace => { app.history_detail_idx = None; }
+            KeyCode::Tab | KeyCode::BackTab => {
+                app.history_detail_tab = if app.history_detail_tab == 0 { 1 } else { 0 };
+                app.history_detail_scroll = 0;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.history_detail_scroll = app.history_detail_scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.history_detail_scroll = app.history_detail_scroll.saturating_add(1);
+            }
+            _ => {}
         }
         return;
     }
