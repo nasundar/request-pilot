@@ -109,6 +109,11 @@ body::-webkit-scrollbar-thumb {
 .logo {
   color: var(--accent);
 }
+/* Show correct logo variant per theme */
+[data-theme="dark"] .logo-light { display: none; }
+[data-theme="dark"] .logo-dark { display: inline; }
+[data-theme="light"] .logo-dark { display: none; }
+[data-theme="light"] .logo-light { display: inline; }
 
 .header-actions,
 .btn-group {

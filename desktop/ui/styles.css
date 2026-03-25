@@ -238,7 +238,7 @@ html, body {
 .toolbar-center {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   -webkit-app-region: no-drag;
 }
 
@@ -336,7 +336,7 @@ html, body {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   -webkit-app-region: no-drag;
 }
 
@@ -468,13 +468,13 @@ html, body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 28px;
+  height: 28px;
   border: none;
   border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   cursor: pointer;
   transition: all var(--transition);
