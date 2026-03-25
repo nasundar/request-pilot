@@ -333,18 +333,18 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![
         Span::styled(" 🚀  Request Pilot ", Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD)),
         Span::raw("  "),
-        Span::styled(" f Files ", mode_style(Mode::Files, app.mode)),
+        Span::styled(" Files ", mode_style(Mode::Files, app.mode)),
         Span::raw(" "),
-        Span::styled(" h History ", mode_style(Mode::History, app.mode)),
+        Span::styled(" Code ", mode_style(Mode::Code, app.mode)),
         Span::raw(" "),
-        Span::styled(" c Code ", mode_style(Mode::Code, app.mode)),
+        Span::styled(" History ", mode_style(Mode::History, app.mode)),
         Span::raw(" "),
-        Span::styled(" l Logs ", mode_style(Mode::Logs, app.mode)),
+        Span::styled(" Logs ", mode_style(Mode::Logs, app.mode)),
         Span::raw("  "),
         Span::styled("R Run All", Style::default().fg(theme::GREEN())),
         Span::raw("  "),
         Span::styled(
-            if app.otel_enabled { "📡 OTEL" } else { "📡 OTEL" },
+            if app.otel_enabled { "⚡OTEL" } else { "⚡OTEL" },
             if app.otel_enabled {
                 Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD)
             } else {
@@ -352,12 +352,13 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
             },
         ),
         Span::raw("  "),
-        Span::styled("? Help", Style::default().fg(theme::TEXT_FAINT())),
-        Span::raw("  "),
-        Span::styled(format!("\u{1f3a8} {} ", theme::active_name()), Style::default().fg(theme::TEXT_DIM())),
-        Span::raw("  "),
     ];
     spans.extend(toolbar::toolbar_badges(app));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(format!("\u{1f3a8} {} ", theme::active_name()), Style::default().fg(theme::TEXT_DIM())));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled("? Help", Style::default().fg(theme::TEXT_FAINT())));
+    spans.push(Span::raw("  "));
     let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line).style(Style::default().bg(theme::BG_BASE())), area);
 }
@@ -663,19 +664,19 @@ fn get_keyhints(app: &App) -> String {
         Mode::Files => match app.focus {
             Focus::FileTree | Focus::CodeView => {
                 if app.sidebar_tab == SidebarTab::Variables {
-                    " \u{2191}\u{2193}=nav  a=add  e=edit  d=delete  V=files  Esc=quit ".to_string()
+                    " ↑↓=nav  a=add  e=edit  d=delete  V=files  Esc=quit ".to_string()
                 } else {
-                    " \u{2191}\u{2193}=nav  Enter=select  e=code  o=open  r=run  R=RunAll  t=toggle  V=vars  Esc=quit ".to_string()
+                    " ↑↓=nav  Enter=select  e=code  o=open  r=run  R=RunAll  Ctrl+T=OTEL  Ctrl+A=Azure  Esc=quit ".to_string()
                 }
             }
-            Focus::Variables => " \u{2191}\u{2193}=nav  a=add  e=edit  d=delete  V=files  Esc=quit ".to_string(),
-            Focus::Builder => " Tab=cycle  \u{2190}\u{2192}=method  Enter=edit  Ctrl+Enter=send  Esc=back ".to_string(),
-            Focus::Response => " \u{2191}\u{2193}=nav  Enter=expand  E=all  C=collapse  b=body  h=hdrs  y=copy  Esc=back ".to_string(),
+            Focus::Variables => " ↑↓=nav  a=add  e=edit  d=delete  V=files  Esc=quit ".to_string(),
+            Focus::Builder => " Tab=cycle  ←→=method  Enter=edit  Ctrl+Enter=send  Esc=back ".to_string(),
+            Focus::Response => " ↑↓=nav  Enter=expand  E=all  C=collapse  b=body  h=hdrs  y=copy  Esc=back ".to_string(),
             _ => " q=quit  Tab=focus  r=run  ?=help ".to_string(),
         },
-        Mode::History => " \u{2191}\u{2193}=nav  g=group  m=method  s=status  Enter=detail  Space=compare  Esc=files ".to_string(),
+        Mode::History => " ↑↓=nav  g=group  m=method  s=status  Enter=detail  Space=compare  Esc=files ".to_string(),
         Mode::Code => " Type to edit  Ctrl+S=save  Ctrl+C/X/V=copy/cut/paste  Ctrl+A=select all  Shift+Arrow=select  /=search  Esc=exit ".to_string(),
-        Mode::Logs => " \u{2191}\u{2193}=scroll  f=filter  c=clear  Esc=files ".to_string(),
+        Mode::Logs => " ↑↓=scroll  f=filter  c=clear  a=auto-scroll  Esc=files ".to_string(),
     }
 }
 

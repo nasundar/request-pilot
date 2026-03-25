@@ -131,6 +131,9 @@ fn render_log_toolbar(frame: &mut Frame, app: &App, area: Rect) {
         "auto-scroll OFF"
     };
 
+    let log_path = std::env::temp_dir().join("request-pilot.log");
+    let log_path_display = log_path.display().to_string();
+
     let line = Line::from(vec![
         Span::styled(
             format!("  Filter: {} ", filter_label),
@@ -149,7 +152,7 @@ fn render_log_toolbar(frame: &mut Frame, app: &App, area: Rect) {
             }),
         ),
         Span::styled(
-            "  f=filter  c=clear  a=auto-scroll  ",
+            format!("  {} ", log_path_display),
             Style::default().fg(theme::TEXT_FAINT()),
         ),
     ]);
@@ -162,15 +165,45 @@ fn render_log_entries(frame: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::TEXT_FAINT()));
 
-    let filtered: Vec<&LogEntry> = app
-        .log_entries
+    // Merge in-memory app logs with entries from the log file
+    let mut all_entries: Vec<LogEntry> = Vec::new();
+
+    // Read log file entries
+    let log_path = std::env::temp_dir().join("request-pilot.log");
+    if let Ok(contents) = std::fs::read_to_string(&log_path) {
+        for line in contents.lines() {
+            let (level, msg) = if line.contains("[ERROR]") {
+                (LogLevel::Error, line.to_string())
+            } else if line.contains("[WARN]") {
+                (LogLevel::Warn, line.to_string())
+            } else if line.contains("[INFO]") {
+                (LogLevel::Info, line.to_string())
+            } else if line.contains("[DEBUG]") || line.contains("[TRACE]") {
+                (LogLevel::Debug, line.to_string())
+            } else {
+                (LogLevel::Info, line.to_string())
+            };
+            all_entries.push(LogEntry {
+                timestamp: String::new(),
+                level,
+                message: msg,
+            });
+        }
+    }
+
+    // Append in-memory entries
+    for e in &app.log_entries {
+        all_entries.push(e.clone());
+    }
+
+    let filtered: Vec<&LogEntry> = all_entries
         .iter()
         .filter(|e| matches_filter(e, &app.log_filter))
         .collect();
 
     if filtered.is_empty() {
         frame.render_widget(
-            Paragraph::new("  No log entries. Logs will appear as you use the app.")
+            Paragraph::new("  No log entries. Logs appear here as you run tests.")
                 .block(block)
                 .style(Style::default().fg(theme::TEXT_FAINT())),
             area,
@@ -189,17 +222,25 @@ fn render_log_entries(frame: &mut Frame, app: &App, area: Rect) {
         .map(|entry| {
             let badge = level_badge(&entry.level);
             let badge_style = level_style(&entry.level).add_modifier(Modifier::BOLD);
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!(" {} ", &entry.timestamp),
-                    Style::default().fg(theme::TEXT_FAINT()),
-                ),
-                Span::styled(format!("[{}]", badge), badge_style),
-                Span::styled(
-                    format!(" {}", &entry.message),
-                    Style::default().fg(theme::TEXT()),
-                ),
-            ]))
+            if entry.timestamp.is_empty() {
+                // File-sourced entry — message already contains timestamp
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("[{}] ", badge), badge_style),
+                    Span::styled(&entry.message, Style::default().fg(theme::TEXT())),
+                ]))
+            } else {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!(" {} ", &entry.timestamp),
+                        Style::default().fg(theme::TEXT_FAINT()),
+                    ),
+                    Span::styled(format!("[{}]", badge), badge_style),
+                    Span::styled(
+                        format!(" {}", &entry.message),
+                        Style::default().fg(theme::TEXT()),
+                    ),
+                ]))
+            }
         })
         .collect();
 

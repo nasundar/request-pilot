@@ -47,7 +47,7 @@ pub fn toolbar_badges(app: &App) -> Vec<Span<'static>> {
         spans.push(Span::styled(" DEV ", Style::default().fg(theme::BG_DARK()).bg(theme::PEACH()).add_modifier(Modifier::BOLD)));
     }
     if app.otel_enabled {
-        spans.push(Span::styled(" \u{1f4e1} ", Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(" \u{26a1} ", Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD)));
     }
     spans
 }
@@ -263,7 +263,7 @@ pub fn render_otel_popup(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("=close", Style::default().fg(theme::TEXT_FAINT())),
     ]));
     let block = Block::default()
-        .title(" \u{1f4e1} Telemetry ")
+        .title(" ⚡ Telemetry ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BLUE()))
         .style(Style::default().bg(theme::BG_SURFACE()));
