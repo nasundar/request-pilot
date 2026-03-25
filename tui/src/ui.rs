@@ -255,6 +255,89 @@ pub fn restore_terminal() -> color_eyre::Result<()> {
     Ok(())
 }
 
+pub fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre::Result<()> {
+    let rocket_art = vec![
+        r"                  /\        ",
+        r"                 /  \       ",
+        r"                |    |      ",
+        r"                |    |      ",
+        r"               /| .  |\     ",
+        r"              / | /\ | \    ",
+        r"             /  |/  \|  \   ",
+        r"            /   /    \   \  ",
+        r"           /   / \  / \   \ ",
+        r"          /__ /   \/   \ __\",
+        r"             ||      ||     ",
+        r"             ||      ||     ",
+        r"             |_|    |_|     ",
+        r"            /___|  |___\    ",
+        r"         .:' .  :  .  ':.   ",
+        r"        :__.'.__:__.'.__:   ",
+    ];
+
+    let tagline = "Wishing you safe passage across all endpoints.";
+    let title = "R E Q U E S T   P I L O T";
+
+    terminal.draw(|frame| {
+        let area = frame.area();
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(theme::BG_DARK())),
+            area,
+        );
+
+        let total_height = rocket_art.len() as u16 + 5; // art + gaps + title + tagline
+        let start_y = area.height.saturating_sub(total_height) / 2;
+
+        // Title
+        let title_x = area.width.saturating_sub(title.len() as u16) / 2;
+        if start_y < area.height {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    title,
+                    Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
+                ))),
+                Rect::new(title_x, start_y, title.len() as u16, 1),
+            );
+        }
+
+        // Rocket art
+        let art_start = start_y + 2;
+        for (i, line) in rocket_art.iter().enumerate() {
+            let y = art_start + i as u16;
+            if y >= area.height { break; }
+            let x = area.width.saturating_sub(line.len() as u16) / 2;
+            let color = if i < 10 {
+                theme::TEXT()
+            } else if i < 14 {
+                theme::PEACH()
+            } else {
+                theme::RED()
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    *line,
+                    Style::default().fg(color),
+                ))),
+                Rect::new(x, y, line.len() as u16, 1),
+            );
+        }
+
+        // Tagline
+        let tag_y = art_start + rocket_art.len() as u16 + 1;
+        if tag_y < area.height {
+            let tag_x = area.width.saturating_sub(tagline.len() as u16) / 2;
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    tagline,
+                    Style::default().fg(theme::TEXT_DIM()).add_modifier(Modifier::ITALIC),
+                ))),
+                Rect::new(tag_x, tag_y, tagline.len() as u16, 1),
+            );
+        }
+    })?;
+    Ok(())
+}
+
 pub fn draw(frame: &mut Frame, app: &App) {
     let has_input = !matches!(app.input_mode, InputMode::Normal);
     let show_progress = !app.run_progress_lines.is_empty() || app.is_running;
@@ -330,7 +413,8 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    let mut spans = vec![
+    // Left side: logo + mode tabs + run all
+    let left_spans = vec![
         Span::styled(" 🚀  Request Pilot ", Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD)),
         Span::raw("  "),
         Span::styled(" Files ", mode_style(Mode::Files, app.mode)),
@@ -342,7 +426,10 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(" Logs ", mode_style(Mode::Logs, app.mode)),
         Span::raw("  "),
         Span::styled("R Run All", Style::default().fg(theme::GREEN())),
-        Span::raw("  "),
+    ];
+
+    // Right side: OTEL + badges + theme + help
+    let mut right_spans: Vec<Span> = vec![
         Span::styled(
             "⚡",
             Style::default().fg(if app.otel_enabled { theme::SKY() } else { theme::TEXT_FAINT() }),
@@ -357,12 +444,23 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Span::raw("  "),
     ];
-    spans.extend(toolbar::toolbar_badges(app));
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(format!("\u{1f3a8} {} ", theme::active_name()), Style::default().fg(theme::TEXT_DIM())));
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled("? Help", Style::default().fg(theme::TEXT_FAINT())));
-    spans.push(Span::raw("  "));
+    right_spans.extend(toolbar::toolbar_badges(app));
+    right_spans.push(Span::raw("  "));
+    right_spans.push(Span::styled(format!("\u{1f3a8} {} ", theme::active_name()), Style::default().fg(theme::TEXT_DIM())));
+    right_spans.push(Span::raw("  "));
+    right_spans.push(Span::styled("? Help", Style::default().fg(theme::TEXT_FAINT())));
+    right_spans.push(Span::raw(" "));
+
+    // Calculate widths to insert gap
+    let left_width: usize = left_spans.iter().map(|s| s.width()).sum();
+    let right_width: usize = right_spans.iter().map(|s| s.width()).sum();
+    let total_width = area.width as usize;
+    let gap = total_width.saturating_sub(left_width + right_width);
+
+    let mut spans = left_spans;
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.extend(right_spans);
+
     let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line).style(Style::default().bg(theme::BG_BASE())), area);
 }
