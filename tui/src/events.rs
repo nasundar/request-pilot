@@ -3,6 +3,12 @@ use crate::app::{App, Focus, Mode, SidebarTab, TreeNode, InputMode, InputPurpose
 use crate::toolbar;
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
+    // Code editor mode priority
+    if app.mode == Mode::Code {
+        crate::code_editor::handle_editor_keys(app, key);
+        return;
+    }
+
     // 1. Input mode handling takes priority
     match &app.input_mode {
         InputMode::Input { .. } => {
@@ -67,6 +73,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             app.queue_run_all();
             return;
         }
+        KeyCode::Char('c') if !in_text_input => {
+            app.enter_code_editor();
+            return;
+        }
         KeyCode::Tab => {
             cycle_focus(app);
             return;
@@ -120,6 +130,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     match app.mode {
         Mode::Files => handle_files_mode(app, key),
         Mode::History => handle_history_mode(app, key),
+        Mode::Code => crate::code_editor::handle_editor_keys(app, key),
     }
 }
 

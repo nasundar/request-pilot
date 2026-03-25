@@ -115,6 +115,8 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(" F1 Files ", mode_style(Mode::Files, app.mode)),
         Span::raw(" "),
         Span::styled(" F3 History ", mode_style(Mode::History, app.mode)),
+        Span::raw(" "),
+        Span::styled(" c Code ", mode_style(Mode::Code, app.mode)),
         Span::raw("  "),
         Span::styled("F5 Run All", Style::default().fg(theme::GREEN)),
         Span::raw("  "),
@@ -130,6 +132,7 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
     match app.mode {
         Mode::Files => draw_files_mode(frame, app, area),
         Mode::History => draw_history_mode(frame, app, area),
+        Mode::Code => crate::code_editor::render_editor(frame, app, area),
     }
 }
 

@@ -48,6 +48,7 @@ pub enum ResponseTab {
 pub enum Mode {
     Files,
     History,
+    Code,
 }
 
 /// Which pane has keyboard focus.
@@ -203,6 +204,13 @@ pub struct App {
     pub body_fully_loaded: bool,
     pub response_body_full: Option<String>,
 
+    // Code editor state
+    pub code_editor_content: String,
+    pub code_editor_cursor_line: usize,
+    pub code_editor_cursor_col: usize,
+    pub code_editor_scroll: u16,
+    pub code_editor_modified: bool,
+
     // Channel receiver (set up in run())
     runner_rx: Option<mpsc::UnboundedReceiver<RunnerMessage>>,
     runner_tx: mpsc::UnboundedSender<RunnerMessage>,
@@ -259,6 +267,11 @@ impl App {
             json_cursor: 0,
             body_fully_loaded: false,
             response_body_full: None,
+            code_editor_content: String::new(),
+            code_editor_cursor_line: 0,
+            code_editor_cursor_col: 0,
+            code_editor_scroll: 0,
+            code_editor_modified: false,
             runner_rx: Some(rx),
             runner_tx: tx,
         }
@@ -561,6 +574,44 @@ impl App {
         self.progress_current = 0;
         self.progress_total = 0;
         self.set_status("Cleared all results and history".to_string());
+    }
+
+    pub fn enter_code_editor(&mut self) {
+        if let Some(fi) = self.active_file_idx {
+            if let Some(file) = self.loaded_files.get(fi) {
+                self.code_editor_content = file.content.clone();
+                self.code_editor_cursor_line = 0;
+                self.code_editor_cursor_col = 0;
+                self.code_editor_scroll = 0;
+                self.code_editor_modified = false;
+                self.mode = Mode::Code;
+            }
+        }
+    }
+
+    pub fn save_code_editor(&mut self) {
+        if let Some(fi) = self.active_file_idx {
+            let content = self.code_editor_content.clone();
+            let suite = parse_test_suite(&content);
+            if let Some(file) = self.loaded_files.get_mut(fi) {
+                file.content = content.clone();
+                file.suite = suite;
+                if let Some(ref path) = file.path {
+                    let display = path.display().to_string();
+                    match std::fs::write(path, &content) {
+                        Ok(_) => self.set_status(format!("Saved: {}", display)),
+                        Err(e) => {
+                            self.set_status(format!("Save failed: {}", e));
+                            return;
+                        }
+                    }
+                } else {
+                    self.set_status("Updated in memory (no file path)".to_string());
+                }
+            }
+            self.code_editor_modified = false;
+            self.rebuild_tree();
+        }
     }
 
     pub fn export_history(&mut self, path_str: String) {

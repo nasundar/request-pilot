@@ -1,4 +1,5 @@
 mod app;
+mod code_editor;
 mod components;
 mod events;
 mod toolbar;
