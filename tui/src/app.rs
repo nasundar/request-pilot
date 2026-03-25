@@ -177,6 +177,7 @@ pub enum RunnerMessage {
         file_id: u64,
         results: TestRunResults,
     },
+    AzureAuthResult(Result<request_pilot_core::azure_auth::AzureToken, String>),
 }
 
 /// A loaded .http file with parsed suite and optional results.
@@ -341,6 +342,9 @@ pub struct App {
 }
 
 impl App {
+    pub fn runner_tx(&self) -> mpsc::UnboundedSender<RunnerMessage> {
+        self.runner_tx.clone()
+    }
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         Self {
@@ -1131,6 +1135,20 @@ impl App {
                         self.progress_current = 0;
                         self.progress_total = 0;
                         self.run_start_time = None;
+                    }
+                    RunnerMessage::AzureAuthResult(result) => {
+                        self.azure_loading = false;
+                        match result {
+                            Ok(token) => {
+                                self.azure_state = AzureAuthState::Authenticated;
+                                self.azure_token = Some(token);
+                                self.set_status("Azure: authenticated ✓".to_string());
+                            }
+                            Err(e) => {
+                                self.azure_state = AzureAuthState::Expired;
+                                self.set_status(format!("Azure auth failed: {}", e));
+                            }
+                        }
                     }
                 }
             }

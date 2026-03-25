@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use crate::app::{App, AzureAuthState, HeaderEditField, HeaderEditMode};
+use crate::app::{App, AzureAuthState, HeaderEditField, HeaderEditMode, RunnerMessage};
 use crate::ui::theme;
 
 fn centered_popup(area: Rect, w: u16, h: u16) -> Rect {
@@ -382,19 +382,19 @@ pub fn handle_azure_keys(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Enter => {
             if !app.azure_loading && request_pilot_core::azure_auth::is_az_cli_available() {
                 app.azure_loading = true;
-                match request_pilot_core::azure_auth::fetch_token("https://management.azure.com/.default") {
-                    Ok(token) => {
-                        app.azure_state = AzureAuthState::Authenticated;
-                        app.azure_token = Some(token);
-                        app.azure_loading = false;
-                        app.set_status("Azure: authenticated".to_string());
-                    }
-                    Err(e) => {
-                        app.azure_state = AzureAuthState::Expired;
-                        app.azure_loading = false;
-                        app.set_status(format!("Azure auth failed: {}", e));
-                    }
-                }
+                app.set_status("⏳ Fetching Azure token...".to_string());
+                let tx = app.runner_tx();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(|| {
+                        request_pilot_core::azure_auth::fetch_token("https://management.azure.com/.default")
+                    }).await;
+                    let msg = match result {
+                        Ok(Ok(token)) => RunnerMessage::AzureAuthResult(Ok(token)),
+                        Ok(Err(e)) => RunnerMessage::AzureAuthResult(Err(e.to_string())),
+                        Err(e) => RunnerMessage::AzureAuthResult(Err(format!("Task panicked: {}", e))),
+                    };
+                    let _ = tx.send(msg);
+                });
             }
         }
         _ => {}
