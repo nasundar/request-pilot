@@ -654,69 +654,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Compact 4-line progress strip at the bottom — always visible when tests are running or have results.
 fn render_progress_strip(frame: &mut Frame, app: &App, area: Rect) {
-    if area.height == 0 || area.width < 10 { return; }
-
-    let mut lines: Vec<Line> = Vec::new();
-
-    // Progress bar (if running)
-    if app.is_running && app.progress_total > 0 {
-        let pct = app.progress_current as f64 / app.progress_total as f64;
-        let bar_w = area.width.saturating_sub(20) as usize;
-        let filled = (pct * bar_w as f64) as usize;
-        let empty = bar_w.saturating_sub(filled);
-        let elapsed = app.run_start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {}{} ", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty)),
-                Style::default().fg(theme::GREEN()),
-            ),
-            Span::styled(
-                format!("{}/{} · {}s", app.progress_current, app.progress_total, elapsed),
-                Style::default().fg(theme::TEXT_DIM()),
-            ),
-        ]));
-    } else if app.is_running {
-        let spinner = app.spinner_char();
-        let elapsed = app.run_start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-        lines.push(Line::from(Span::styled(
-            format!(" {} Preparing... · {}s", spinner, elapsed),
-            Style::default().fg(theme::SKY()),
-        )));
-    } else {
-        // Finished — show summary
-        let passed = app.run_progress_lines.iter().filter(|(i, _)| i == "\u{2713}").count();
-        let failed = app.run_progress_lines.iter().filter(|(i, _)| i == "\u{2717}").count();
-        let total = app.run_progress_lines.len();
-        lines.push(Line::from(vec![
-            Span::styled(" Results: ", Style::default().fg(theme::TEXT_DIM())),
-            Span::styled(format!("✓{} ", passed), Style::default().fg(theme::GREEN())),
-            Span::styled(format!("✗{} ", failed), Style::default().fg(if failed > 0 { theme::RED() } else { theme::TEXT_DIM() })),
-            Span::styled(format!("({} total)", total), Style::default().fg(theme::TEXT_FAINT())),
-        ]));
-    }
-
-    // Show last few progress entries (scroll-aware)
-    let remaining_rows = area.height.saturating_sub(2) as usize;
-    let total_entries = app.run_progress_lines.len();
-    let max_scroll = total_entries.saturating_sub(remaining_rows);
-    let scroll = app.progress_scroll.min(max_scroll);
-    let visible = app.run_progress_lines.iter().skip(scroll).take(remaining_rows);
-    for (icon, name) in visible {
-        let color = match icon.as_str() {
-            "\u{2713}" => theme::GREEN(),
-            "\u{2717}" => theme::RED(),
-            _ => theme::YELLOW(),
-        };
-        let max_name = area.width.saturating_sub(6) as usize;
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {} ", icon), Style::default().fg(color)),
-            Span::styled(truncate_to(name, max_name), Style::default().fg(theme::TEXT())),
-        ]));
-    }
-
-    // Hint
-    let hint = if app.progress_expanded { " E=collapse  ↑↓=scroll " } else { " E=expand  ↑↓=scroll  X=dismiss " };
-    lines.push(Line::from(Span::styled(hint, Style::default().fg(theme::TEXT_FAINT()))));
+    if area.height < 2 || area.width < 10 { return; }
 
     let block = Block::default()
         .borders(Borders::TOP)
@@ -725,9 +663,79 @@ fn render_progress_strip(frame: &mut Frame, app: &App, area: Rect) {
         .title_style(Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD))
         .style(Style::default().bg(theme::BG_SURFACE()));
 
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || inner.width == 0 { return; }
+    let max_lines = inner.height as usize;
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Line 1: Progress bar or summary — combined with hint
+    let hint = if app.progress_expanded { "E=collapse" } else { "E=expand ↑↓=scroll X=dismiss" };
+    if app.is_running && app.progress_total > 0 {
+        let pct = app.progress_current as f64 / app.progress_total as f64;
+        let bar_w = inner.width.saturating_sub(30) as usize;
+        let filled = (pct * bar_w as f64) as usize;
+        let empty = bar_w.saturating_sub(filled);
+        let elapsed = app.run_start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{}{}", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty)),
+                Style::default().fg(theme::GREEN()),
+            ),
+            Span::styled(
+                format!(" {}/{} · {}s ", app.progress_current, app.progress_total, elapsed),
+                Style::default().fg(theme::TEXT_DIM()),
+            ),
+            Span::styled(hint, Style::default().fg(theme::TEXT_FAINT())),
+        ]));
+    } else if app.is_running {
+        let spinner = app.spinner_char();
+        let elapsed = app.run_start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} Preparing... · {}s  ", spinner, elapsed),
+                Style::default().fg(theme::SKY()),
+            ),
+            Span::styled(hint, Style::default().fg(theme::TEXT_FAINT())),
+        ]));
+    } else {
+        let passed = app.run_progress_lines.iter().filter(|(i, _)| i == "\u{2713}").count();
+        let failed = app.run_progress_lines.iter().filter(|(i, _)| i == "\u{2717}").count();
+        let total = app.run_progress_lines.len();
+        lines.push(Line::from(vec![
+            Span::styled("Results: ", Style::default().fg(theme::TEXT_DIM())),
+            Span::styled(format!("✓{} ", passed), Style::default().fg(theme::GREEN())),
+            Span::styled(format!("✗{} ", failed), Style::default().fg(if failed > 0 { theme::RED() } else { theme::TEXT_DIM() })),
+            Span::styled(format!("({} total)  ", total), Style::default().fg(theme::TEXT_FAINT())),
+            Span::styled(hint, Style::default().fg(theme::TEXT_FAINT())),
+        ]));
+    }
+
+    // Remaining rows for progress entries
+    let entry_rows = max_lines.saturating_sub(lines.len());
+    if entry_rows > 0 && !app.run_progress_lines.is_empty() {
+        let total_entries = app.run_progress_lines.len();
+        let max_scroll = total_entries.saturating_sub(entry_rows);
+        let scroll = app.progress_scroll.min(max_scroll);
+        for (icon, name) in app.run_progress_lines.iter().skip(scroll).take(entry_rows) {
+            let color = match icon.as_str() {
+                "\u{2713}" => theme::GREEN(),
+                "\u{2717}" => theme::RED(),
+                _ => theme::YELLOW(),
+            };
+            let max_name = inner.width.saturating_sub(5) as usize;
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {} ", icon), Style::default().fg(color)),
+                Span::styled(truncate_to(name, max_name), Style::default().fg(theme::TEXT())),
+            ]));
+        }
+    }
+
     frame.render_widget(
-        Paragraph::new(lines).block(block).style(Style::default().bg(theme::BG_SURFACE())),
-        area,
+        Paragraph::new(lines).style(Style::default().bg(theme::BG_SURFACE())),
+        inner,
     );
 }
 

@@ -351,17 +351,36 @@ impl App {
         self.runner_tx.clone()
     }
 
-    /// Build extra variables for test runner, including Azure token when in dev mode.
+    /// Build extra variables for test runner, including Azure tokens when in dev mode.
+    /// Scans @mode app blocks for @dev_auth scopes and @extract variables,
+    /// then maps tokens to the correct extract variable names.
     fn build_extra_vars(&self) -> Vec<(String, String)> {
-        let mut vars: Vec<(String, String)> = self.env_vars.iter()
+        let vars: Vec<(String, String)> = self.env_vars.iter()
             .map(|(k, v)| (k.clone(), v.clone())).collect();
-        // Inject Azure token as access_token when in dev mode
-        if self.dev_mode {
-            if let Some(ref token) = self.azure_token {
-                vars.push(("access_token".to_string(), token.access_token.clone()));
+        vars
+    }
+
+    /// Collect dev_auth token mappings from the active file's @mode app blocks.
+    /// Returns Vec<(scope, extract_var_name)> for each token that needs fetching.
+    fn collect_dev_auth_mappings(&self) -> Vec<(String, Vec<String>)> {
+        let mut mappings: Vec<(String, Vec<String>)> = Vec::new();
+        if let Some(fi) = self.active_file_idx {
+            if let Some(file) = self.loaded_files.get(fi) {
+                for block in &file.suite.blocks {
+                    if block.mode.as_deref() == Some("app") {
+                        if let Some(ref scope) = block.dev_auth {
+                            let var_names: Vec<String> = block.extracts.iter()
+                                .map(|e| e.variable_name.clone())
+                                .collect();
+                            if !var_names.is_empty() {
+                                mappings.push((scope.clone(), var_names));
+                            }
+                        }
+                    }
+                }
             }
         }
-        vars
+        mappings
     }
 
     /// Get run_mode string for test runner based on dev_mode flag.
@@ -977,12 +996,29 @@ impl App {
 
         let fid = self.loaded_files[fi].id;
         let suite = self.loaded_files[fi].suite.clone();
-        let extra_vars = self.build_extra_vars();
+        let mut extra_vars = self.build_extra_vars();
         let run_mode = self.run_mode().map(|s| s.to_string());
+        let dev_auth_mappings = if self.dev_mode { self.collect_dev_auth_mappings() } else { Vec::new() };
         let tx = self.runner_tx.clone();
         let handler = Arc::new(TuiProgress::new(tx.clone()));
 
         tokio::spawn(async move {
+            // In dev mode, fetch tokens for each @dev_auth scope and inject as extra vars
+            if !dev_auth_mappings.is_empty() {
+                for (scope, var_names) in &dev_auth_mappings {
+                    // Strip .default suffix for az CLI --resource flag
+                    let resource = scope.trim_end_matches("/.default");
+                    let token_result = tokio::task::spawn_blocking({
+                        let resource = resource.to_string();
+                        move || request_pilot_core::azure_auth::fetch_token(&resource)
+                    }).await;
+                    if let Ok(Ok(token)) = token_result {
+                        for var in var_names {
+                            extra_vars.push((var.clone(), token.access_token.clone()));
+                        }
+                    }
+                }
+            }
             let results = request_pilot_core::test_runner::run_suite(
                 &suite, &extra_vars, Some(handler), run_mode.as_deref(),
             ).await;
@@ -1015,12 +1051,27 @@ impl App {
             self.run_start_time = Some(std::time::Instant::now());
             self.set_status(format!("Running: {}...", block_name));
 
-            let extra_vars = self.build_extra_vars();
+            let mut extra_vars = self.build_extra_vars();
             let run_mode = self.run_mode().map(|s| s.to_string());
+            let dev_auth_mappings = if self.dev_mode { self.collect_dev_auth_mappings() } else { Vec::new() };
             let tx = self.runner_tx.clone();
             let handler = Arc::new(TuiProgress::new(tx.clone()));
 
             tokio::spawn(async move {
+                if !dev_auth_mappings.is_empty() {
+                    for (scope, var_names) in &dev_auth_mappings {
+                        let resource = scope.trim_end_matches("/.default");
+                        let token_result = tokio::task::spawn_blocking({
+                            let resource = resource.to_string();
+                            move || request_pilot_core::azure_auth::fetch_token(&resource)
+                        }).await;
+                        if let Ok(Ok(token)) = token_result {
+                            for var in var_names {
+                                extra_vars.push((var.clone(), token.access_token.clone()));
+                            }
+                        }
+                    }
+                }
                 let single_results = request_pilot_core::test_runner::run_suite(
                     &single_suite, &extra_vars, Some(handler), run_mode.as_deref(),
                 ).await;
@@ -1092,13 +1143,28 @@ impl App {
             self.run_start_time = Some(std::time::Instant::now());
             self.set_status("Running group...".to_string());
 
-            let extra_vars = self.build_extra_vars();
+            let mut extra_vars = self.build_extra_vars();
             let run_mode = self.run_mode().map(|s| s.to_string());
+            let dev_auth_mappings = if self.dev_mode { self.collect_dev_auth_mappings() } else { Vec::new() };
             let tx = self.runner_tx.clone();
             let handler = Arc::new(TuiProgress::new(tx.clone()));
             let indices = block_indices;
 
             tokio::spawn(async move {
+                if !dev_auth_mappings.is_empty() {
+                    for (scope, var_names) in &dev_auth_mappings {
+                        let resource = scope.trim_end_matches("/.default");
+                        let token_result = tokio::task::spawn_blocking({
+                            let resource = resource.to_string();
+                            move || request_pilot_core::azure_auth::fetch_token(&resource)
+                        }).await;
+                        if let Ok(Ok(token)) = token_result {
+                            for var in var_names {
+                                extra_vars.push((var.clone(), token.access_token.clone()));
+                            }
+                        }
+                    }
+                }
                 let group_results = request_pilot_core::test_runner::run_suite(
                     &group_suite, &extra_vars, Some(handler), run_mode.as_deref(),
                 ).await;
