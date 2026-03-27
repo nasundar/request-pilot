@@ -207,12 +207,14 @@ pub fn render_azure_popup(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 pub fn render_otel_popup(frame: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_popup(area, 52, 16);
+    let popup = centered_popup(area, 52, 18);
     if popup.width < 10 || popup.height < 5 { return; }
     frame.render_widget(Clear, popup);
     let mut lines: Vec<Line<'_>> = Vec::new();
     lines.push(Line::from(Span::styled("OpenTelemetry Status", Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD))));
     lines.push(Line::from(""));
+
+    // Toggle status
     let (el, es) = if app.otel_enabled {
         ("Enabled", Style::default().fg(theme::GREEN()).add_modifier(Modifier::BOLD))
     } else {
@@ -222,6 +224,14 @@ pub fn render_otel_popup(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("  Status: ", Style::default().fg(theme::TEXT_DIM())),
         Span::styled(el, es),
     ]));
+
+    // Check if any loaded file has telemetry variables configured
+    let has_telem_vars = app.loaded_files.iter().any(|f| {
+        f.suite.variables.iter().any(|(k, v)| {
+            (k == "telemetry_traces_endpoint" || k == "telemetry_metrics_endpoint" || k == "telemetry_logs_endpoint") && !v.is_empty()
+        })
+    });
+
     if let Some(ref stats) = app.otel_stats {
         let max_ep = (popup.width as usize).saturating_sub(16);
         let display_ep = truncate_to(&stats.endpoint, max_ep);
@@ -244,14 +254,34 @@ pub fn render_otel_popup(frame: &mut Frame, app: &App, area: Rect) {
         ]));
         if !stats.errors.is_empty() {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(format!("  Errors: {}", stats.errors.len()), Style::default().fg(theme::RED()))));
+            lines.push(Line::from(Span::styled(
+                format!("  Errors: {}", stats.errors.len()),
+                Style::default().fg(theme::RED()),
+            )));
+            // Show first error truncated
+            let max_err = (popup.width as usize).saturating_sub(6);
+            let err_display = truncate_to(&stats.errors[0], max_err);
+            lines.push(Line::from(Span::styled(
+                format!("  {}", err_display),
+                Style::default().fg(theme::RED()),
+            )));
         }
+    } else if has_telem_vars {
+        lines.push(Line::from(vec![
+            Span::styled("  Config: ", Style::default().fg(theme::TEXT_DIM())),
+            Span::styled("Variables set — run tests to export", Style::default().fg(theme::YELLOW())),
+        ]));
     } else {
         lines.push(Line::from(vec![
-            Span::styled("  Endpoint: ", Style::default().fg(theme::TEXT_DIM())),
-            Span::styled("(not configured)", Style::default().fg(theme::TEXT_FAINT())),
+            Span::styled("  Config: ", Style::default().fg(theme::TEXT_DIM())),
+            Span::styled("Not configured", Style::default().fg(theme::TEXT_FAINT())),
         ]));
+        lines.push(Line::from(Span::styled(
+            "  Set telemetry_*_endpoint variables",
+            Style::default().fg(theme::TEXT_FAINT()),
+        )));
     }
+
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled(" Space", Style::default().fg(theme::PEACH())),

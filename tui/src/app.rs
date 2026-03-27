@@ -1252,8 +1252,17 @@ impl App {
         self.run_start_time = Some(std::time::Instant::now());
 
         let fid = self.loaded_files[fi].id;
-        let suite = self.loaded_files[fi].suite.clone();
+        let mut suite = self.loaded_files[fi].suite.clone();
+        let otel_on = self.otel_enabled;
+        // When OTEL is disabled, strip telemetry variables so runner skips init
+        if !otel_on {
+            suite.variables.retain(|(k, _)| !k.starts_with("telemetry_"));
+        }
         let mut extra_vars = self.build_extra_vars();
+        if otel_on {
+            let file_name = self.loaded_files[fi].name.clone();
+            extra_vars.push(("__telemetry_file".to_string(), file_name));
+        }
         let run_mode = self.run_mode().map(|s| s.to_string());
         let dev_auth_mappings = if self.dev_mode { self.collect_dev_auth_mappings() } else { Vec::new() };
         let tx = self.runner_tx.clone();
@@ -1285,19 +1294,24 @@ impl App {
     }
 
     fn spawn_single_block_run(&mut self, fi: usize, bi: usize) {
+        let otel_on = self.otel_enabled;
         let suite_data = self.loaded_files.get(fi).and_then(|file| {
             file.suite.blocks.get(bi).map(|block| {
+                let mut vars = file.suite.variables.clone();
+                if !otel_on {
+                    vars.retain(|(k, _)| !k.starts_with("telemetry_"));
+                }
                 let single_suite = TestSuite {
-                    variables: file.suite.variables.clone(),
+                    variables: vars,
                     blocks: vec![block.clone()],
                     ..Default::default()
                 };
                 let total_blocks = file.suite.blocks.len();
-                (single_suite, block.name.clone(), total_blocks, file.id)
+                (single_suite, block.name.clone(), total_blocks, file.id, file.name.clone())
             })
         });
 
-        if let Some((single_suite, block_name, total_blocks, fid)) = suite_data {
+        if let Some((single_suite, block_name, total_blocks, fid, file_name)) = suite_data {
             self.is_running = true;
             self.progress_current = 0;
             self.progress_total = 1;
@@ -1309,6 +1323,9 @@ impl App {
             self.set_status(format!("Running: {}...", block_name));
 
             let mut extra_vars = self.build_extra_vars();
+            if otel_on {
+                extra_vars.push(("__telemetry_file".to_string(), file_name));
+            }
             let run_mode = self.run_mode().map(|s| s.to_string());
             let dev_auth_mappings = if self.dev_mode { self.collect_dev_auth_mappings() } else { Vec::new() };
             let tx = self.runner_tx.clone();
@@ -1375,20 +1392,25 @@ impl App {
     }
 
     fn spawn_group_run(&mut self, fi: usize, block_indices: Vec<usize>) {
+        let otel_on = self.otel_enabled;
         let suite_data = self.loaded_files.get(fi).map(|file| {
             let blocks: Vec<_> = block_indices.iter()
                 .filter_map(|&bi| file.suite.blocks.get(bi).cloned())
                 .collect();
+            let mut vars = file.suite.variables.clone();
+            if !otel_on {
+                vars.retain(|(k, _)| !k.starts_with("telemetry_"));
+            }
             let group_suite = TestSuite {
-                variables: file.suite.variables.clone(),
+                variables: vars,
                 blocks,
                 ..Default::default()
             };
             let total_blocks = file.suite.blocks.len();
-            (group_suite, total_blocks, file.id)
+            (group_suite, total_blocks, file.id, file.name.clone())
         });
 
-        if let Some((group_suite, total_blocks, fid)) = suite_data {
+        if let Some((group_suite, total_blocks, fid, file_name)) = suite_data {
             if group_suite.blocks.is_empty() { return; }
             self.is_running = true;
             self.progress_current = 0;
@@ -1401,6 +1423,9 @@ impl App {
             self.set_status("Running group...".to_string());
 
             let mut extra_vars = self.build_extra_vars();
+            if otel_on {
+                extra_vars.push(("__telemetry_file".to_string(), file_name));
+            }
             let run_mode = self.run_mode().map(|s| s.to_string());
             let dev_auth_mappings = if self.dev_mode { self.collect_dev_auth_mappings() } else { Vec::new() };
             let tx = self.runner_tx.clone();
@@ -1524,6 +1549,10 @@ impl App {
 
                         if let Some(idx) = resolved_idx {
                             self.record_history(idx, &results);
+                            // Capture telemetry stats for OTEL popup
+                            if let Some(ref stats) = results.telemetry {
+                                self.otel_stats = Some(stats.clone());
+                            }
                             self.loaded_files[idx].results = Some(results);
 
                             if let Some(ref r) = self.loaded_files[idx].results {
