@@ -42,11 +42,25 @@ request-pilot/
 │       ├── app.js         # All application logic (~5200+ lines)
 │       └── styles.css     # All styles (~3600+ lines, dark IDE theme)
 │
-├── tui/                   # Terminal UI (ratatui + crossterm)
+├── tui/                   # Terminal UI (ratatui + crossterm, 113 tests)
 │   └── src/
-│       ├── main.rs, app.rs    # App state & event loop
-│       ├── events.rs          # Keyboard/terminal events
-│       └── ui.rs              # TUI rendering
+│       ├── main.rs            # CLI argument parsing (clap), terminal init
+│       ├── app.rs             # App struct (~1600 lines), state, run loop, runner messages
+│       ├── events.rs          # Keyboard event handling (~500 lines)
+│       ├── ui.rs              # Main draw function, top bar, splash screen, themes, progress
+│       ├── code_editor.rs     # Full-screen code editor with syntax highlighting
+│       ├── live_capture.rs    # WebSocket server for extension connector (port 9718)
+│       ├── toolbar.rs         # Popup overlays: extra headers, Azure, OTEL, live capture
+│       ├── tests.rs           # 113 unit tests
+│       └── components/
+│           ├── mod.rs
+│           ├── sidebar.rs     # File tree with groups, compare icons, auto-scroll
+│           ├── builder.rs     # Request builder + compare-aware step view
+│           ├── response.rs    # Response viewer with Body/Headers/Assertions + compare support
+│           ├── history.rs     # History mode with grouping, filters, detail overlay
+│           ├── diff_viewer.rs # Side-by-side diff with LCS algorithm
+│           ├── logs.rs        # Log viewer with level filters
+│           └── overlays.rs    # Help overlay content
 │
 ├── docs/                  # Documentation & samples
 │   ├── http-file-format.md    # .http format reference
@@ -141,6 +155,113 @@ Response display
 | `live-request` | CapturedRequest | Forwarded HTTP request from browser extension |
 | `live-connection-status` | String (`listening`, `connected`, `disconnected`, `stopped`) | WebSocket connection state changes |
 
+## Terminal UI — How It Works
+
+```
+┌────────────────────────────────────────────────────────┐
+│              TUI (ratatui + crossterm)                   │
+│  main.rs → App::new() → App::run() event loop           │
+│    ↕ 100ms poll tick    ↕ RunnerMessage mpsc channel     │
+│  events.rs (keys)     app.rs (state + async results)     │
+│    ↕ Mode/Focus       ↕ tokio::spawn                     │
+│  ui.rs → draw() dispatches by Mode to components/        │
+└────────────────────────────────────────────────────────┘
+```
+
+### App State
+
+The `App` struct (~1600 lines in `app.rs`) is the single source of truth for all TUI state. Key enums:
+
+| Enum | Purpose |
+|------|---------|
+| `Mode` | Top-level screen: `Normal`, `History`, `Logs`, `Editor`, `Diff` |
+| `Focus` | Active panel in Normal mode: `Sidebar`, `Builder`, `Response` |
+| `BuilderFocus` | Active field in the request builder: `Url`, `Method`, `Headers`, `Body`, etc. |
+
+State includes loaded files, selected block indices, response data, history entries, filter states, popup visibility flags, and all component-specific state.
+
+### Event Loop
+
+```
+main.rs: terminal init → App::run()
+  loop {
+    1. terminal.draw(|f| draw(f, &mut app))     // immediate-mode render
+    2. poll(Duration::from_millis(100))           // crossterm event poll
+    3. if key event → handle_key_event(&mut app)  // events.rs dispatch
+    4. while let Ok(msg) = runner_rx.try_recv()   // drain RunnerMessage channel
+         → app.handle_runner_message(msg)
+  }
+```
+
+The event loop runs on the tokio async runtime. Test execution and Azure auth run on background `tokio::spawn` tasks, sending results back via an `mpsc::UnboundedSender<RunnerMessage>` channel.
+
+### Rendering
+
+All rendering uses ratatui's immediate-mode approach — the entire screen is redrawn every frame. The top-level `draw()` function in `ui.rs`:
+
+1. Draws the **top bar** (file name, mode indicator, keybind hints)
+2. Dispatches to the active mode's renderer:
+   - `Normal` → sidebar + builder + response (3-panel layout)
+   - `History` → history list + detail overlay
+   - `Logs` → log viewer with level filters
+   - `Editor` → full-screen code editor
+   - `Diff` → side-by-side diff viewer
+3. Draws any active **popup overlays** (toolbar.rs) on top
+
+### Components
+
+Each file in `components/` owns rendering and key handling for its area:
+
+| Component | File | Responsibility |
+|-----------|------|---------------|
+| Sidebar | `sidebar.rs` | File tree with expandable groups, compare icons, status dots, auto-scroll to active block |
+| Builder | `builder.rs` | Request builder showing URL, method, headers, body; compare-aware step view during test runs |
+| Response | `response.rs` | Response viewer with Body/Headers/Assertions tabs; compare support for side-by-side results |
+| History | `history.rs` | History mode with date grouping, method/status/source filters, detail overlay |
+| Diff Viewer | `diff_viewer.rs` | Side-by-side diff with LCS algorithm, line-level change highlighting |
+| Logs | `logs.rs` | Log viewer with level filters (info, warn, error) |
+| Overlays | `overlays.rs` | Help overlay content and keybind reference |
+
+### IPC / Messages
+
+The `RunnerMessage` enum carries async results from background tasks to the event loop:
+
+| Variant | Purpose |
+|---------|---------|
+| `BlockStart { seq, name }` | A test block has started executing |
+| `BlockComplete { seq, name, status, time_ms, assertions, http_status, error }` | A test block finished (pass/fail/error) |
+| `SuiteComplete { file_idx, file_id, results }` | All blocks in a file finished; final results |
+| `AzureAuthResult { ... }` | Azure token fetch completed |
+| `AzureCliCheck { available }` | Azure CLI availability check result |
+| `LiveCaptureRequest(CapturedRequest)` | HTTP request received from browser extension |
+| `LiveCaptureStatus { connected }` | WebSocket connection state changed |
+
+### Extension Connector (Live Capture)
+
+`live_capture.rs` runs a WebSocket server on `127.0.0.1:9718` using tokio-tungstenite. A `LiveCaptureState` (wrapped in `Arc<Mutex<>>`) tracks the connection and capture mode. Incoming requests from the browser extension are deserialized and forwarded to the event loop as `RunnerMessage::LiveCaptureRequest`. The same protocol and port as the desktop app's live capture module.
+
+### Themes
+
+Three runtime-switchable color palettes (Dark, Light, Solarized) controlled by an `AtomicU8`. All colors are accessed through `theme::` functions (e.g., `theme::fg()`, `theme::accent()`, `theme::border()`), so components never hardcode colors. Users cycle themes with a keybind; the change takes effect on the next frame.
+
+### Code Editor
+
+`code_editor.rs` provides a full-screen text editor with:
+- Syntax highlighting for `.http` files (keywords, headers, JSON bodies)
+- Search (`Ctrl+F`) with match highlighting and navigation
+- Go-to-line (`Ctrl+G`)
+- Text selection, copy, cut, paste
+- Line numbers and scroll tracking
+
+### Test Runner Integration
+
+The TUI reuses `core::test_runner` for execution. When the user triggers a run:
+
+1. `app.rs` clones the parsed `TestSuite` and spawns a `tokio::spawn` task
+2. The task calls `run_suite_with_headers()`, streaming `BlockProgress` events
+3. Each progress event is mapped to a `RunnerMessage` and sent via the mpsc channel
+4. The event loop drains the channel, updating sidebar status dots and response data in real time
+
 ## Browser Extension — How It Works
 
 ```
@@ -192,6 +313,26 @@ The desktop app runs a WebSocket server on `127.0.0.1:9718` (module: `live_captu
 - `popup.js` for UI rendering, user interactions
 - `content-script-main.js` for response body interception
 - No build step — edit and reload extension
+
+### TUI Changes
+
+**Adding a new mode:**
+1. Add variant to `Mode` enum in `app.rs`
+2. Add key dispatch branch in `events.rs` (`handle_key_event` match on `app.mode`)
+3. Add render branch in `ui.rs` (`draw_main` match arm)
+4. Create component file in `components/` if needed
+
+**Adding a new popup/toolbar overlay:**
+1. Add visibility flag and state fields to `App` struct in `app.rs`
+2. Add render function in `toolbar.rs` (draws over main content)
+3. Add key handler function in `toolbar.rs`
+4. Wire `Ctrl+<key>` toggle in `events.rs`
+
+**Adding a new component:**
+1. Create file in `tui/src/components/`
+2. Add `pub mod` in `components/mod.rs`
+3. Add render function (`draw_<component>(f, area, app)`)
+4. Wire into `ui.rs` layout and `events.rs` key handling
 
 ## Performance Architecture
 
@@ -273,6 +414,7 @@ This keeps the main thread responsive during rendering.
 | Component | Framework | Count | Command |
 |-----------|-----------|-------|---------|
 | Core (Rust) | `cargo test` | 223 | `cargo test -p request-pilot-core` (from workspace root) |
+| TUI (Rust) | `cargo test` | 113 | `cargo test -p request-pilot-tui` (from workspace root) |
 | Perf (Rust unit) | `cargo test` | 62 | `cargo test -p request-pilot-desktop` (unit tests in perf.rs) |
 | Perf (Rust E2E) | `cargo test` | 22 | `cargo test -p request-pilot-desktop --test perf_e2e` |
 | Extension (JS) | Jest | 97 | `cd tests && npm test` |

@@ -317,39 +317,127 @@ cargo build -p request-pilot-tui
 # Run with .http files
 cargo run -p request-pilot-tui -- api.http
 
-# Multiple files + env
-cargo run -p request-pilot-tui -- api.http tests.http --env .env
+# Multiple files (repeatable -f flag)
+cargo run -p request-pilot-tui -- -f api.http -f tests.http
+
+# Load environment variables
+cargo run -p request-pilot-tui -- api.http --env .env
+# or short form
+cargo run -p request-pilot-tui -- api.http -e .env
 
 # Auto-run tests on startup
 cargo run -p request-pilot-tui -- api.http --run
 ```
 
+### Modes
+
+The TUI has **4 modes**, switched with the global keys below:
+
+| Mode | Key | Description |
+|------|-----|-------------|
+| **Files** | `f` | File tree sidebar + builder panel + response viewer (default) |
+| **Code** | `c` | Full-screen syntax-highlighted editor with search, goto line, selection |
+| **History** | `h` | Request history with 6 grouping modes, method/status filters, compare diff |
+| **Logs** | `l` | Application log viewer with level filters and auto-scroll |
+
+### Key Features
+
+| Feature | Description |
+|---|---|
+| **File Tree Sidebar** | Hierarchical files → groups → blocks with ⇄ icon for compare blocks, auto-scroll, expand/collapse |
+| **Builder Panel** | Method picker, URL bar, headers, body, assertions, extracts — with compare-aware view showing steps |
+| **Code Editor** | Full editing with syntax highlighting for all directives including `@compare`/`@step`/`@diff`, search (`/`), goto (`Ctrl+G`), selection (`Shift+Arrow`), cut/copy/paste |
+| **Response Viewer** | Body (JSON tree with expand/collapse), Headers, Assertions tabs — compare blocks show per-step results with diff summary |
+| **Diff Viewer** | Side-by-side and changes-only modes, character-level highlighting, `n`/`N` navigation between diffs |
+| **Test Runner** | Async execution with progress bar, spinner, live streaming — supports setup/test/teardown, `@group`/`@depends` |
+| **Variables Panel** | Sidebar tab (`V` to toggle) with add/edit/delete, `.env` file loading |
+| **History Mode** | 6 grouping modes (Flat, Domain, Status, Source, FileGroup), method/status filter popups, `Space` to select 2 entries + `d` for diff comparison |
+| **Extension Connector** | WebSocket bridge to browser extension (port 9718) — 3 modes: Off/All/Filtered, captured requests appear in sidebar as 📡 `live-capture.http` |
+| **OTEL Telemetry** | Toggle OTEL export, shows endpoint/stats in popup (`Ctrl+T`) |
+| **Azure Auth** | CLI-based token fetch, dev mode toggle, scope detection (`Ctrl+A`) |
+| **Extra Headers** | Global header injection with enable/disable per header (`Ctrl+H`) |
+| **3 Themes** | Cycle with `T` — Catppuccin Mocha, dark, and light palettes |
+| **Splash Screen** | Animated rocket launch with exhaust effects on startup |
+| **Focus Indication** | Subtle background highlight on the focused panel |
+
 ### Keybindings
+
+#### Global
 
 | Key | Action |
 |-----|--------|
-| `j`/`k` or `↑`/`↓` | Navigate / scroll |
-| `g` / `G` | Jump to top / bottom |
-| `Tab` | Cycle focus between panels |
-| `Enter` | Select / expand / view detail |
-| `r` | Run selected block / group / file |
-| `R` / `F5` | Run all tests |
-| `t` | Toggle block enabled / disabled |
-| `o` / `Ctrl+O` | Open .http file |
-| `Ctrl+E` | Load .env file |
-| `?` | Toggle help overlay |
 | `q` | Quit |
+| `?` | Toggle help overlay |
+| `f` | Files mode |
+| `h` | History mode |
+| `l` | Logs mode |
+| `c` | Code editor |
+| `T` | Cycle theme |
+| `V` | Toggle sidebar (Files ↔ Variables) |
+| `R` / `F5` | Run all tests |
+| `Tab` | Cycle focus between panels |
+| `Esc` | Navigate back one level |
 
-### Features
-| Feature | Description |
-|---|---|
-| **File Tree** | Hierarchical sidebar — files → groups → blocks with status icons |
-| **Code View** | Syntax-colored display of method, URL, headers, body, assertions, extracts |
-| **Response Viewer** | Body / Headers / Assertions sub-tabs with status badge and timing |
-| **Test Runner** | Async execution with live spinner + progress bar |
-| **Variables Panel** | Sorted list, extracted vars highlighted in purple |
-| **History Mode** | Stats panel, filter bar, scrollable entry list |
-| **Catppuccin Theme** | Warm Mocha-inspired color palette |
+#### File Operations
+
+| Key | Action |
+|-----|--------|
+| `o` / `Ctrl+O` | Open `.http` file |
+| `n` / `Ctrl+N` | New file |
+| `s` / `Ctrl+S` | Save file |
+| `x` | Close file |
+| `Ctrl+E` | Load `.env` file |
+
+#### Toolbar Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+H` | Extra headers popup |
+| `Ctrl+A` | Azure auth popup |
+| `Ctrl+T` | OTEL telemetry popup |
+| `Ctrl+L` | Extension connector popup |
+
+#### File Tree
+
+| Key | Action |
+|-----|--------|
+| `j`/`k` / `↑`/`↓` | Navigate |
+| `Enter` | Select block / expand file |
+| `Space` | Toggle expand |
+| `r` | Run selected |
+| `e` | Edit in code editor |
+| `t` | Toggle disabled |
+| `1-9` | Quick jump to file |
+
+#### Response
+
+| Key | Action |
+|-----|--------|
+| `b` / `H` / `a` | Body / Headers / Assertions tab |
+| `y` | Copy response body |
+| `D` | Open diff viewer (compare blocks) |
+| `Enter` | Expand/collapse JSON node |
+| `E` / `C` | Expand all / Collapse all |
+
+#### History
+
+| Key | Action |
+|-----|--------|
+| `g` | Cycle grouping mode |
+| `m` | Method filter popup |
+| `s` | Status filter popup |
+| `/` | URL search filter |
+| `Space` | Select for compare (max 2) |
+| `d` | Diff selected entries |
+| `Enter` | View detail overlay |
+
+#### Diff Viewer
+
+| Key | Action |
+|-----|--------|
+| `n` / `N` | Next / previous diff |
+| `m` | Toggle side-by-side / changes-only |
+| `Esc` / `q` | Close |
 
 ---
 

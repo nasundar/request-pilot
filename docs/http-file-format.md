@@ -76,6 +76,27 @@ timeout = 5000
 - Empty lines are ignored
 - Variable names are case-sensitive
 
+### Telemetry Directives
+
+File-level telemetry directives are placed **before** the `@variables` block. They configure automatic telemetry reporting for every request in the file.
+
+```http
+# @telemetry {{telemetry_endpoint}}
+# @telemetry_token {{telemetry_token}}
+# @telemetry_service my-api-service
+
+@variables
+telemetry_endpoint = https://telemetry.example.com/v1/traces
+telemetry_token = Bearer tel-secret-token
+base_url = https://api.example.com
+```
+
+| Directive | Description |
+|-----------|-------------|
+| `# @telemetry <variable_or_resource_id>` | Telemetry endpoint variable or resource ID for sending trace data |
+| `# @telemetry_token <token_variable>` | Bearer token variable used to authenticate with the telemetry endpoint |
+| `# @telemetry_service <service_name>` | Service name used for telemetry attribution (appears in traces/spans) |
+
 ---
 
 ## Block Types
@@ -295,6 +316,71 @@ GET {{base_url}}/report
 
 **Execution flow:** `create` group runs first → `validate` group runs after `create` completes → `Generate Report` runs after `validate` completes. Groups can depend on other groups, forming a nested execution chain.
 
+### `# @mode`
+
+Restricts a block to a specific execution mode. Blocks with `# @mode app` only run in normal (app) mode and are skipped in dev mode. Blocks with `# @mode dev` only run in dev mode and are skipped in normal mode.
+
+```http
+### @setup Fetch Token (App Mode)
+# @mode app
+POST https://login.microsoftonline.com/{{tenant_id}}/oauth2/v2.0/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope={{scope}}
+
+# @extract access_token = $.access_token
+
+### @setup Dev-Only Mock
+# @mode dev
+GET {{base_url}}/dev/mock-setup
+
+# @assert status == 200
+```
+
+### `# @dev_auth`
+
+Declares an Azure scope for user authentication on a `# @mode app` token-fetch block. When dev mode is active, the app-mode block is skipped and Request Pilot authenticates the user for the declared scope, injecting the token into the extracted variable automatically.
+
+```http
+### @setup Authenticate
+# @mode app
+# @dev_auth https://prometheus.monitor.azure.com/.default
+POST https://login.microsoftonline.com/{{tenant_id}}/oauth2/v2.0/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope={{scope}}
+
+# @extract access_token = $.access_token
+```
+
+In dev mode, this block is skipped entirely — instead, Request Pilot performs interactive user authentication for the `https://prometheus.monitor.azure.com/.default` scope and stores the resulting token in `{{access_token}}`.
+
+### `# @compare`
+
+Marks a test block as a multi-step comparison block. Must be combined with `# @step` directives. The block contains multiple named steps that execute sequentially, and their responses can be compared using `# @diff`.
+
+```http
+### @test Compare API Versions
+# @compare
+# @step v1
+# @step v2
+# @diff v1 v2
+```
+
+See the [Response Comparison](#response-comparison) section for a full example.
+
+### `# @step`
+
+Defines a named step within a `# @compare` block. Each step has its own HTTP request, assertions, and extracts. Steps execute sequentially within the block, and their responses are captured for comparison.
+
+**Syntax:** `# @step <name>`
+
+### `# @diff`
+
+Triggers a structured comparison between two named steps in a `# @compare` block. After the comparison runs, assertions using `$diff.*` paths evaluate the comparison result.
+
+**Syntax:** `# @diff <step_a> <step_b>`
+
 ---
 
 ## Variable Interpolation
@@ -365,6 +451,70 @@ body content here
 ```
 
 > **Important:** Section decoration comments between blocks (like `# ====` or `# Group: xxx`) must be placed **after** a `###` separator to avoid becoming part of the previous block's request body. Use an empty `###` line to start a comment-only separator block.
+
+---
+
+## Response Comparison
+
+A `# @compare` block lets you send requests to multiple endpoints (or versions) and structurally compare their responses. This is useful for verifying API compatibility, migration correctness, or A/B testing.
+
+### `$diff` Variable Paths
+
+After a `# @diff` directive executes, the comparison result is available through `$diff.*` paths in assertions:
+
+| Path | Type | Description |
+|------|------|-------------|
+| `$diff.match` | bool | `true` if both responses are identical |
+| `$diff.similarity` | float | Similarity score from `0.0` (completely different) to `1.0` (identical) |
+| `$diff.is_json` | bool | `true` if both responses are valid JSON |
+| `$diff.added_count` | int | Number of fields present in step B but not in step A |
+| `$diff.removed_count` | int | Number of fields present in step A but not in step B |
+| `$diff.changed_count` | int | Number of fields present in both but with different values |
+| `$diff.added_paths.length` | int | Length of the added paths array |
+| `$diff.removed_paths.length` | int | Length of the removed paths array |
+| `$diff.changed_paths.length` | int | Length of the changed paths array |
+| `$diff.changed_paths[N].path` | string | JSON path of the Nth changed field |
+| `$diff.changed_paths[N].left` | any | Value from step A for the Nth changed field |
+| `$diff.changed_paths[N].right` | any | Value from step B for the Nth changed field |
+
+### Full Comparison Example
+
+```http
+@variables
+base_url_v1 = https://api.example.com/v1
+base_url_v2 = https://api.example.com/v2
+auth_token = Bearer my-secret-token
+
+### @test Compare User API Versions
+# @description Validates that the v2 users endpoint returns the same data as v1
+# @compare
+
+# @step v1
+GET {{base_url_v1}}/users/42
+Authorization: {{auth_token}}
+
+# @assert status == 200
+# @extract v1_user = $.name
+
+# @step v2
+GET {{base_url_v2}}/users/42
+Authorization: {{auth_token}}
+
+# @assert status == 200
+# @extract v2_user = $.name
+
+# @diff v1 v2
+# @assert $diff.match == true
+# @assert $diff.similarity >= 0.95
+# @assert $diff.removed_count == 0
+# @assert $diff.changed_paths.length == 0
+```
+
+In this example:
+1. The `v1` step sends a request to the v1 API and asserts a `200` response.
+2. The `v2` step sends the same request to the v2 API.
+3. The `# @diff v1 v2` directive compares the two responses.
+4. Assertions on `$diff.*` paths verify that v2 returns identical data — no removed fields and no changed values.
 
 ---
 
