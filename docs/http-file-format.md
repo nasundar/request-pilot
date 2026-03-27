@@ -76,26 +76,30 @@ timeout = 5000
 - Empty lines are ignored
 - Variable names are case-sensitive
 
-### Telemetry Directives
+### Telemetry Variables
 
-File-level telemetry directives are placed **before** the `@variables` block. They configure automatic telemetry reporting for every request in the file.
+Telemetry is configured by setting well-known variables in the `@variables` block. If any endpoint variable is set, telemetry auto-enables.
 
 ```http
-# @telemetry {{telemetry_endpoint}}
-# @telemetry_token {{telemetry_token}}
-# @telemetry_service my-api-service
-
 @variables
-telemetry_endpoint = https://telemetry.example.com/v1/traces
-telemetry_token = Bearer tel-secret-token
+telemetry_traces_endpoint = https://otel-collector.example.com/v1/traces
+telemetry_metrics_endpoint = https://otel-collector.example.com/v1/metrics
+telemetry_logs_endpoint = https://otel-collector.example.com/v1/logs
+telemetry_token = my-bearer-token
+telemetry_service = my-api-e2e
 base_url = https://api.example.com
 ```
 
-| Directive | Description |
-|-----------|-------------|
-| `# @telemetry <variable_or_resource_id>` | Telemetry endpoint variable or resource ID for sending trace data |
-| `# @telemetry_token <token_variable>` | Bearer token variable used to authenticate with the telemetry endpoint |
-| `# @telemetry_service <service_name>` | Service name used for telemetry attribution (appears in traces/spans) |
+| Variable | Purpose | Required |
+|----------|---------|----------|
+| `telemetry_traces_endpoint` | Full OTLP traces URL | At least one endpoint needed |
+| `telemetry_metrics_endpoint` | Full OTLP metrics URL | At least one endpoint needed |
+| `telemetry_logs_endpoint` | Full OTLP logs URL | At least one endpoint needed |
+| `telemetry_token` | Bearer auth token | Optional |
+| `telemetry_api_key` | API key (sent as `x-ms-ikey`) | Optional (alternative to token) |
+| `telemetry_service` | OTEL `service.name` | Optional (defaults to filename) |
+
+Endpoints can also be extracted dynamically via `@setup` blocks (e.g., fetching OTLP endpoints from an ARM API response and extracting them into the well-known variables).
 
 ---
 

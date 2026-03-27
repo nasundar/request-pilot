@@ -138,19 +138,19 @@ The desktop app can connect to the Request Pilot browser extension via a local W
 
 Export traces, metrics, and logs from every test run to any OTLP-compatible backend — Azure Monitor Application Insights, Jaeger, Grafana Tempo, etc.
 
-**Setup:** Add file-level directives before `@variables`:
+**Setup:** Set well-known telemetry variables in your `@variables` block:
 ```http
-# @telemetry appinsights_resource_id
-# @telemetry_token arm_token
-# @telemetry_service my-api-e2e-tests
+@variables
+telemetry_traces_endpoint = https://otel-collector.example.com/v1/traces
+telemetry_metrics_endpoint = https://otel-collector.example.com/v1/metrics
+telemetry_logs_endpoint = https://otel-collector.example.com/v1/logs
+telemetry_token = my-bearer-token
+telemetry_service = my-api-e2e-tests
 ```
 
-The telemetry variable can be:
-- **App Insights resource ID (recommended):** `/subscriptions/{sub}/resourceGroups/{rg}/providers/microsoft.insights/components/{name}` — the system calls `https://management.azure.com{resource_id}?api-version=2025-01-23-preview` with the ARM token to fetch dedicated OTLP endpoints (`OTLPTracesEndpoint`, `OTLPMetricsEndpoint`, `OTLPLogsEndpoint`). Add `# @telemetry_token arm_token` to specify the Bearer token variable.
-- **Connection string (alternative):** `InstrumentationKey=xxx;IngestionEndpoint=https://eastus-1.in.applicationinsights.azure.com` — uses the legacy `x-ms-ikey` auth path
-- **Plain OTLP:** `https://my-otel-collector:4318`
+If any endpoint variable is set (non-empty), telemetry auto-enables. Endpoints can also be extracted dynamically via `@setup` steps (e.g., fetching OTLP endpoints from an ARM API response). Use `telemetry_token` for Bearer auth or `telemetry_api_key` for `x-ms-ikey` header.
 
-> **⚠ RBAC Prerequisite (Resource ID mode):** Your identity must have the **Monitoring Metrics Publisher** role on the Data Collection Rule (DCR) associated with the App Insights resource. This grants `Microsoft.Insights/Metrics/Write` and `Microsoft.Insights/Telemetry/Write` dataActions required by the OTLP ingestion endpoints. Without this, telemetry export will fail with 403. The DCR is at `properties.DataCollectionRuleResourceId` in the ARM response.
+> **⚠ RBAC Prerequisite (Azure Monitor):** Your identity must have the **Monitoring Metrics Publisher** role on the Data Collection Rule (DCR) associated with the App Insights resource. This grants `Microsoft.Insights/Metrics/Write` and `Microsoft.Insights/Telemetry/Write` dataActions required by the OTLP ingestion endpoints. Without this, telemetry export will fail with 403.
 
 **Signals exported per run:**
 

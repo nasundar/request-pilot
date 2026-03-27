@@ -494,6 +494,52 @@ async fn execute_compare_block(
     }
 }
 
+/// Check var_store for well-known telemetry variables and build a TelemetryCollector.
+fn try_init_telemetry(var_store: &VariableStore) -> Option<TelemetryCollector> {
+    let traces = var_store.get("telemetry_traces_endpoint").unwrap_or_default().to_string();
+    let metrics = var_store.get("telemetry_metrics_endpoint").unwrap_or_default().to_string();
+    let logs = var_store.get("telemetry_logs_endpoint").unwrap_or_default().to_string();
+
+    // Need at least one endpoint
+    if traces.is_empty() && metrics.is_empty() && logs.is_empty() {
+        return None;
+    }
+
+    let service_name = var_store
+        .get("telemetry_service")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "request-pilot".to_string());
+
+    let auth_header = if let Some(token) = var_store.get("telemetry_token") {
+        if !token.is_empty() {
+            Some(("Authorization".to_string(), format!("Bearer {}", token)))
+        } else {
+            None
+        }
+    } else if let Some(api_key) = var_store.get("telemetry_api_key") {
+        if !api_key.is_empty() {
+            Some(("x-ms-ikey".to_string(), api_key.to_string()))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let file_name = var_store.get("__telemetry_file").unwrap_or_default().to_string();
+    let display = if file_name.is_empty() { service_name.clone() } else { file_name };
+
+    let config = telemetry::TelemetryConfig {
+        traces_endpoint: traces,
+        metrics_endpoint: metrics,
+        logs_endpoint: logs,
+        auth_header,
+        service_name,
+    };
+
+    Some(telemetry::TelemetryCollector::new(config, &display))
+}
+
 /// Feed a completed block result into the telemetry collector.
 fn record_block_telemetry(
     telemetry: &mut Option<TelemetryCollector>,
@@ -717,76 +763,8 @@ async fn run_suite_inner(
     let mut var_store = VariableStore::from_pairs(&suite.variables);
     var_store.merge(extra_variables);
 
-    // ── Initialize telemetry if configured ──
-    let mut telemetry: Option<TelemetryCollector> = None;
-    if let Some(ref tvar) = suite.telemetry_var {
-        let telem_value = var_store.get(tvar).unwrap_or_default();
-        let service_name = suite
-            .telemetry_service
-            .clone()
-            .unwrap_or_else(|| "request-pilot".to_string());
-
-        let config = if let Some(mut cfg) = telemetry::parse_connection_string(&telem_value) {
-            // Connection string or plain OTLP URL — use directly
-            cfg.service_name = service_name;
-            Some(cfg)
-        } else if telem_value.starts_with("/subscriptions/") {
-            // ARM resource ID — fetch OTLP endpoints using ARM token,
-            // then use monitor-scoped token for ingestion
-            let arm_token = suite
-                .telemetry_token
-                .as_ref()
-                .and_then(|tv| {
-                    let v = var_store.get(tv).unwrap_or_default();
-                    if v.is_empty() { None } else { Some(v) }
-                });
-
-            // Monitor ingestion token — look for it in variable store
-            // Azure auth auto-adds https://monitor.azure.com/.default scope,
-            // and the token gets injected via extra_variables
-            let ingest_token = var_store.get("__monitor_token").unwrap_or_default();
-            let ingest_token = if ingest_token.is_empty() {
-                // Fallback: try the ARM token (works if user has right RBAC)
-                arm_token.clone()
-            } else {
-                Some(ingest_token)
-            };
-
-            match arm_token {
-                Some(t) => {
-                    match telemetry::fetch_otlp_endpoints(&telem_value, &t).await {
-                        Ok(mut cfg) => {
-                            cfg.service_name = service_name;
-                            // Override auth header with monitor-scoped token for ingestion
-                            if let Some(ref mt) = ingest_token {
-                                cfg.auth_header = Some((
-                                    "Authorization".to_string(),
-                                    format!("Bearer {}", mt),
-                                ));
-                            }
-                            Some(cfg)
-                        }
-                        Err(e) => {
-                            log::warn!("[telemetry] Failed to fetch OTLP endpoints: {}", e);
-                            None
-                        }
-                    }
-                }
-                None => {
-                    log::warn!("[telemetry] Resource ID provided but no telemetry_token variable resolved");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        if let Some(cfg) = config {
-            let file_name = var_store.get("__telemetry_file").unwrap_or_default();
-            let display_name = if file_name.is_empty() { tvar.as_str() } else { &file_name };
-            telemetry = Some(TelemetryCollector::new(cfg, &display_name));
-        }
-    }
+    // ── Initialize telemetry from well-known variables ──
+    let mut telemetry: Option<TelemetryCollector> = try_init_telemetry(&var_store);
 
     // Partition blocks by type (preserving file order)
     let mut setups: Vec<&TestBlock> = Vec::new();
@@ -845,6 +823,21 @@ async fn run_suite_inner(
         block_results.push(result);
         if setup_failed {
             break;
+        }
+    }
+
+    // ── Deferred telemetry init (endpoints may have been extracted during setup) ──
+    if telemetry.is_none() {
+        if let Some(t) = try_init_telemetry(&var_store) {
+            telemetry = Some(t);
+            if let Some(ref mut t) = telemetry {
+                t.suite_start(total_blocks);
+            }
+            // Retroactively record completed setup blocks
+            for (i, result) in block_results.iter().enumerate() {
+                let group = setups.get(i).and_then(|b| b.group.as_deref());
+                record_block_telemetry(&mut telemetry, result, group);
+            }
         }
     }
 

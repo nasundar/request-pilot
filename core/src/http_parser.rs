@@ -14,12 +14,6 @@ pub struct ParsedRequest {
 pub struct TestSuite {
     pub variables: Vec<(String, String)>,
     pub blocks: Vec<TestBlock>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub telemetry_var: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub telemetry_service: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub telemetry_token: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -102,30 +96,12 @@ pub fn parse(content: &str) -> Vec<ParsedRequest> {
 pub fn parse_test_suite(content: &str) -> TestSuite {
     let mut variables = Vec::new();
     let mut blocks = Vec::new();
-    let mut telemetry_var: Option<String> = None;
-    let mut telemetry_service: Option<String> = None;
-    let mut telemetry_token: Option<String> = None;
-
     let raw_blocks: Vec<&str> = content.split("###").collect();
 
-    for (chunk_idx, raw_block) in raw_blocks.iter().enumerate() {
+    for raw_block in raw_blocks.iter() {
         let block = raw_block.trim();
         if block.is_empty() {
             continue;
-        }
-
-        // The first chunk (before any ###) may contain file-level directives
-        if chunk_idx == 0 {
-            for line in block.lines() {
-                let trimmed = line.trim();
-                if let Some(rest) = trimmed.strip_prefix("# @telemetry_token ") {
-                    telemetry_token = Some(rest.trim().to_string());
-                } else if let Some(rest) = trimmed.strip_prefix("# @telemetry_service ") {
-                    telemetry_service = Some(rest.trim().to_string());
-                } else if let Some(rest) = trimmed.strip_prefix("# @telemetry ") {
-                    telemetry_var = Some(rest.trim().to_string());
-                }
-            }
         }
 
         // Check if block contains @variables anywhere (not just first line)
@@ -147,9 +123,6 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
     TestSuite {
         variables,
         blocks,
-        telemetry_var,
-        telemetry_service,
-        telemetry_token,
     }
 }
 
@@ -448,20 +421,6 @@ fn parse_extract_directive(text: &str) -> Option<Extract> {
 /// Generate .http file content from a TestSuite.
 pub fn generate_http_content(suite: &TestSuite) -> String {
     let mut output = String::new();
-
-    // File-level telemetry directives (before @variables)
-    if let Some(ref tv) = suite.telemetry_var {
-        output.push_str(&format!("# @telemetry {}\n", tv));
-    }
-    if let Some(ref ts) = suite.telemetry_service {
-        output.push_str(&format!("# @telemetry_service {}\n", ts));
-    }
-    if let Some(ref tt) = suite.telemetry_token {
-        output.push_str(&format!("# @telemetry_token {}\n", tt));
-    }
-    if suite.telemetry_var.is_some() || suite.telemetry_service.is_some() || suite.telemetry_token.is_some() {
-        output.push('\n');
-    }
 
     // Variables block
     if !suite.variables.is_empty() {
@@ -1877,17 +1836,15 @@ Authorization: Bearer {{token}}
     }
 
     #[test]
-    fn test_telemetry_directives_roundtrip() {
-        let input = "# @telemetry conn_str_var\n# @telemetry_service my-e2e\n# @telemetry_token arm_token\n\n@variables\nconn_str_var = test\narm_token = bearer123\n\n### @test Ping\nGET https://example.com\n\n# @assert status == 200\n";
+    fn test_telemetry_variables_parsed() {
+        let input = "@variables\ntelemetry_traces_endpoint = https://example.com/v1/traces\ntelemetry_metrics_endpoint = https://example.com/v1/metrics\ntelemetry_logs_endpoint = https://example.com/v1/logs\ntelemetry_token = my-token\ntelemetry_service = my-e2e\n\n### @test Ping\nGET https://example.com\n\n# @assert status == 200\n";
         let suite = parse_test_suite(input);
-        assert_eq!(suite.telemetry_var.as_deref(), Some("conn_str_var"));
-        assert_eq!(suite.telemetry_service.as_deref(), Some("my-e2e"));
-        assert_eq!(suite.telemetry_token.as_deref(), Some("arm_token"));
-
-        let output = generate_http_content(&suite);
-        assert!(output.contains("# @telemetry conn_str_var"));
-        assert!(output.contains("# @telemetry_service my-e2e"));
-        assert!(output.contains("# @telemetry_token arm_token"));
+        // Telemetry endpoints are regular variables
+        assert!(suite.variables.iter().any(|(k, v)| k == "telemetry_traces_endpoint" && v == "https://example.com/v1/traces"));
+        assert!(suite.variables.iter().any(|(k, v)| k == "telemetry_metrics_endpoint" && v == "https://example.com/v1/metrics"));
+        assert!(suite.variables.iter().any(|(k, v)| k == "telemetry_logs_endpoint" && v == "https://example.com/v1/logs"));
+        assert!(suite.variables.iter().any(|(k, v)| k == "telemetry_token" && v == "my-token"));
+        assert!(suite.variables.iter().any(|(k, v)| k == "telemetry_service" && v == "my-e2e"));
     }
 
     // ── @compare block parsing ───────────────────────

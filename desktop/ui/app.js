@@ -84,7 +84,7 @@ let azCliAvailable = false;
 // States: 'off' | 'configured' | 'sending' | 'active' | 'error'
 let telemetryState = 'off';
 let telemetryStats = []; // [{file, endpoint, traces, metrics, logs, errors, time_ms}]
-let telemetryEnabled = true; // user toggle — when false, skip OTEL export even if configured
+let telemetryEnabled = false; // user toggle — when false, skip OTEL export even if configured
 
 // --- Live Capture ---
 let liveCaptureMode = 'off';
@@ -766,9 +766,6 @@ function getEnabledSuite(fileIdx) {
   return {
     variables: file.suite.variables,
     blocks: enabledBlocks,
-    telemetry_var: file.suite.telemetry_var || null,
-    telemetry_service: file.suite.telemetry_service || null,
-    telemetry_token: file.suite.telemetry_token || null,
   };
 }
 
@@ -2704,17 +2701,6 @@ async function runAllTests() {
     if (monitorCached && Date.now() < monitorCached.expiresAt - 60000) {
       azureExtraVars.push(['__monitor_token', monitorCached.token]);
     }
-
-    // Inject ARM token into telemetry_token variable for files with resource ID telemetry
-    const armCached = azureTokenCache.get('https://management.azure.com/.default');
-    if (armCached && Date.now() < armCached.expiresAt - 60000) {
-      for (const f of loadedFiles) {
-        const tokenVar = f.suite.telemetry_token;
-        if (tokenVar) {
-          azureExtraVars.push([tokenVar, armCached.token]);
-        }
-      }
-    }
   }
 
   // Reset results
@@ -2764,11 +2750,16 @@ async function runAllTests() {
       if (!suite || suite.blocks.length === 0) continue;
       try {
         const fileExtraVars = [...collectVariablesArray(), ...azureExtraVars];
-        if (file.suite.telemetry_var && telemetryEnabled) {
+        // When telemetry is disabled, strip telemetry endpoint variables so runner skips init
+        let suiteCopy = suite;
+        if (!telemetryEnabled) {
+          suiteCopy = {
+            ...suite,
+            variables: suite.variables.filter(([k]) => !k.startsWith('telemetry_')),
+          };
+        } else {
           fileExtraVars.push(['__telemetry_file', file.name]);
         }
-        // Strip telemetry fields when disabled so Rust runner skips telemetry init
-        const suiteCopy = telemetryEnabled ? suite : { ...suite, telemetry_var: null, telemetry_token: null, telemetry_service: null };
         const results = await invoke('run_test_suite', {
           suite: suiteCopy,
           extraVariables: fileExtraVars,
@@ -6894,24 +6885,7 @@ function detectAzureAuthNeeded() {
     }
   }
 
-  // Auto-add monitor ingestion scope if any file uses telemetry with a resource ID
-  for (const f of loadedFiles) {
-    if (f.suite.telemetry_var) {
-      // Check if the variable looks like a resource ID (will need monitor token for OTLP)
-      const tVal = f.suite.variables?.find(([k]) => k === f.suite.telemetry_var)?.[1] || '';
-      if (tVal.startsWith('/subscriptions/') || f.suite.telemetry_token) {
-        scopes.add('https://monitor.azure.com/.default');
-        break;
-      }
-    }
-  }
-  
   azureAuthScopes = [...scopes]; // Store needed scopes
-  
-  // Log if monitor scope was auto-added for telemetry
-  if (azureAuthScopes.includes('https://monitor.azure.com/.default')) {
-    rpLog('info', 'Azure auth: monitor.azure.com scope auto-added for OTEL ingestion');
-  }
 
   if (azureAuthScopes.length === 0) {
     setAzureAuthState('off');
@@ -7378,10 +7352,11 @@ function detectTelemetryConfig() {
   let hasTelemetry = false;
   let telemetryFiles = [];
   for (const f of loadedFiles) {
-    if (f.suite.telemetry_var) {
-      hasTelemetry = true;
-      telemetryFiles.push(f.name);
-    } else if (f.content && /^#\s*@telemetry\s+\S/m.test(f.content)) {
+    const vars = f.suite.variables || [];
+    const hasEndpoint = vars.some(([k, v]) =>
+      (k === 'telemetry_traces_endpoint' || k === 'telemetry_metrics_endpoint' || k === 'telemetry_logs_endpoint') && v
+    );
+    if (hasEndpoint) {
       hasTelemetry = true;
       telemetryFiles.push(f.name);
     }
@@ -7392,7 +7367,6 @@ function detectTelemetryConfig() {
     if (telemetryState === 'off') {
       setTelemetryState('configured');
       rpLog('info', `OTEL telemetry configured`, { files: telemetryFiles });
-      // Check if Azure auth already has monitor token (e.g. auth happened before file load)
       updateTelemetryAuthState();
     }
   } else {
@@ -7490,27 +7464,30 @@ function renderTelemetryTooltip() {
     html += '<div class="tt-row"><span class="tt-key">Status</span><span class="tt-val" style="color:var(--text-muted);">Paused — toggle to resume</span></div>';
   } else if (telemetryState === 'configured') {
     const hasAzureAuth = azureAuthState === 'authenticated';
-    const statusText = hasAzureAuth ? 'Configured — awaiting monitor.azure.com token' : 'Configured — awaiting Azure auth';
+    const statusText = hasAzureAuth ? 'Configured — ready to export' : 'Configured — awaiting test run';
     html += '<div class="tt-row"><span class="tt-key">Status</span><span class="tt-val">' + statusText + '</span></div>';
     // Show which files have telemetry
-    const telFiles = loadedFiles.filter(f => f.suite.telemetry_var);
+    const telFiles = loadedFiles.filter(f => {
+      const vars = f.suite.variables || [];
+      return vars.some(([k, v]) => (k === 'telemetry_traces_endpoint' || k === 'telemetry_metrics_endpoint' || k === 'telemetry_logs_endpoint') && v);
+    });
     if (telFiles.length > 0) {
       html += '<div class="tt-section"><div class="tt-section-title">Configured Files</div>';
       for (const f of telFiles) {
-        const varName = f.suite.telemetry_var;
-        const varVal = f.suite.variables?.find(([k]) => k === varName)?.[1] || '(empty)';
-        const display = varVal.length > 50 ? varVal.slice(0, 40) + '…' : varVal;
-        html += '<div class="tt-row"><span class="tt-key">' + escHtml(f.name) + '</span><span class="tt-val" title="' + escHtml(varVal) + '">' + escHtml(display) + '</span></div>';
+        const vars = f.suite.variables || [];
+        const trEndpoint = vars.find(([k]) => k === 'telemetry_traces_endpoint')?.[1] || '';
+        const display = trEndpoint.length > 50 ? trEndpoint.slice(0, 40) + '…' : (trEndpoint || '(endpoints configured)');
+        html += '<div class="tt-row"><span class="tt-key">' + escHtml(f.name) + '</span><span class="tt-val" title="' + escHtml(trEndpoint) + '">' + escHtml(display) + '</span></div>';
       }
       html += '</div>';
     }
-    const nextStep = hasAzureAuth
-      ? 'Re-authenticate to include monitor.azure.com scope'
-      : 'Click Azure Auth — monitor.azure.com scope will be auto-added';
-    html += '<div class="tt-section"><div class="tt-section-title">Next Step</div><div style="color: var(--text-muted); font-size: 11px;">' + nextStep + '</div></div>';
+    html += '<div class="tt-section"><div class="tt-section-title">Next Step</div><div style="color: var(--text-muted); font-size: 11px;">Run tests — telemetry will be exported automatically</div></div>';
   } else if (telemetryState === 'ready') {
     html += '<div class="tt-row"><span class="tt-key">Status</span><span class="tt-val success">Ready — authenticated</span></div>';
-    const telFiles = loadedFiles.filter(f => f.suite.telemetry_var);
+    const telFiles = loadedFiles.filter(f => {
+      const vars = f.suite.variables || [];
+      return vars.some(([k, v]) => (k === 'telemetry_traces_endpoint' || k === 'telemetry_metrics_endpoint' || k === 'telemetry_logs_endpoint') && v);
+    });
     if (telFiles.length > 0) {
       html += '<div class="tt-section"><div class="tt-section-title">Files</div>';
       for (const f of telFiles) {
