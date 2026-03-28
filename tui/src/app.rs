@@ -330,6 +330,10 @@ pub struct App {
     pub diff_viewer_open: bool,
     pub diff_viewer_data: Option<DiffViewerData>,
 
+    // Inspector popup state
+    pub inspect_open: bool,
+    pub inspect_scroll: u16,
+
     // Builder state
     pub builder_focus: BuilderFocus,
     pub builder_url_cursor: usize,
@@ -486,6 +490,8 @@ impl App {
             history_detail_content_height: 0,
             diff_viewer_open: false,
             diff_viewer_data: None,
+            inspect_open: false,
+            inspect_scroll: 0,
             builder_focus: BuilderFocus::Method,
             builder_url_cursor: 0,
             builder_body_scroll: 0,

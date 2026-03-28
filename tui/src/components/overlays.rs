@@ -46,6 +46,7 @@ pub fn render_help_popup(frame: &mut Frame, area: Rect) {
         Line::from(vec![Span::styled("r             ", kb), Span::styled("Run selected (block/group/file)", Style::default().fg(theme::TEXT()))]),
         Line::from(vec![Span::styled("R             ", kb), Span::styled("Run all tests", Style::default().fg(theme::TEXT()))]),
         Line::from(vec![Span::styled("t             ", kb), Span::styled("Toggle block enabled/disabled", Style::default().fg(theme::TEXT()))]),
+        Line::from(vec![Span::styled("i             ", kb), Span::styled("Inspect details (file/group/block)", Style::default().fg(theme::TEXT()))]),
         Line::from(""),
         Line::from(Span::styled("\u{2500}\u{2500} Variables \u{2500}\u{2500}", dim)),
         Line::from(vec![Span::styled("V             ", kb), Span::styled("Toggle sidebar tab (files/vars)", Style::default().fg(theme::TEXT()))]),

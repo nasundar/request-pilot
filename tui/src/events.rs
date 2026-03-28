@@ -37,6 +37,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // 3b. Inspector overlay
+    if components::inspector::handle_inspector_keys(app, key) { return; }
+
     // 4. Toolbar popup key consumption
     if toolbar::handle_extra_headers_keys(app, key) { return; }
     if toolbar::handle_azure_keys(app, key) { return; }

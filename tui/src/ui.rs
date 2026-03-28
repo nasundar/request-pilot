@@ -458,6 +458,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
         components::diff_viewer::render_diff_overlay(frame, app, frame.area());
     }
 
+    // Inspector overlay
+    if app.inspect_open {
+        components::inspector::render_inspector(frame, app, frame.area());
+    }
+
     // Toolbar popup overlays
     if app.extra_headers_open {
         toolbar::render_extra_headers_popup(frame, app, frame.area());

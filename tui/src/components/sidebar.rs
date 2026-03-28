@@ -255,6 +255,10 @@ pub fn handle_file_tree_keys(app: &mut App, key: KeyEvent) {
                 buffer: String::new(),
             };
         }
+        KeyCode::Char('i') => {
+            app.inspect_open = true;
+            app.inspect_scroll = 0;
+        }
         KeyCode::Char('n') => {
             app.new_file();
         }
