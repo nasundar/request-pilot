@@ -984,7 +984,7 @@ fn get_keyhints(app: &App) -> String {
                 if app.sidebar_tab == SidebarTab::Variables {
                     " ↑↓=nav  a=add  e=edit  d=delete  V=files  q=quit ".to_string()
                 } else {
-                    " ↑↓=nav  Enter=select  e=code  o=open  r=run  R=RunAll  Ctrl+T=OTEL  Ctrl+A=Azure  Ctrl+L=Ext  q=quit ".to_string()
+                    " ↑↓=nav  Enter=select  e=code  i=inspect  o=open  r=run  R=RunAll  Ctrl+T=OTEL  Ctrl+A=Azure  Ctrl+L=Ext  q=quit ".to_string()
                 }
             }
             Focus::Variables => " ↑↓=nav  a=add  e=edit  d=delete  V=files  q=quit ".to_string(),
