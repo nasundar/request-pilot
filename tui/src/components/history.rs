@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::BTreeMap;
@@ -286,6 +286,7 @@ fn render_history_filter(frame: &mut Frame, app: &App, area: Rect) {
     let style = if app.filter_text.is_empty() { Style::default().fg(theme::TEXT_FAINT()) } else { Style::default().fg(theme::TEXT()) };
     frame.render_widget(Paragraph::new(Span::styled(text, style)).block(block), area);
 }
+
 fn render_history_list(frame: &mut Frame, app: &App, area: Rect, entries: &[&HistoryEntry]) {
     let border_style = if app.focus == Focus::HistoryList { Style::default().fg(theme::BLUE()) } else { Style::default().fg(theme::TEXT_FAINT()) };
     let ci = if !app.history_selected_seqs.is_empty() { format!(" ({}/2 selected)", app.history_selected_seqs.len()) } else { String::new() };
@@ -334,7 +335,9 @@ fn render_history_list(frame: &mut Frame, app: &App, area: Rect, entries: &[&His
             }
         }
     }).collect();
-    frame.render_widget(List::new(items).block(block), area);
+    let list = List::new(items).block(block);
+    let mut state = ListState::default().with_selected(Some(app.history_cursor));
+    StatefulWidget::render(list, area, frame.buffer_mut(), &mut state);
 }
 
 fn render_filter_popup(frame: &mut Frame, area: Rect, popup: &HistoryPopup) {
