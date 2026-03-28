@@ -8,6 +8,7 @@ use ratatui::{
 use crossterm::event::{KeyCode, KeyEvent};
 use crate::app::{App, TreeNode};
 use crate::ui::theme;
+use request_pilot_core::history::HistoryEntry;
 
 /// Build detail lines for whatever tree node is currently selected.
 fn build_inspect_lines(app: &App) -> (String, Vec<Line<'static>>) {
@@ -124,6 +125,12 @@ fn build_file_detail(app: &App, fi: usize) -> (String, Vec<Line<'static>>) {
         ]));
     }
 
+    // History
+    let hist_entries: Vec<&HistoryEntry> = app.history.entries.iter()
+        .filter(|e| e.file_name.as_deref() == Some(&file.name))
+        .collect();
+    lines.extend(build_history_lines(&hist_entries, 8));
+
     (title, lines)
 }
 
@@ -218,6 +225,17 @@ fn build_group_detail(app: &App, fi: usize, group_name: &str) -> (String, Vec<Li
                 Span::styled(format!("{}ms total", total_ms), dim),
             ]));
         }
+    }
+
+    // History for this group
+    let hist_entries: Vec<&HistoryEntry> = app.history.entries.iter()
+        .filter(|e| {
+            e.file_name.as_deref() == Some(&file.name)
+                && e.group.as_deref() == Some(group_name)
+        })
+        .collect();
+    if !hist_entries.is_empty() {
+        lines.extend(build_history_lines(&hist_entries, 6));
     }
 
     (title, lines)
@@ -431,7 +449,107 @@ fn build_block_detail(app: &App, fi: usize, bi: usize) -> (String, Vec<Line<'sta
         }
     }
 
+    // History for this block
+    let block_name = if block.name.is_empty() { None } else { Some(block.name.as_str()) };
+    let hist_entries: Vec<&HistoryEntry> = app.history.entries.iter()
+        .filter(|e| {
+            e.file_name.as_deref() == Some(&file.name)
+                && e.block_name.as_deref() == block_name
+        })
+        .collect();
+    lines.extend(build_history_lines(&hist_entries, 6));
+
     (title, lines)
+}
+
+/// Build run history lines from matching history entries.
+fn build_history_lines(entries: &[&HistoryEntry], max_rows: usize) -> Vec<Line<'static>> {
+    let h = Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(theme::TEXT_DIM());
+    let mut lines = Vec::new();
+
+    if entries.is_empty() {
+        return lines;
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("  Run History", h)));
+
+    // Aggregate by run_id to show per-run summaries
+    let mut runs: Vec<RunSummary> = Vec::new();
+    let mut current_run: Option<RunSummary> = None;
+
+    for entry in entries.iter().rev() {
+        let rid = entry.run_id.clone().unwrap_or_default();
+        match &mut current_run {
+            Some(run) if run.run_id == rid => {
+                run.total += 1;
+                if entry.status >= 200 && entry.status < 400 { run.passed += 1; }
+                else { run.failed += 1; }
+                run.total_ms += entry.response_time_ms;
+            }
+            _ => {
+                if let Some(run) = current_run.take() {
+                    runs.push(run);
+                }
+                let passed = if entry.status >= 200 && entry.status < 400 { 1 } else { 0 };
+                current_run = Some(RunSummary {
+                    run_id: rid,
+                    timestamp: entry.timestamp.clone(),
+                    total: 1,
+                    passed,
+                    failed: 1 - passed,
+                    total_ms: entry.response_time_ms,
+                });
+            }
+        }
+    }
+    if let Some(run) = current_run {
+        runs.push(run);
+    }
+
+    // Show most recent runs first
+    runs.reverse();
+
+    let shown = runs.len().min(max_rows);
+    for run in &runs[..shown] {
+        let ts = if run.timestamp.len() >= 19 { &run.timestamp[..19] } else { &run.timestamp };
+        let pass_rate = if run.total > 0 { (run.passed as f64 / run.total as f64 * 100.0) as u32 } else { 0 };
+        let rate_color = if pass_rate == 100 { theme::GREEN() }
+            else if pass_rate >= 50 { theme::YELLOW() }
+            else { theme::RED() };
+
+        // Build a mini bar: ▓ for passed, ░ for failed
+        let bar_width = 10usize;
+        let filled = if run.total > 0 { (run.passed * bar_width / run.total).max(if run.passed > 0 { 1 } else { 0 }) } else { 0 };
+        let empty = bar_width - filled;
+        let bar = format!("{}{}", "▓".repeat(filled), "░".repeat(empty));
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {} ", ts), dim),
+            Span::styled(bar, Style::default().fg(rate_color)),
+            Span::styled(format!(" {}%", pass_rate), Style::default().fg(rate_color)),
+            Span::styled(format!("  ✓{} ✗{}", run.passed, run.failed), dim),
+            Span::styled(format!("  {}ms", run.total_ms), Style::default().fg(theme::TEXT_FAINT())),
+        ]));
+    }
+    if runs.len() > shown {
+        lines.push(Line::from(Span::styled(
+            format!("  … and {} more runs", runs.len() - shown),
+            Style::default().fg(theme::TEXT_FAINT()),
+        )));
+    }
+
+    lines
+}
+
+struct RunSummary {
+    run_id: String,
+    timestamp: String,
+    total: usize,
+    passed: usize,
+    failed: usize,
+    total_ms: u64,
 }
 
 /// Render the inspector popup overlay.
