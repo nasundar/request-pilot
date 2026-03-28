@@ -638,6 +638,7 @@ impl App {
                             response_size_bytes: resp.size_bytes,
                             timestamp: request_pilot_core::chrono::Utc::now()
                                 .to_rfc3339(),
+                            result_status: br.status.clone(),
                         };
                         self.history.add(entry);
                     }
@@ -664,6 +665,7 @@ impl App {
                     response_size_bytes: resp.size_bytes,
                     timestamp: request_pilot_core::chrono::Utc::now()
                         .to_rfc3339(),
+                    result_status: br.status.clone(),
                 };
                 self.history.add(entry);
             }
@@ -924,6 +926,7 @@ impl App {
             response_time_ms: req.duration.unwrap_or(0),
             response_size_bytes: req.response_body.as_ref().map(|b| b.len()).unwrap_or(0),
             timestamp: request_pilot_core::chrono::Utc::now().to_rfc3339(),
+            result_status: String::new(),
         };
         self.history.add(entry);
 

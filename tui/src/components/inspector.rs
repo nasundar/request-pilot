@@ -481,10 +481,16 @@ fn build_history_lines(entries: &[&HistoryEntry], max_rows: usize) -> Vec<Line<'
 
     for entry in entries.iter().rev() {
         let rid = entry.run_id.clone().unwrap_or_default();
+        let is_passed = if !entry.result_status.is_empty() {
+            entry.result_status == "passed"
+        } else {
+            // Fallback for legacy entries without result_status: use HTTP status
+            entry.status >= 200 && entry.status < 400
+        };
         match &mut current_run {
             Some(run) if run.run_id == rid => {
                 run.total += 1;
-                if entry.status >= 200 && entry.status < 400 { run.passed += 1; }
+                if is_passed { run.passed += 1; }
                 else { run.failed += 1; }
                 run.total_ms += entry.response_time_ms;
             }
@@ -492,13 +498,12 @@ fn build_history_lines(entries: &[&HistoryEntry], max_rows: usize) -> Vec<Line<'
                 if let Some(run) = current_run.take() {
                     runs.push(run);
                 }
-                let passed = if entry.status >= 200 && entry.status < 400 { 1 } else { 0 };
                 current_run = Some(RunSummary {
                     run_id: rid,
                     timestamp: entry.timestamp.clone(),
                     total: 1,
-                    passed,
-                    failed: 1 - passed,
+                    passed: if is_passed { 1 } else { 0 },
+                    failed: if is_passed { 0 } else { 1 },
                     total_ms: entry.response_time_ms,
                 });
             }

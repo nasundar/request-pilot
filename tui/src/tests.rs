@@ -160,6 +160,7 @@ GET https://example.com/third
             response_time_ms: seq * 100,
             response_size_bytes: 100 + seq as usize,
             timestamp: format!("2024-01-0{}T12:00:0{}Z", seq, seq),
+            result_status: String::new(),
         }
     }
 

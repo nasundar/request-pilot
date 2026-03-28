@@ -40,6 +40,9 @@ pub struct HistoryEntry {
     pub response_time_ms: u64,
     pub response_size_bytes: usize,
     pub timestamp: String,
+    /// Test result status: "passed", "failed", "skipped", "error". Empty for non-test entries (e.g. live capture).
+    #[serde(default)]
+    pub result_status: String,
 }
 
 /// In-memory store of HTTP request history entries.
@@ -215,6 +218,7 @@ mod tests {
             response_time_ms: 50,
             response_size_bytes: 0,
             timestamp: "2024-01-01T00:00:00Z".to_string(),
+            result_status: String::new(),
         }
     }
 
@@ -287,6 +291,7 @@ mod tests {
             response_time_ms: 150,
             response_size_bytes: 8,
             timestamp: "2024-06-15T12:00:00Z".to_string(),
+            result_status: String::new(),
         };
         store.add(entry);
         let stored = &store.entries[0];
@@ -352,6 +357,7 @@ mod tests {
             response_time_ms: 50,
             response_size_bytes: 100,
             timestamp: "2024-01-01T00:00:00Z".to_string(),
+            result_status: String::new(),
         }
     }
 
@@ -541,6 +547,7 @@ mod tests {
             response_time_ms: 50,
             response_size_bytes: 100,
             timestamp: "2024-01-01T00:00:00Z".to_string(),
+            result_status: String::new(),
         }
     }
 
@@ -762,6 +769,7 @@ mod tests {
             response_time_ms: 50,
             response_size_bytes: 20,
             timestamp: "2024-06-15T12:00:00Z".to_string(),
+            result_status: String::new(),
         }
     }
 
