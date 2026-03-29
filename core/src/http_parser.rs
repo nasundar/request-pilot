@@ -14,6 +14,9 @@ pub struct ParsedRequest {
 pub struct TestSuite {
     pub variables: Vec<(String, String)>,
     pub blocks: Vec<TestBlock>,
+    /// File-level auto-run interval (e.g. "15m", "1h"). Parsed from `# @auto_run`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_run: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -96,6 +99,7 @@ pub fn parse(content: &str) -> Vec<ParsedRequest> {
 pub fn parse_test_suite(content: &str) -> TestSuite {
     let mut variables = Vec::new();
     let mut blocks = Vec::new();
+    let mut auto_run: Option<String> = None;
     let raw_blocks: Vec<&str> = content.split("###").collect();
 
     for raw_block in raw_blocks.iter() {
@@ -111,7 +115,40 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
             .any(|l| l.trim().starts_with("@variables"));
 
         if has_variables {
+            // Scan for file-level directives in this block (before/around @variables)
+            for line in block.lines() {
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix("# @auto_run ") {
+                    let interval = rest.trim();
+                    if crate::duration::parse_duration_secs(interval).is_some() {
+                        auto_run = Some(interval.to_string());
+                    }
+                }
+            }
             parse_variables_block(block, &mut variables);
+            continue;
+        }
+
+        // Also check pure-comment header blocks (no @variables, no HTTP method)
+        // for file-level directives like # @auto_run
+        let is_header_block = auto_run.is_none()
+            && blocks.is_empty()
+            && block.lines().all(|l| {
+                let t = l.trim();
+                t.is_empty() || t.starts_with('#')
+            });
+
+        if is_header_block {
+            for line in block.lines() {
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix("# @auto_run ") {
+                    let interval = rest.trim();
+                    if crate::duration::parse_duration_secs(interval).is_some() {
+                        auto_run = Some(interval.to_string());
+                    }
+                }
+            }
+            // Don't skip — there may be no test blocks in this header
             continue;
         }
 
@@ -123,6 +160,7 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
     TestSuite {
         variables,
         blocks,
+        auto_run,
     }
 }
 
@@ -422,8 +460,16 @@ fn parse_extract_directive(text: &str) -> Option<Extract> {
 pub fn generate_http_content(suite: &TestSuite) -> String {
     let mut output = String::new();
 
+    // File-level auto_run directive
+    if let Some(ref interval) = suite.auto_run {
+        output.push_str(&format!("# @auto_run {}\n", interval));
+    }
+
     // Variables block
     if !suite.variables.is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
         output.push_str("@variables\n");
         for (name, value) in &suite.variables {
             output.push_str(&format!("{} = {}\n", name, value));
@@ -2249,5 +2295,106 @@ Content-Type: application/json
             assert_eq!(d1.step_a, d2.step_a);
             assert_eq!(d1.step_b, d2.step_b);
         }
+    }
+
+    // ── Auto-run directive tests ─────────────────────────────────────
+
+    #[test]
+    fn parse_auto_run_in_variables_block() {
+        let input = "\
+# @auto_run 15m
+@variables
+base_url = https://example.com
+
+### @test Health
+GET {{base_url}}/health
+# @assert status == 200";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.auto_run, Some("15m".to_string()));
+        assert_eq!(suite.variables.len(), 1);
+        assert_eq!(suite.blocks.len(), 1);
+    }
+
+    #[test]
+    fn parse_auto_run_in_comment_header() {
+        let input = "\
+# ============================================================
+# Health Check — E2E Tests
+# @auto_run 1h
+# ============================================================
+
+### @test Health
+GET https://example.com/health
+# @assert status == 200";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.auto_run, Some("1h".to_string()));
+    }
+
+    #[test]
+    fn parse_auto_run_with_all_units() {
+        for (interval, _) in &[("30s", 30), ("5m", 300), ("2h", 7200), ("1d", 86400)] {
+            let input = format!("# @auto_run {}\n@variables\nx = 1\n\n### @test T\nGET http://x", interval);
+            let suite = parse_test_suite(&input);
+            assert_eq!(suite.auto_run, Some(interval.to_string()));
+        }
+    }
+
+    #[test]
+    fn parse_auto_run_missing() {
+        let input = "\
+@variables
+base_url = https://example.com
+
+### @test Health
+GET {{base_url}}/health";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.auto_run, None);
+    }
+
+    #[test]
+    fn parse_auto_run_invalid_ignored() {
+        let input = "\
+# @auto_run invalid
+@variables
+x = 1
+
+### @test T
+GET http://x";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.auto_run, None);
+    }
+
+    #[test]
+    fn generate_preserves_auto_run() {
+        let input = "\
+# @auto_run 15m
+@variables
+base_url = https://example.com
+
+### @test Health
+GET {{base_url}}/health
+# @assert status == 200";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.auto_run, Some("15m".to_string()));
+
+        let output = generate_http_content(&suite);
+        assert!(output.starts_with("# @auto_run 15m\n"));
+
+        // Round-trip: re-parse should preserve auto_run
+        let suite2 = parse_test_suite(&output);
+        assert_eq!(suite2.auto_run, Some("15m".to_string()));
+    }
+
+    #[test]
+    fn generate_without_auto_run() {
+        let input = "\
+@variables
+x = 1
+
+### @test T
+GET http://x";
+        let suite = parse_test_suite(input);
+        let output = generate_http_content(&suite);
+        assert!(!output.contains("@auto_run"));
     }
 }

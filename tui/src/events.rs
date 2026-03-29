@@ -76,6 +76,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     if components::var_detail::handle_var_detail_keys(app, key) { return; }
 
     // 4. Toolbar popup key consumption
+    if toolbar::handle_auto_run_keys(app, key) { return; }
     if toolbar::handle_extra_headers_keys(app, key) { return; }
     if toolbar::handle_azure_keys(app, key) { return; }
     if toolbar::handle_otel_keys(app, key) { return; }

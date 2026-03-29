@@ -1,5 +1,6 @@
 pub mod assertions;
 pub mod azure_auth;
+pub mod duration;
 pub mod env_file;
 pub mod history;
 pub mod http_client;

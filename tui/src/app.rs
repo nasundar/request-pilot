@@ -367,6 +367,12 @@ pub struct App {
     // Selection state for code editor (line, col)
     pub editor_selection_anchor: Option<(usize, usize)>,
 
+    // Auto-run state
+    pub auto_run_interval: Option<String>,
+    pub auto_run_next_due: Option<std::time::Instant>,
+    pub auto_run_popup_open: bool,
+    pub auto_run_popup_cursor: usize,
+
     // Channel receiver (set up in run())
     runner_rx: Option<mpsc::UnboundedReceiver<RunnerMessage>>,
     runner_tx: mpsc::UnboundedSender<RunnerMessage>,
@@ -519,6 +525,10 @@ impl App {
             editor_goto_active: false,
             editor_goto_buffer: String::new(),
             editor_selection_anchor: None,
+            auto_run_interval: None,
+            auto_run_next_due: None,
+            auto_run_popup_open: false,
+            auto_run_popup_cursor: 0,
             runner_rx: Some(rx),
             runner_tx: tx,
             next_file_id: 0,
@@ -579,6 +589,17 @@ impl App {
             self.active_file_idx = Some(0);
             self.active_block_idx = Some(0);
         }
+
+        // Initialize auto-run from file directive if present
+        if let Some(ref interval) = self.loaded_files.last().unwrap().suite.auto_run {
+            if self.auto_run_interval.is_none() {
+                self.auto_run_interval = Some(interval.clone());
+                if let Some(secs) = request_pilot_core::duration::parse_duration_secs(interval) {
+                    self.auto_run_next_due = Some(std::time::Instant::now() + std::time::Duration::from_secs(secs));
+                }
+            }
+        }
+
         self.set_status(format!("Loaded: {}", path.display()));
         Ok(())
     }
@@ -586,6 +607,12 @@ impl App {
     pub fn queue_run_all(&mut self) {
         if !self.is_running {
             self.run_queued = true;
+            // Reset auto-run timer to avoid immediate re-trigger after manual run
+            if let Some(ref interval) = self.auto_run_interval {
+                if let Some(secs) = request_pilot_core::duration::parse_duration_secs(interval) {
+                    self.auto_run_next_due = Some(std::time::Instant::now() + std::time::Duration::from_secs(secs));
+                }
+            }
         }
     }
 
@@ -603,6 +630,41 @@ impl App {
 
     pub fn set_status(&mut self, msg: String) {
         self.status_message = Some((msg, std::time::Instant::now()));
+    }
+
+    /// Set or clear auto-run interval. Updates timer accordingly.
+    pub fn set_auto_run(&mut self, interval: Option<String>) {
+        self.auto_run_interval = interval.clone();
+        if let Some(ref iv) = interval {
+            if let Some(secs) = request_pilot_core::duration::parse_duration_secs(iv) {
+                self.auto_run_next_due = Some(std::time::Instant::now() + std::time::Duration::from_secs(secs));
+                self.set_status(format!("Auto-run: every {}", iv));
+            } else {
+                self.auto_run_next_due = None;
+                self.auto_run_interval = None;
+                self.set_status("Auto-run: invalid interval".to_string());
+            }
+        } else {
+            self.auto_run_next_due = None;
+            self.set_status("Auto-run: off".to_string());
+        }
+    }
+
+    /// Recompute auto-run from loaded files. Uses first file with `auto_run` directive.
+    /// Clears auto-run if no loaded file declares it (unless user set it via UI popup).
+    fn recompute_auto_run(&mut self) {
+        // Check if any remaining file has auto_run
+        let file_interval = self.loaded_files.iter()
+            .find_map(|f| f.suite.auto_run.clone());
+        if file_interval.is_some() {
+            if self.auto_run_interval != file_interval {
+                self.set_auto_run(file_interval);
+            }
+        } else {
+            // No file declares auto_run — clear it
+            self.auto_run_interval = None;
+            self.auto_run_next_due = None;
+        }
     }
 
     /// Reset scroll positions when switching blocks.
@@ -1009,6 +1071,8 @@ impl App {
                 }
                 self.tree_cursor = self.tree_cursor.min(self.tree_nodes.len().saturating_sub(1));
             }
+            // Recompute auto-run from remaining files
+            self.recompute_auto_run();
             self.set_status("File closed".to_string());
         }
     }
@@ -1587,6 +1651,13 @@ impl App {
                         self.progress_current = 0;
                         self.progress_total = 0;
                         self.run_start_time = None;
+
+                        // Reset auto-run timer for next cycle
+                        if let Some(ref interval) = self.auto_run_interval {
+                            if let Some(secs) = request_pilot_core::duration::parse_duration_secs(interval) {
+                                self.auto_run_next_due = Some(std::time::Instant::now() + std::time::Duration::from_secs(secs));
+                            }
+                        }
                     }
                     RunnerMessage::AzureAuthResult(result) => {
                         self.azure_loading = false;
@@ -1644,6 +1715,15 @@ impl App {
             if let Some((fi, indices)) = self.run_group_queued.take() {
                 if !self.is_running {
                     self.spawn_group_run(fi, indices);
+                }
+            }
+
+            // Auto-run timer check
+            if let Some(due) = self.auto_run_next_due {
+                if !self.is_running && std::time::Instant::now() >= due {
+                    self.auto_run_next_due = None; // will be reset on SuiteComplete
+                    self.queue_run_all();
+                    self.set_status("Auto-run triggered".to_string());
                 }
             }
 

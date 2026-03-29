@@ -481,6 +481,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.live_capture_popup_open {
         toolbar::render_live_capture_popup(frame, app, frame.area());
     }
+    if app.auto_run_popup_open {
+        toolbar::render_auto_run_popup(frame, app, frame.area());
+    }
 }
 
 fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {

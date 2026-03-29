@@ -79,6 +79,7 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 # @extract var_name = $.json.path     — save response value for later blocks
 # @mode app|dev                    — restrict to app mode or dev mode (mutually exclusive auth)
 # @dev_auth <scope>               — Azure scope for user auth (used with @mode app)
+# @auto_run <interval>            — file-level: auto-re-run tests at interval (e.g. 15m, 1h, 1d)
 # @compare                            — enable multi-step comparison mode
 # @step <name>                        — define a named request step
 # @diff <step_a> <step_b>             — compare responses of two steps
@@ -743,6 +744,7 @@ access_token =
 - **Use `# @dev_auth <scope>` on `@mode app` token-fetch blocks** — specifies the Azure scope for user auth. When the user authenticates via device code flow, the app fetches a user token with this scope and injects it into the block's `@extract` variable.
 - **Add telemetry variables for E2E observability** — when the test file should export OTEL telemetry (traces, metrics, logs), set `telemetry_traces_endpoint`, `telemetry_metrics_endpoint`, and/or `telemetry_logs_endpoint` variables. These can be set directly in `@variables` or extracted via `@setup` steps (e.g., fetching OTLP endpoints from ARM). Use `telemetry_token` for Bearer auth or `telemetry_api_key` for `x-ms-ikey`. Optionally set `telemetry_service` to customize the `service.name` resource attribute (defaults to filename).
 - **Use `# @compare` for API migration and comparison scenarios** — when the code change involves versioned endpoints, A/B testing, or endpoint migration, generate a `@compare` test block with `# @step` for each endpoint and `# @diff` to assert response parity. Use `$diff.match`, `$diff.similarity`, and `$diff.changed_count` assertions to validate equivalence (see Pattern 10).
+- **Use `# @auto_run <interval>` for continuous monitoring** — add as a file-level directive (before `@variables`) when tests should auto-repeat. Valid intervals: `30s`, `1m`, `5m`, `15m`, `1h`, `2h`, `4h`, `1d`. Both TUI and desktop show a toolbar control; the directive sets the default. Example: `# @auto_run 15m`
 - **Comments explain non-obvious logic** — especially complex assertions or why a specific test exists
 - **Always start with a Test Plan header comment** — a structured comment block listing all test scenarios, grouped by type and group name, with prerequisites and assertion summary (see Pattern 7)
 - **Section decoration comments MUST be placed AFTER `###`, not before**— the parser splits the file at `###` boundaries, so any comments between blocks that appear before the next `###` become part of the previous block's request body. Put section headers, group labels, and decorative separators immediately after a `###` line:

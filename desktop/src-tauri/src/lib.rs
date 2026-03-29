@@ -71,6 +71,11 @@ fn parse_test_file(content: String) -> Result<http_parser::TestSuite, String> {
 }
 
 #[tauri::command]
+fn parse_duration(interval: String) -> Result<Option<u64>, String> {
+    Ok(request_pilot_core::duration::parse_duration_secs(&interval))
+}
+
+#[tauri::command]
 fn generate_http(suite: http_parser::TestSuite) -> Result<String, String> {
     Ok(http_parser::generate_http_content(&suite))
 }
@@ -459,6 +464,7 @@ pub fn run() {
             send_request,
             parse_http_file,
             parse_test_file,
+            parse_duration,
             generate_http,
             run_test_suite,
             resolve_variables,

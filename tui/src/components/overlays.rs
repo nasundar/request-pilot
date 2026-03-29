@@ -89,6 +89,7 @@ pub fn render_help_popup(frame: &mut Frame, area: Rect, scroll: u16) {
         Line::from(vec![Span::styled("e             ", kb), Span::styled("Export history", Style::default().fg(theme::TEXT()))]),
         Line::from(""),
         Line::from(Span::styled("\u{2500}\u{2500} Toolbar (Ctrl+) \u{2500}\u{2500}", dim)),
+        Line::from(vec![Span::styled("Ctrl+R        ", kb), Span::styled("Auto-run interval", Style::default().fg(theme::TEXT()))]),
         Line::from(vec![Span::styled("Ctrl+T        ", kb), Span::styled("OTEL telemetry popup", Style::default().fg(theme::TEXT()))]),
         Line::from(vec![Span::styled("Ctrl+A        ", kb), Span::styled("Azure auth popup", Style::default().fg(theme::TEXT()))]),
         Line::from(vec![Span::styled("Ctrl+L        ", kb), Span::styled("Extension connector", Style::default().fg(theme::TEXT()))]),

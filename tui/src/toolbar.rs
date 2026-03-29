@@ -46,6 +46,25 @@ pub fn toolbar_badges(app: &App) -> Vec<Span<'static>> {
     if app.dev_mode {
         spans.push(Span::styled(" DEV ", Style::default().fg(theme::BG_DARK()).bg(theme::PEACH()).add_modifier(Modifier::BOLD)));
     }
+    // Auto-run badge with countdown
+    if let Some(ref interval) = app.auto_run_interval {
+        let label = if let Some(due) = app.auto_run_next_due {
+            let remaining = due.saturating_duration_since(std::time::Instant::now()).as_secs();
+            if remaining > 0 {
+                format!(" \u{23f2} {} ({}) ", interval, request_pilot_core::duration::format_countdown(remaining))
+            } else {
+                format!(" \u{23f2} {} ... ", interval)
+            }
+        } else if app.is_running {
+            format!(" \u{23f2} {} \u{25b6} ", interval)
+        } else {
+            format!(" \u{23f2} {} ", interval)
+        };
+        spans.push(Span::styled(
+            label,
+            Style::default().fg(theme::BG_DARK()).bg(theme::SKY()).add_modifier(Modifier::BOLD),
+        ));
+    }
     spans
 }
 
@@ -588,9 +607,125 @@ pub fn handle_toolbar_shortcuts(app: &mut App, key: KeyEvent) -> bool {
                 app.extra_headers_open = false;
                 app.azure_popup_open = false;
                 app.otel_popup_open = false;
+                app.auto_run_popup_open = false;
+            }
+            true
+        }
+        KeyCode::Char('r') => {
+            app.auto_run_popup_open = !app.auto_run_popup_open;
+            if app.auto_run_popup_open {
+                app.extra_headers_open = false;
+                app.azure_popup_open = false;
+                app.otel_popup_open = false;
+                app.live_capture_popup_open = false;
+                // Position cursor on current interval
+                let current = app.auto_run_interval.as_deref().unwrap_or("None");
+                app.auto_run_popup_cursor = AUTO_RUN_OPTIONS.iter()
+                    .position(|(label, _)| *label == current)
+                    .unwrap_or(0);
             }
             true
         }
         _ => false,
+    }
+}
+
+/// Auto-run interval options shown in the popup.
+const AUTO_RUN_OPTIONS: &[(&str, &str)] = &[
+    ("None", "Disable auto-run"),
+    ("30s", "Every 30 seconds"),
+    ("1m", "Every 1 minute"),
+    ("5m", "Every 5 minutes"),
+    ("15m", "Every 15 minutes"),
+    ("1h", "Every 1 hour"),
+    ("2h", "Every 2 hours"),
+    ("4h", "Every 4 hours"),
+    ("1d", "Every 1 day"),
+];
+
+pub fn render_auto_run_popup(frame: &mut Frame, app: &App, area: Rect) {
+    if !app.auto_run_popup_open { return; }
+    let popup = centered_popup(area, 44, (AUTO_RUN_OPTIONS.len() as u16) + 6);
+    if popup.width < 10 || popup.height < 5 { return; }
+    frame.render_widget(Clear, popup);
+
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "Auto-Run Interval",
+        Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    let current = app.auto_run_interval.as_deref().unwrap_or("None");
+
+    for (i, (label, desc)) in AUTO_RUN_OPTIONS.iter().enumerate() {
+        let is_selected = i == app.auto_run_popup_cursor;
+        let is_active = *label == current || (*label == "None" && current == "None");
+
+        let marker = if is_selected { "\u{25b6} " } else { "  " };
+        let active_badge = if is_active { " \u{2713}" } else { "" };
+
+        let style = if is_selected {
+            Style::default().fg(theme::BG_DARK()).bg(theme::BLUE()).add_modifier(Modifier::BOLD)
+        } else if is_active {
+            Style::default().fg(theme::GREEN())
+        } else {
+            Style::default().fg(theme::TEXT())
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("{}{:<8}", marker, label), style),
+            Span::styled(format!("  {}{}", desc, active_badge), if is_selected {
+                Style::default().fg(theme::BG_DARK()).bg(theme::BLUE())
+            } else {
+                Style::default().fg(theme::TEXT_FAINT())
+            }),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " \u{2191}\u{2193}=select  Enter=apply  Esc=close ",
+        Style::default().fg(theme::TEXT_FAINT()),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BLUE()))
+        .title(Span::styled(" \u{23f2} Auto-Run ", Style::default().fg(theme::SKY()).add_modifier(Modifier::BOLD)));
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, popup);
+}
+
+pub fn handle_auto_run_keys(app: &mut App, key: KeyEvent) -> bool {
+    if !app.auto_run_popup_open { return false; }
+    match key.code {
+        KeyCode::Esc => {
+            app.auto_run_popup_open = false;
+            true
+        }
+        KeyCode::Up => {
+            if app.auto_run_popup_cursor > 0 {
+                app.auto_run_popup_cursor -= 1;
+            }
+            true
+        }
+        KeyCode::Down => {
+            if app.auto_run_popup_cursor < AUTO_RUN_OPTIONS.len() - 1 {
+                app.auto_run_popup_cursor += 1;
+            }
+            true
+        }
+        KeyCode::Enter => {
+            let (label, _) = AUTO_RUN_OPTIONS[app.auto_run_popup_cursor];
+            if label == "None" {
+                app.set_auto_run(None);
+            } else {
+                app.set_auto_run(Some(label.to_string()));
+            }
+            app.auto_run_popup_open = false;
+            true
+        }
+        _ => true, // consume all keys while popup is open
     }
 }

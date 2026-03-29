@@ -97,6 +97,12 @@ let liveCaptureSessionId = null;
 let zoomLevel = parseInt(localStorage.getItem('rp-zoom') || '100', 10);
 const ZOOM_MIN = 50, ZOOM_MAX = 200, ZOOM_STEP = 10;
 
+// --- Auto-Run ---
+let autoRunInterval = '';        // '' = off, '5m', '15m', etc.
+let autoRunTimerId = null;       // setInterval handle
+let autoRunNextDue = null;       // Date when next run is due
+let autoRunCountdownId = null;   // countdown display interval
+
 function applyZoom() {
   // Zoom on <html> so everything scales uniformly including the viewport.
   document.documentElement.style.zoom = `${zoomLevel}%`;
@@ -114,6 +120,94 @@ function applyZoom() {
 function zoomIn() { if (zoomLevel < ZOOM_MAX) { zoomLevel += ZOOM_STEP; applyZoom(); } }
 function zoomOut() { if (zoomLevel > ZOOM_MIN) { zoomLevel -= ZOOM_STEP; applyZoom(); } }
 function zoomReset() { zoomLevel = 100; applyZoom(); }
+
+// --- Auto-Run ---
+function parseDurationMs(s) {
+  if (!s) return null;
+  const match = s.match(/^(\d+)(s|m|h|d)$/);
+  if (!match) return null;
+  const n = parseInt(match[1], 10);
+  const unit = match[2];
+  if (n <= 0) return null;
+  const multipliers = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+  return n * multipliers[unit];
+}
+
+function setAutoRun(interval) {
+  // Clear existing timers
+  if (autoRunTimerId) { clearInterval(autoRunTimerId); autoRunTimerId = null; }
+  if (autoRunCountdownId) { clearInterval(autoRunCountdownId); autoRunCountdownId = null; }
+  autoRunInterval = interval || '';
+  autoRunNextDue = null;
+
+  const countdownEl = document.getElementById('autoRunCountdown');
+  const selectEl = document.getElementById('autoRunSelect');
+  if (selectEl) selectEl.value = autoRunInterval;
+
+  if (!interval) {
+    if (countdownEl) countdownEl.textContent = '';
+    rpLog('info', 'Auto-run disabled');
+    return;
+  }
+
+  const ms = parseDurationMs(interval);
+  if (!ms) {
+    if (countdownEl) countdownEl.textContent = '';
+    rpLog('warn', 'Invalid auto-run interval', { interval });
+    return;
+  }
+
+  autoRunNextDue = Date.now() + ms;
+  rpLog('info', `Auto-run enabled: every ${interval}`, { ms });
+
+  autoRunTimerId = setInterval(() => {
+    if (isRunning) {
+      // Reschedule — don't overlap with running tests
+      autoRunNextDue = Date.now() + ms;
+      return;
+    }
+    rpLog('info', 'Auto-run triggered');
+    runAllTests();
+    autoRunNextDue = Date.now() + ms;
+  }, ms);
+
+  // Countdown display (updates every second)
+  autoRunCountdownId = setInterval(() => {
+    if (!autoRunNextDue || !countdownEl) return;
+    const remaining = Math.max(0, Math.ceil((autoRunNextDue - Date.now()) / 1000));
+    if (remaining >= 3600) {
+      const h = Math.floor(remaining / 3600);
+      const m = Math.floor((remaining % 3600) / 60);
+      const s = remaining % 60;
+      countdownEl.textContent = `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    } else {
+      const m = Math.floor(remaining / 60);
+      const s = remaining % 60;
+      countdownEl.textContent = `${m}:${String(s).padStart(2,'0')}`;
+    }
+  }, 1000);
+}
+
+function resetAutoRunTimer() {
+  // Reset timer after manual run
+  if (autoRunInterval) {
+    const ms = parseDurationMs(autoRunInterval);
+    if (ms) autoRunNextDue = Date.now() + ms;
+  }
+}
+
+function recomputeAutoRun() {
+  // Recompute auto-run from remaining loaded files
+  const fileInterval = loadedFiles.find(f => f.suite && f.suite.auto_run);
+  if (fileInterval) {
+    if (autoRunInterval !== fileInterval.suite.auto_run) {
+      setAutoRun(fileInterval.suite.auto_run);
+    }
+  } else if (autoRunInterval) {
+    // No file declares auto_run — clear it
+    setAutoRun('');
+  }
+}
 
 // --- Theme ---
 function initTheme() {
@@ -1450,6 +1544,11 @@ async function loadFile(file) {
     detectTelemetryConfig();
     detectAzureAuthNeeded();
 
+    // Initialize auto-run from file directive if not already set
+    if (!autoRunInterval && suite.auto_run) {
+      setAutoRun(suite.auto_run);
+    }
+
     // Populate envVars from .http file variable values (non-placeholders)
     if (suite.variables) {
       suite.variables.forEach(([name, value]) => {
@@ -2366,6 +2465,9 @@ function closeFile(fileIdx) {
   renderFileTree();
   renderEnvVars();
   detectAzureAuthNeeded();
+
+  // Recompute auto-run from remaining files
+  recomputeAutoRun();
 }
 
 // --- Block Selection ---
@@ -2648,6 +2750,9 @@ async function runAllTests() {
     return;
   }
 
+  // Reset auto-run timer on manual trigger
+  resetAutoRunTimer();
+
   if (loadedFiles.length === 0) {
     showToast('No files loaded', 'info');
     return;
@@ -2870,6 +2975,13 @@ async function runAllTests() {
 
 runAllBtn.addEventListener('click', runAllTests);
 
+// Auto-run dropdown
+const autoRunSelect = document.getElementById('autoRunSelect');
+if (autoRunSelect) {
+  autoRunSelect.addEventListener('change', () => {
+    setAutoRun(autoRunSelect.value);
+  });
+}
 // --- Run Single Block ---
 async function runSingleBlock(fileIdx, blockIdx) {
   const file = loadedFiles[fileIdx];

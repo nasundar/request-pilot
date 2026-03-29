@@ -359,6 +359,31 @@ grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_sec
 
 In dev mode, this block is skipped entirely — instead, Request Pilot performs interactive user authentication for the `https://prometheus.monitor.azure.com/.default` scope and stores the resulting token in `{{access_token}}`.
 
+### `# @auto_run`
+
+File-level directive that configures automatic test re-execution at a fixed interval. Place it in the file header (before `@variables` or any `###` block).
+
+**Syntax:** `# @auto_run <interval>`
+
+**Valid intervals:** `30s`, `1m`, `5m`, `15m`, `1h`, `2h`, `4h`, `1d`, or any `<number><s|m|h|d>` combination.
+
+```http
+# @auto_run 15m
+@variables
+base_url = https://api.example.com
+
+### @test Health Check
+GET {{base_url}}/health
+# @assert status == 200
+```
+
+**Behavior:**
+- Tests automatically re-run every 15 minutes after the previous run completes
+- If a run is already in progress when the timer fires, the cycle is skipped and rescheduled
+- Manual runs reset the timer to avoid immediate re-triggers
+- Both TUI (`Ctrl+R` popup) and desktop (dropdown) allow overriding the interval at runtime
+- Runtime overrides are ephemeral — they don't modify the file unless explicitly saved
+
 ### `# @compare`
 
 Marks a test block as a multi-step comparison block. Must be combined with `# @step` directives. The block contains multiple named steps that execute sequentially, and their responses can be compared using `# @diff`.
