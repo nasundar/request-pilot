@@ -380,6 +380,12 @@ pub fn handle_variables_keys(app: &mut App, key: KeyEvent) {
                 buffer: String::new(),
             };
         }
+        KeyCode::Enter | KeyCode::Char('i') => {
+            if var_count > 0 {
+                app.var_detail_open = true;
+                app.var_detail_scroll = 0;
+            }
+        }
         KeyCode::Char('e') => {
             let names = app.get_sorted_var_names();
             if let Some(name) = names.get(app.vars_cursor) {

@@ -463,6 +463,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
         components::inspector::render_inspector(frame, app, frame.area());
     }
 
+    // Variable detail overlay
+    if app.var_detail_open {
+        components::var_detail::render_var_detail(frame, app, frame.area());
+    }
+
     // Toolbar popup overlays
     if app.extra_headers_open {
         toolbar::render_extra_headers_popup(frame, app, frame.area());
@@ -982,12 +987,12 @@ fn get_keyhints(app: &App) -> String {
         Mode::Files => match app.focus {
             Focus::FileTree | Focus::CodeView => {
                 if app.sidebar_tab == SidebarTab::Variables {
-                    " ↑↓=nav  a=add  e=edit  d=delete  V=files  q=quit ".to_string()
+                    " ↑↓=nav  Enter/i=inspect  a=add  e=edit  d=delete  V=files  q=quit ".to_string()
                 } else {
                     " ↑↓=nav  Enter=select  e=code  i=inspect  o=open  r=run  R=RunAll  Ctrl+T=OTEL  Ctrl+A=Azure  Ctrl+L=Ext  q=quit ".to_string()
                 }
             }
-            Focus::Variables => " ↑↓=nav  a=add  e=edit  d=delete  V=files  q=quit ".to_string(),
+            Focus::Variables => " ↑↓=nav  Enter/i=inspect  a=add  e=edit  d=delete  V=files  q=quit ".to_string(),
             Focus::Builder => " Tab=cycle  ←→=method  Enter=edit  Ctrl+Enter=send  Esc=back ".to_string(),
             Focus::Response => " ↑↓=nav  Enter=expand  E=all  C=collapse  b=body  H=hdrs  D=diff  y=copy  Esc=back ".to_string(),
             _ => " q=quit  Tab=focus  r=run  ?=help ".to_string(),

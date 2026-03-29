@@ -4,6 +4,7 @@ pub mod env_file;
 pub mod history;
 pub mod http_client;
 pub mod http_parser;
+pub mod jwt;
 pub(crate) mod otlp_proto;
 pub mod telemetry;
 pub mod test_runner;

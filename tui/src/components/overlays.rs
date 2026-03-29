@@ -53,6 +53,7 @@ pub fn render_help_popup(frame: &mut Frame, area: Rect) {
         Line::from(vec![Span::styled("a             ", kb), Span::styled("Add variable", Style::default().fg(theme::TEXT()))]),
         Line::from(vec![Span::styled("e             ", kb), Span::styled("Edit variable", Style::default().fg(theme::TEXT()))]),
         Line::from(vec![Span::styled("d             ", kb), Span::styled("Delete variable", Style::default().fg(theme::TEXT()))]),
+        Line::from(vec![Span::styled("Enter / i     ", kb), Span::styled("Inspect variable (JWT decode, URL parse)", Style::default().fg(theme::TEXT()))]),
         Line::from(""),
         Line::from(Span::styled("\u{2500}\u{2500} Response \u{2500}\u{2500}", dim)),
         Line::from(vec![Span::styled("b / H / a     ", kb), Span::styled("Body / Headers / Assertions tab", Style::default().fg(theme::TEXT()))]),

@@ -334,6 +334,10 @@ pub struct App {
     pub inspect_open: bool,
     pub inspect_scroll: u16,
 
+    // Variable detail popup state
+    pub var_detail_open: bool,
+    pub var_detail_scroll: u16,
+
     // Builder state
     pub builder_focus: BuilderFocus,
     pub builder_url_cursor: usize,
@@ -492,6 +496,8 @@ impl App {
             diff_viewer_data: None,
             inspect_open: false,
             inspect_scroll: 0,
+            var_detail_open: false,
+            var_detail_scroll: 0,
             builder_focus: BuilderFocus::Method,
             builder_url_cursor: 0,
             builder_body_scroll: 0,

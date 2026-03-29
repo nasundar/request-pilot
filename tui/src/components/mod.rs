@@ -6,3 +6,4 @@ pub mod logs;
 pub mod overlays;
 pub mod response;
 pub mod sidebar;
+pub mod var_detail;
