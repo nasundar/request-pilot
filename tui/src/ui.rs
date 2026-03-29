@@ -446,7 +446,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 
     if app.show_help {
-        components::overlays::render_help_popup(frame, frame.area());
+        components::overlays::render_help_popup(frame, frame.area(), app.help_scroll);
     }
 
     if let Some(idx) = app.history_detail_idx {
@@ -989,16 +989,22 @@ fn get_keyhints(app: &App) -> String {
                 if app.sidebar_tab == SidebarTab::Variables {
                     " ↑↓=nav  Enter/i=inspect  a=add  e=edit  d=delete  V=files  q=quit ".to_string()
                 } else {
-                    " ↑↓=nav  Enter=select  e=code  i=inspect  o=open  r=run  R=RunAll  Ctrl+T=OTEL  Ctrl+A=Azure  Ctrl+L=Ext  q=quit ".to_string()
+                    " ↑↓=nav  Enter=select  e=code  i=inspect  o=open  r=run  R=RunAll  V=vars  q=quit ".to_string()
                 }
             }
             Focus::Variables => " ↑↓=nav  Enter/i=inspect  a=add  e=edit  d=delete  V=files  q=quit ".to_string(),
             Focus::Builder => " Tab=cycle  ←→=method  Enter=edit  Ctrl+Enter=send  Esc=back ".to_string(),
-            Focus::Response => " ↑↓=nav  Enter=expand  E=all  C=collapse  b=body  H=hdrs  D=diff  y=copy  Esc=back ".to_string(),
+            Focus::Response => " ↑↓=nav  Enter=expand  E=all  C=collapse  b=body  h=hdrs  a=assert  D=diff  y=copy  Esc=back ".to_string(),
             _ => " q=quit  Tab=focus  r=run  ?=help ".to_string(),
         },
         Mode::History => " ↑↓=nav  g=group  m=method  s=status  Enter=detail  Space=compare  Esc=files ".to_string(),
-        Mode::Code => " Type to edit  Ctrl+S=save  Ctrl+C/X/V=copy/cut/paste  Ctrl+A=select all  Shift+Arrow=select  /=search  Esc=exit ".to_string(),
+        Mode::Code => {
+            if app.code_editor_editing {
+                " [EDIT] Type to edit  Ctrl+S=save  Ctrl+C/X/V  Shift+Arrow=select  /=search  Esc=view ".to_string()
+            } else {
+                " [VIEW] i/e=edit mode  ↑↓←→=navigate  /=search  n/N=next/prev  Ctrl+G=goto  Esc=exit ".to_string()
+            }
+        }
         Mode::Logs => " ↑↓=scroll  f=filter  c=clear  a=auto-scroll  Esc=files ".to_string(),
     }
 }

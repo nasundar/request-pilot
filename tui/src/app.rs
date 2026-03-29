@@ -244,6 +244,7 @@ pub struct App {
     pub run_group_queued: Option<(usize, Vec<usize>)>,
     pub is_running: bool,
     pub show_help: bool,
+    pub help_scroll: u16,
     pub run_progress_lines: Vec<(String, String)>,
     pub run_start_time: Option<std::time::Instant>,
 
@@ -310,6 +311,7 @@ pub struct App {
     pub code_editor_cursor_col: usize,
     pub code_editor_scroll: u16,
     pub code_editor_modified: bool,
+    pub code_editor_editing: bool,
 
     // History enhanced state
     pub history_group_by: HistoryGroupBy,
@@ -433,6 +435,7 @@ impl App {
             run_group_queued: None,
             is_running: false,
             show_help: false,
+            help_scroll: 0,
             run_progress_lines: Vec::new(),
             run_start_time: None,
             input_mode: InputMode::Normal,
@@ -479,6 +482,7 @@ impl App {
             code_editor_cursor_col: 0,
             code_editor_scroll: 0,
             code_editor_modified: false,
+            code_editor_editing: false,
             history_group_by: HistoryGroupBy::Flat,
             history_method_filter: None,
             history_status_filter: None,
@@ -1062,6 +1066,7 @@ impl App {
                 self.code_editor_cursor_col = 0;
                 self.code_editor_scroll = 0;
                 self.code_editor_modified = false;
+                self.code_editor_editing = false;
                 self.mode = Mode::Code;
             }
         }
@@ -1073,6 +1078,7 @@ impl App {
             if let Some(file) = self.loaded_files.get(fi) {
                 self.code_editor_content = file.content.clone();
                 self.code_editor_modified = false;
+                self.code_editor_editing = false;
                 self.mode = Mode::Code;
 
                 // Find the line number for this block by counting ### separators

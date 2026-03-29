@@ -23,10 +23,28 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         InputMode::Normal => {}
     }
 
-    // 2. Help overlay consumes all keys
+    // 2. Help overlay with scroll
     if app.show_help {
-        if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
-            app.show_help = false;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('?') => {
+                app.show_help = false;
+                app.help_scroll = 0;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.help_scroll = app.help_scroll.saturating_add(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.help_scroll = app.help_scroll.saturating_sub(1);
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.help_scroll = app.help_scroll.saturating_add(10);
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.help_scroll = app.help_scroll.saturating_sub(10);
+            }
+            KeyCode::Char('g') => { app.help_scroll = 0; }
+            KeyCode::Char('G') => { app.help_scroll = 200; }
+            _ => {}
         }
         return;
     }
@@ -201,7 +219,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             return;
         }
         KeyCode::Char('h') if !in_text_input && app.mode != Mode::History
-            && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && app.focus != Focus::Response => {
             app.mode = Mode::History;
             app.focus = Focus::HistoryList;
             return;

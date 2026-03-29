@@ -434,18 +434,30 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
         app.code_editor_cursor_line + 1,
         app.code_editor_cursor_col + 1,
     );
+    let mode_badge = if app.code_editor_editing {
+        Span::styled(" [EDIT] ", Style::default().fg(theme::BG_SURFACE()).bg(theme::PEACH()))
+    } else {
+        Span::styled(" [VIEW] ", Style::default().fg(theme::BG_SURFACE()).bg(theme::BLUE()))
+    };
     let title_line = Line::from(vec![
         Span::styled(
             " \u{270e} Code Editor",
             Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
         ),
+        mode_badge,
         Span::styled(title, Style::default().fg(theme::TEXT())),
-        Span::styled(" Esc=exit Ctrl+S=save /=search Ctrl+G=goto ", Style::default().fg(theme::TEXT_FAINT())),
     ]);
-    let hints_line = Line::from(vec![Span::styled(
-        " \u{2191}\u{2193}=move  Ctrl+U/D=half-page  n/N=next/prev match  Type to edit ",
-        Style::default().fg(theme::TEXT_FAINT()),
-    )]);
+    let hints_line = if app.code_editor_editing {
+        Line::from(vec![Span::styled(
+            " Type to edit  Ctrl+S=save  /=search  Ctrl+G=goto  Esc=view mode ",
+            Style::default().fg(theme::TEXT_FAINT()),
+        )])
+    } else {
+        Line::from(vec![Span::styled(
+            " ↑↓=move  Ctrl+U/D=page  /=search  n/N=match  i/e=edit mode  Esc=exit ",
+            Style::default().fg(theme::TEXT_FAINT()),
+        )])
+    };
 
     let title_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
     frame.render_widget(
@@ -665,7 +677,7 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
                     }
                 }
             }
-            KeyCode::Char('v') => {
+            KeyCode::Char('v') if app.code_editor_editing => {
                 if let Some(text) = clipboard_get() {
                     // If there's a selection, delete it first
                     if app.editor_selection_anchor.is_some() {
@@ -700,7 +712,7 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
                 app.code_editor_cursor_col = get_line_len(&app.code_editor_content, last_line);
                 ensure_cursor_visible(app);
             }
-            KeyCode::Char('x') => {
+            KeyCode::Char('x') if app.code_editor_editing => {
                 // Cut
                 if let Some(text) = get_selected_text(app) {
                     if clipboard_set(&text) {
@@ -787,12 +799,20 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
                 app.editor_search_query.clear();
                 app.editor_search_matches.clear();
                 app.editor_search_idx = 0;
+            } else if app.code_editor_editing {
+                app.code_editor_editing = false;
+                app.set_status("VIEW mode".into());
             } else {
                 app.mode = Mode::Files;
                 app.focus = Focus::FileTree;
             }
         }
-        KeyCode::Char('/') => {
+        // Enter edit mode with i or e (vim-style)
+        KeyCode::Char('i') | KeyCode::Char('e') if !app.code_editor_editing => {
+            app.code_editor_editing = true;
+            app.set_status("EDIT mode — press Esc to return to view mode".into());
+        }
+        KeyCode::Char('/') if !app.code_editor_editing => {
             app.editor_search_active = true;
             app.editor_search_query.clear();
             app.editor_search_matches.clear();
@@ -856,7 +876,7 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
             app.code_editor_cursor_col =
                 get_line_len(&app.code_editor_content, app.code_editor_cursor_line);
         }
-        KeyCode::Enter => {
+        KeyCode::Enter if app.code_editor_editing => {
             let off = line_col_to_offset(
                 &app.code_editor_content, app.code_editor_cursor_line, app.code_editor_cursor_col,
             );
@@ -866,7 +886,7 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
             app.code_editor_modified = true;
             ensure_cursor_visible(app);
         }
-        KeyCode::Backspace => {
+        KeyCode::Backspace if app.code_editor_editing => {
             if app.code_editor_cursor_col > 0 {
                 let off = line_col_to_offset(
                     &app.code_editor_content, app.code_editor_cursor_line, app.code_editor_cursor_col,
@@ -891,7 +911,7 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        KeyCode::Delete => {
+        KeyCode::Delete if app.code_editor_editing => {
             let off = line_col_to_offset(
                 &app.code_editor_content, app.code_editor_cursor_line, app.code_editor_cursor_col,
             );
@@ -900,7 +920,7 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
                 app.code_editor_modified = true;
             }
         }
-        KeyCode::Tab => {
+        KeyCode::Tab if app.code_editor_editing => {
             let off = line_col_to_offset(
                 &app.code_editor_content, app.code_editor_cursor_line, app.code_editor_cursor_col,
             );
@@ -908,7 +928,7 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
             app.code_editor_cursor_col += 2;
             app.code_editor_modified = true;
         }
-        KeyCode::Char(c) => {
+        KeyCode::Char(c) if app.code_editor_editing => {
             let off = line_col_to_offset(
                 &app.code_editor_content, app.code_editor_cursor_line, app.code_editor_cursor_col,
             );

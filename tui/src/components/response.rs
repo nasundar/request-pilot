@@ -938,7 +938,7 @@ pub fn handle_response_keys(app: &mut App, key: KeyEvent) {
             app.response_scroll = 0;
             try_rebuild_json_tree(app);
         }
-        KeyCode::Char('H') => {
+        KeyCode::Char('h') => {
             app.response_tab = ResponseTab::Headers;
             app.response_scroll = 0;
         }
