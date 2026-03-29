@@ -4,10 +4,24 @@ use crate::toolbar;
 use crate::components;
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
-    // Code editor mode priority
+    // Code editor mode priority — in view mode, let mode-switch keys fall through
     if app.mode == Mode::Code {
-        crate::code_editor::handle_editor_keys(app, key);
-        return;
+        if !app.code_editor_editing {
+            match key.code {
+                KeyCode::Char('f') | KeyCode::Char('h') | KeyCode::Char('l')
+                | KeyCode::Char('q') | KeyCode::Char('?')
+                | KeyCode::Char('V') | KeyCode::Char('T') | KeyCode::Char('R') => {
+                    // fall through to global key handling below
+                }
+                _ => {
+                    crate::code_editor::handle_editor_keys(app, key);
+                    return;
+                }
+            }
+        } else {
+            crate::code_editor::handle_editor_keys(app, key);
+            return;
+        }
     }
 
     // 1. Input mode handling takes priority
