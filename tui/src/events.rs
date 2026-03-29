@@ -213,19 +213,19 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             return;
         }
         // Mode switching
-        KeyCode::Char('f') if !in_text_input && app.mode != Mode::Files => {
+        KeyCode::Char('F') if !in_text_input && app.mode != Mode::Files => {
             app.mode = Mode::Files;
             app.focus = Focus::FileTree;
             return;
         }
-        KeyCode::Char('h') if !in_text_input && app.mode != Mode::History
+        KeyCode::Char('H') if !in_text_input && app.mode != Mode::History
             && !key.modifiers.contains(KeyModifiers::CONTROL)
             && app.focus != Focus::Response => {
             app.mode = Mode::History;
             app.focus = Focus::HistoryList;
             return;
         }
-        KeyCode::Char('l') if !in_text_input && app.mode != Mode::Logs
+        KeyCode::Char('L') if !in_text_input && app.mode != Mode::Logs
             && !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.mode = Mode::Logs;
             return;
@@ -248,7 +248,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             app.queue_run_all();
             return;
         }
-        KeyCode::Char('c') if !in_text_input => {
+        KeyCode::Char('C') if !in_text_input && app.focus != Focus::Response => {
             app.enter_code_editor();
             return;
         }

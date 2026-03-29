@@ -356,7 +356,7 @@ pub fn render_response(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         Span::styled(" Body(b) ", tab_style(ResponseTab::Body)),
         Span::raw(" "),
-        Span::styled(" Headers(H) ", tab_style(ResponseTab::Headers)),
+        Span::styled(" Headers(h) ", tab_style(ResponseTab::Headers)),
         Span::raw(" "),
         Span::styled(" Assertions(a) ", tab_style(ResponseTab::Assertions)),
         Span::raw(" "),
