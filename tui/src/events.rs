@@ -351,6 +351,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             toolbar::handle_toolbar_shortcuts(app, key);
             return;
         }
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            toolbar::handle_toolbar_shortcuts(app, key);
+            return;
+        }
         _ => {}
     }
 

@@ -54,6 +54,7 @@ async fn send_request(
         response_time_ms: response.time_ms,
         response_size_bytes: response.size_bytes,
         timestamp: request_pilot_core::chrono::Utc::now().to_rfc3339(),
+        result_status: String::new(),
     };
     s.add(entry);
 
@@ -129,6 +130,7 @@ async fn run_test_suite(
                         response_time_ms: resp.time_ms,
                         response_size_bytes: resp.size_bytes,
                         timestamp: request_pilot_core::chrono::Utc::now().to_rfc3339(),
+                        result_status: block_result.status.clone(),
                     };
                     s.add(entry);
                 }
@@ -155,6 +157,7 @@ async fn run_test_suite(
                 response_time_ms: resp.time_ms,
                 response_size_bytes: resp.size_bytes,
                 timestamp: request_pilot_core::chrono::Utc::now().to_rfc3339(),
+                result_status: block_result.status.clone(),
             };
             s.add(entry);
         }
