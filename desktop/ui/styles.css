@@ -246,25 +246,11 @@ html, body {
 .auto-run-wrapper {
   display: flex;
   align-items: center;
-  gap: 4px;
+  position: relative;
 }
 .auto-run-select {
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 2px 4px;
-  font-size: 11px;
-  cursor: pointer;
-  -webkit-app-region: no-drag;
-}
-.auto-run-select:hover { border-color: var(--accent); }
-.auto-run-select:focus { outline: none; border-color: var(--accent); }
-.auto-run-countdown {
-  font-size: 10px;
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  min-width: 36px;
+  padding-right: 24px;
+  min-width: 130px;
 }
 
 /* ---------- Extra Headers Dropdown ---------- */

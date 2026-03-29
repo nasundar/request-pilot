@@ -140,19 +140,30 @@ function setAutoRun(interval) {
   autoRunInterval = interval || '';
   autoRunNextDue = null;
 
-  const countdownEl = document.getElementById('autoRunCountdown');
   const selectEl = document.getElementById('autoRunSelect');
   if (selectEl) selectEl.value = autoRunInterval;
 
+  // Store original option labels for restoration
+  if (selectEl && !selectEl._origLabels) {
+    selectEl._origLabels = {};
+    for (const opt of selectEl.options) {
+      selectEl._origLabels[opt.value] = opt.textContent;
+    }
+  }
+
+  // Restore original label when turning off
   if (!interval) {
-    if (countdownEl) countdownEl.textContent = '';
+    if (selectEl && selectEl._origLabels) {
+      for (const opt of selectEl.options) {
+        opt.textContent = selectEl._origLabels[opt.value] || opt.textContent;
+      }
+    }
     rpLog('info', 'Auto-run disabled');
     return;
   }
 
   const ms = parseDurationMs(interval);
   if (!ms) {
-    if (countdownEl) countdownEl.textContent = '';
     rpLog('warn', 'Invalid auto-run interval', { interval });
     return;
   }
@@ -162,7 +173,6 @@ function setAutoRun(interval) {
 
   autoRunTimerId = setInterval(() => {
     if (isRunning) {
-      // Reschedule — don't overlap with running tests
       autoRunNextDue = Date.now() + ms;
       return;
     }
@@ -171,20 +181,25 @@ function setAutoRun(interval) {
     autoRunNextDue = Date.now() + ms;
   }, ms);
 
-  // Countdown display (updates every second)
+  // Countdown embedded in the selected option text
   autoRunCountdownId = setInterval(() => {
-    if (!autoRunNextDue || !countdownEl) return;
+    if (!autoRunNextDue || !selectEl) return;
     const remaining = Math.max(0, Math.ceil((autoRunNextDue - Date.now()) / 1000));
+    const selectedOpt = selectEl.options[selectEl.selectedIndex];
+    if (!selectedOpt || !selectedOpt.value) return;
+    let countdown;
     if (remaining >= 3600) {
       const h = Math.floor(remaining / 3600);
       const m = Math.floor((remaining % 3600) / 60);
       const s = remaining % 60;
-      countdownEl.textContent = `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+      countdown = `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
     } else {
       const m = Math.floor(remaining / 60);
       const s = remaining % 60;
-      countdownEl.textContent = `${m}:${String(s).padStart(2,'0')}`;
+      countdown = `${m}:${String(s).padStart(2,'0')}`;
     }
+    const origLabel = (selectEl._origLabels && selectEl._origLabels[selectedOpt.value]) || `⏲ Every ${selectedOpt.value}`;
+    selectedOpt.textContent = `${origLabel}  [${countdown}]`;
   }, 1000);
 }
 
