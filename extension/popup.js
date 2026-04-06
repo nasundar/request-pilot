@@ -814,6 +814,9 @@ let keyPickerInitialized = false;
 let selectedRuleIds = null; // null = all rules selected (initial state)
 let allRuleIds = new Set();
 
+// Log tab: persist group expand/collapse state across re-renders
+const logExpandedGroups = new Set();
+
 // Stats tab: persist expand/collapse state across re-renders
 const statsExpandedDomains = new Set();
 const statsExpandedPaths = new Set();
@@ -1010,11 +1013,36 @@ async function renderLog() {
       const compareBtn = entries.length >= 2
         ? `<button class="btn btn-primary btn-sm group-compare-btn" data-group="${groupIdx}" title="Compare top 2 in this group">Compare</button>`
         : '';
-      html += `<div class="log-group-header">${compareBtn}<span class="group-key">${escapeHtml(groupByHeaderName)}:</span> <span class="group-value">${escapeHtml(groupValue)}</span> <span class="group-count">(${entries.length})</span></div>`;
+      const groupKey = `${groupByHeaderName}:${groupValue}`;
+      const expanded = logExpandedGroups.has(groupKey);
+      html += `<div class="log-group" data-group-key="${escapeAttr(groupKey)}">`;
+      html += `<div class="log-group-header"><span class="chevron">${expanded ? '▼' : '▶'}</span>${compareBtn}<span class="group-key">${escapeHtml(groupByHeaderName)}:</span> <span class="group-value">${escapeHtml(groupValue)}</span> <span class="group-count">(${entries.length})</span></div>`;
+      html += `<div class="log-group-body${expanded ? '' : ' hidden'}">`;
       html += entries.map((e) => renderLogEntryHTML(e, similarities)).join("");
+      html += `</div></div>`;
       groupIdx++;
     }
     logContainer.innerHTML = html;
+
+    // Wire up group header collapse/expand
+    logContainer.querySelectorAll(".log-group-header").forEach((header) => {
+      header.addEventListener("click", (e) => {
+        if (e.target.closest(".group-compare-btn")) return;
+        if (e.target.classList.contains("log-checkbox")) return;
+        const group = header.closest(".log-group");
+        const body = group.querySelector(".log-group-body");
+        const chevron = header.querySelector(".chevron");
+        const key = group.dataset.groupKey;
+        if (body) {
+          const isHidden = body.classList.toggle("hidden");
+          if (chevron) chevron.textContent = isHidden ? "▶" : "▼";
+          if (key) {
+            if (isHidden) logExpandedGroups.delete(key);
+            else logExpandedGroups.add(key);
+          }
+        }
+      });
+    });
 
     // Wire up group-level compare buttons
     const groupEntries = [...groups.values()];

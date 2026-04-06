@@ -856,6 +856,24 @@ body.standalone #log-container {
   display: flex;
   align-items: center;
   gap: 8px;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.log-group-header:hover {
+  background: var(--bg-card-hover);
+}
+
+.log-group-header .chevron {
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+}
+
+.log-group-header:hover .chevron {
+  color: var(--accent);
 }
 
 .log-group-header .group-count {
