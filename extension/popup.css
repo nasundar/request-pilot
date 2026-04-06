@@ -1643,8 +1643,18 @@ body.standalone .log-filters {
   background: var(--bg-card-hover);
 }
 
+.stats-request-row.selected {
+  background: rgba(88, 166, 255, 0.08);
+}
+
 .stats-request-row:last-child {
   border-bottom: none;
+}
+
+.stats-checkbox {
+  flex-shrink: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
 }
 
 .stats-req-url {

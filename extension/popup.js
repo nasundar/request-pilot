@@ -812,6 +812,10 @@ let keyPickerInitialized = false;
 let selectedRuleIds = null; // null = all rules selected (initial state)
 let allRuleIds = new Set();
 
+// Stats tab: persist expand/collapse state across re-renders
+const statsExpandedDomains = new Set();
+const statsExpandedPaths = new Set();
+
 /** Build the HTML string for a single log entry. */
 function renderLogEntryHTML(entry, similarities) {
   const checked = selectedRequests.has(entry.id) ? "checked" : "";
@@ -1928,6 +1932,9 @@ async function renderStats() {
   const statsContent = $("#stats-content");
   if (!statsContent) return;
 
+  // Ensure cachedNetworkLog is populated for openComparison()
+  cachedNetworkLog = allEntries;
+
   if (allEntries.length === 0) {
     statsContent.innerHTML = `<div class="empty-state"><p>No network data available.</p><p class="sub">Capture some requests or import a HAR file.</p></div>`;
     return;
@@ -2004,7 +2011,9 @@ async function renderStats() {
 
   html += `<div class="stats-section">
     <div class="stats-section-title">Requests by Domain & Path</div>
-    <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:8px;align-items:center;">
+      <span id="stats-selection-count" class="selection-count hidden">0 selected</span>
+      <button id="btn-stats-compare" class="btn btn-primary btn-sm hidden">Compare</button>
       <button class="btn btn-ghost btn-sm" id="btn-expand-all">Expand All</button>
     </div>`;
 
@@ -2023,9 +2032,12 @@ async function renderStats() {
       ? ''
       : `<button class="btn-add-rule" data-url="${escapeAttr(domain + '/*')}" title="Add rule for this domain">+ Add Rule</button>`;
 
+    const domainKey = domain;
+    const domainExpanded = statsExpandedDomains.has(domainKey);
+
     html += `<div class="domain-group">
-      <div class="domain-header">
-        <span class="chevron">▶</span>
+      <div class="domain-header" data-domain="${escapeAttr(domainKey)}">
+        <span class="chevron">${domainExpanded ? '▼' : '▶'}</span>
         <span class="domain-name">${escapeHtml(domain)}</span>
         <div class="domain-stats">
           ${domainRuleBtn}
@@ -2034,7 +2046,7 @@ async function renderStats() {
           ${domainFail > 0 ? `<span class="domain-stat fail">✗ ${domainFail}</span>` : ''}
         </div>
       </div>
-      <div class="path-list hidden">`;
+      <div class="path-list${domainExpanded ? '' : ' hidden'}">`;
 
     const sortedPaths = [...pathMap.entries()].sort((a, b) => b[1].length - a[1].length);
     for (const [path, entries] of sortedPaths) {
@@ -2052,9 +2064,12 @@ async function renderStats() {
       const pathDurations = entries.map((e) => e.duration).filter((d) => d != null);
       const pathAvg = pathDurations.length ? Math.round(pathDurations.reduce((a, b) => a + b, 0) / pathDurations.length) : null;
 
+      const pathKey = domain + path;
+      const pathExpanded = statsExpandedPaths.has(pathKey);
+
       html += `<div class="path-group">
-        <div class="path-row">
-          <span class="chevron">▶</span>
+        <div class="path-row" data-path-key="${escapeAttr(pathKey)}">
+          <span class="chevron">${pathExpanded ? '▼' : '▶'}</span>
           <span class="path-name">${escapeHtml(path)}</span>
           <div class="path-badges">
             <span class="path-count">${entries.length}×</span>
@@ -2063,7 +2078,7 @@ async function renderStats() {
             ${addRuleBtn}
           </div>
         </div>
-        <div class="request-list hidden">
+        <div class="request-list${pathExpanded ? '' : ' hidden'}">
           ${entries.map((e) => renderStatsRequestRow(e)).join("")}
         </div>
       </div>`;
@@ -2095,35 +2110,116 @@ async function renderStats() {
       statsContent.querySelectorAll(".domain-header .chevron, .path-row .chevron").forEach((ch) => {
         ch.textContent = expanding ? "▼" : "▶";
       });
+      // Sync persistent state
+      if (expanding) {
+        statsContent.querySelectorAll(".domain-header[data-domain]").forEach((h) => statsExpandedDomains.add(h.dataset.domain));
+        statsContent.querySelectorAll(".path-row[data-path-key]").forEach((r) => statsExpandedPaths.add(r.dataset.pathKey));
+      } else {
+        statsExpandedDomains.clear();
+        statsExpandedPaths.clear();
+      }
       btnExpandAll.textContent = expanding ? "Collapse All" : "Expand All";
     });
   }
 
-  // Wire up domain header collapse/expand
+  // Wire up domain header collapse/expand with state persistence
   statsContent.querySelectorAll(".domain-header").forEach((header) => {
     header.addEventListener("click", (e) => {
       if (e.target.closest(".btn-add-rule")) return;
       const pathList = header.parentElement.querySelector(".path-list");
       const chevron = header.querySelector(".chevron");
+      const domainKey = header.dataset.domain;
       if (pathList) {
-        const willShow = pathList.classList.toggle("hidden");
-        if (chevron) chevron.textContent = willShow ? "▶" : "▼";
+        const isHidden = pathList.classList.toggle("hidden");
+        if (chevron) chevron.textContent = isHidden ? "▶" : "▼";
+        if (domainKey) {
+          if (isHidden) statsExpandedDomains.delete(domainKey);
+          else statsExpandedDomains.add(domainKey);
+        }
       }
     });
   });
 
-  // Wire up path row collapse/expand
+  // Wire up path row collapse/expand with state persistence
   statsContent.querySelectorAll(".path-row").forEach((row) => {
     row.addEventListener("click", (e) => {
       if (e.target.closest(".btn-add-rule")) return;
+      if (e.target.classList.contains("stats-checkbox")) return;
       const reqList = row.parentElement.querySelector(".request-list");
       const chevron = row.querySelector(".chevron");
+      const pathKey = row.dataset.pathKey;
       if (reqList) {
-        const willShow = reqList.classList.toggle("hidden");
-        if (chevron) chevron.textContent = willShow ? "▶" : "▼";
+        const isHidden = reqList.classList.toggle("hidden");
+        if (chevron) chevron.textContent = isHidden ? "▶" : "▼";
+        if (pathKey) {
+          if (isHidden) statsExpandedPaths.delete(pathKey);
+          else statsExpandedPaths.add(pathKey);
+        }
       }
     });
   });
+
+  // Wire up stats checkboxes for compare
+  statsContent.querySelectorAll(".stats-checkbox").forEach((cb) => {
+    cb.addEventListener("change", (e) => {
+      e.stopPropagation();
+      const id = cb.dataset.id;
+      if (cb.checked) {
+        if (selectedRequests.size >= 2) {
+          cb.checked = false;
+          return;
+        }
+        selectedRequests.add(id);
+      } else {
+        selectedRequests.delete(id);
+      }
+      updateStatsSelectionUI();
+      // Sync visual state on rows
+      statsContent.querySelectorAll(".stats-request-row").forEach((row) => {
+        const rid = row.dataset.entryId;
+        row.classList.toggle("selected", selectedRequests.has(rid));
+      });
+      // Disable unchecked when 2 selected
+      if (selectedRequests.size >= 2) {
+        statsContent.querySelectorAll(".stats-checkbox").forEach((c) => {
+          if (!c.checked) c.disabled = true;
+        });
+      } else {
+        statsContent.querySelectorAll(".stats-checkbox").forEach((c) => {
+          c.disabled = false;
+        });
+      }
+    });
+    cb.addEventListener("click", (e) => e.stopPropagation());
+  });
+
+  // Allow clicking stats request row to toggle checkbox
+  statsContent.querySelectorAll(".stats-request-row").forEach((row) => {
+    row.addEventListener("click", (e) => {
+      if (e.target.classList.contains("stats-checkbox")) return;
+      if (e.target.closest(".btn-view-detail")) return;
+      const cb = row.querySelector(".stats-checkbox");
+      if (cb && !cb.disabled) {
+        cb.checked = !cb.checked;
+        cb.dispatchEvent(new Event("change"));
+      }
+    });
+  });
+
+  // Wire up stats compare button — reuse openComparison()
+  const btnStatsCompare = statsContent.querySelector("#btn-stats-compare");
+  if (btnStatsCompare) {
+    btnStatsCompare.addEventListener("click", openComparison);
+  }
+
+  // Disable unchecked checkboxes if 2 already selected (initial render)
+  if (selectedRequests.size >= 2) {
+    statsContent.querySelectorAll(".stats-checkbox").forEach((c) => {
+      if (!c.checked) c.disabled = true;
+    });
+  }
+
+  updateStatsSelectionUI();
 
   // Wire up View buttons in stats request rows
   statsContent.querySelectorAll(".btn-view-detail").forEach((btn) => {
@@ -2139,7 +2235,10 @@ async function renderStats() {
 function renderStatsRequestRow(entry) {
   const statusClass = getStatusClass(entry.statusCode);
   const statusText = entry.statusCode || (entry.error ? "ERR" : "…");
-  return `<div class="stats-request-row" data-entry-id="${escapeAttr(entry.id)}">
+  const checked = selectedRequests.has(entry.id) ? "checked" : "";
+  const selectedClass = selectedRequests.has(entry.id) ? " selected" : "";
+  return `<div class="stats-request-row${selectedClass}" data-entry-id="${escapeAttr(entry.id)}">
+    <input type="checkbox" class="stats-checkbox" ${checked} data-id="${escapeAttr(entry.id)}" />
     <span class="log-status ${statusClass}">${statusText}</span>
     <span class="log-method">${escapeHtml(entry.method)}</span>
     <span class="stats-req-url">${escapeHtml(entry.url)}</span>
@@ -2147,6 +2246,21 @@ function renderStatsRequestRow(entry) {
     <span class="log-time">${formatTime(entry.timestamp)}</span>
     <button class="btn-view-detail${viewedEntries.has(entry.id) ? ' viewed' : ''}" data-entry-id="${escapeAttr(entry.id)}" title="View details">${viewedEntries.has(entry.id) ? '✓ Viewed' : '👁 View'}</button>
   </div>`;
+}
+
+function updateStatsSelectionUI() {
+  const countEl = $("#stats-selection-count");
+  const compareBtn = $("#btn-stats-compare");
+  if (!countEl || !compareBtn) return;
+
+  if (selectedRequests.size > 0) {
+    countEl.textContent = `${selectedRequests.size} selected`;
+    countEl.classList.remove("hidden");
+  } else {
+    countEl.classList.add("hidden");
+  }
+
+  compareBtn.classList.toggle("hidden", selectedRequests.size !== 2);
 }
 
 async function showRequestDetail(entry) {
