@@ -279,6 +279,8 @@ function attachEventListeners() {
   if (filterStatus) filterStatus.addEventListener("change", renderLog);
   if (filterSimilarity) filterSimilarity.addEventListener("change", renderLog);
   if (groupByHeader) groupByHeader.addEventListener("change", renderLog);
+  const filterType = $("#filter-type");
+  if (filterType) filterType.addEventListener("change", renderLog);
   const hideUrlCb = $("#hide-url");
   if (hideUrlCb) hideUrlCb.addEventListener("change", renderLog);
 
@@ -915,6 +917,12 @@ async function renderLog() {
     });
   }
 
+  // Apply resource type filter
+  const typeFilterVal = ($("#filter-type") || {}).value || "";
+  if (typeFilterVal) {
+    cachedNetworkLog = cachedNetworkLog.filter((e) => classifyResourceType(e.type) === typeFilterVal);
+  }
+
   // Update captured request count
   const totalMatching = cachedNetworkLog.length;
   const withBody = cachedNetworkLog.filter((e) => e.responseBody).length;
@@ -1082,6 +1090,21 @@ function getStatusClass(code) {
   if (code < 400) return "status-3xx";
   if (code < 500) return "status-4xx";
   return "status-5xx";
+}
+
+/** Map Chrome ResourceType to DevTools-style category */
+function classifyResourceType(type) {
+  switch (type) {
+    case "xmlhttprequest": case "fetch": return "fetch";
+    case "main_frame": case "sub_frame": return "doc";
+    case "script": return "js";
+    case "stylesheet": return "css";
+    case "image": return "img";
+    case "media": return "media";
+    case "font": return "font";
+    case "websocket": return "ws";
+    default: return "other";
+  }
 }
 
 function updateSelectionUI() {
@@ -1932,9 +1955,6 @@ async function renderStats() {
   const statsContent = $("#stats-content");
   if (!statsContent) return;
 
-  // Ensure cachedNetworkLog is populated for openComparison()
-  cachedNetworkLog = allEntries;
-
   if (allEntries.length === 0) {
     statsContent.innerHTML = `<div class="empty-state"><p>No network data available.</p><p class="sub">Capture some requests or import a HAR file.</p></div>`;
     return;
@@ -1942,16 +1962,45 @@ async function renderStats() {
 
   let html = "";
 
+  // ── Resource type filter ───────────────────────────────────
+  const prevTypeFilter = ($("#stats-filter-type") || {}).value || "";
+  html += `<div class="stats-filter-bar">
+    <div class="filter-group">
+      <label class="filter-label">Type:</label>
+      <select id="stats-filter-type" class="filter-select">
+        <option value="">All</option>
+        <option value="fetch"${prevTypeFilter === 'fetch' ? ' selected' : ''}>Fetch/XHR</option>
+        <option value="doc"${prevTypeFilter === 'doc' ? ' selected' : ''}>Doc</option>
+        <option value="js"${prevTypeFilter === 'js' ? ' selected' : ''}>JS</option>
+        <option value="css"${prevTypeFilter === 'css' ? ' selected' : ''}>CSS</option>
+        <option value="img"${prevTypeFilter === 'img' ? ' selected' : ''}>Img</option>
+        <option value="media"${prevTypeFilter === 'media' ? ' selected' : ''}>Media</option>
+        <option value="font"${prevTypeFilter === 'font' ? ' selected' : ''}>Font</option>
+        <option value="ws"${prevTypeFilter === 'ws' ? ' selected' : ''}>WS</option>
+        <option value="other"${prevTypeFilter === 'other' ? ' selected' : ''}>Other</option>
+      </select>
+    </div>
+  </div>`;
+
+  // Apply type filter
+  let filteredEntries = allEntries;
+  if (prevTypeFilter) {
+    filteredEntries = allEntries.filter((e) => classifyResourceType(e.type) === prevTypeFilter);
+  }
+
+  // Ensure cachedNetworkLog has filtered entries for openComparison()
+  cachedNetworkLog = filteredEntries;
+
   // ── Summary cards ──────────────────────────────────────────
-  const totalRequests = allEntries.length;
-  const successCount = allEntries.filter((e) => e.statusCode >= 200 && e.statusCode < 400).length;
-  const clientErrors = allEntries.filter((e) => e.statusCode >= 400 && e.statusCode < 500).length;
-  const serverErrors = allEntries.filter((e) => e.statusCode >= 500).length;
-  const failedCount = allEntries.filter((e) => !e.statusCode || e.error).length;
-  const withRules = allEntries.filter((e) => patterns.some((p) => p.regex.test(e.url))).length;
+  const totalRequests = filteredEntries.length;
+  const successCount = filteredEntries.filter((e) => e.statusCode >= 200 && e.statusCode < 400).length;
+  const clientErrors = filteredEntries.filter((e) => e.statusCode >= 400 && e.statusCode < 500).length;
+  const serverErrors = filteredEntries.filter((e) => e.statusCode >= 500).length;
+  const failedCount = filteredEntries.filter((e) => !e.statusCode || e.error).length;
+  const withRules = filteredEntries.filter((e) => patterns.some((p) => p.regex.test(e.url))).length;
   const withoutRules = totalRequests - withRules;
 
-  const durations = allEntries.map((e) => e.duration).filter((d) => d != null && d > 0).sort((a, b) => a - b);
+  const durations = filteredEntries.map((e) => e.duration).filter((d) => d != null && d > 0).sort((a, b) => a - b);
   const avgDuration = durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : 0;
   const p50 = percentile(durations, 50);
   const p90 = percentile(durations, 90);
@@ -1983,7 +2032,7 @@ async function renderStats() {
 
   // ── HTTP Methods Breakdown ─────────────────────────────────
   const methodCounts = {};
-  allEntries.forEach((e) => {
+  filteredEntries.forEach((e) => {
     methodCounts[e.method] = (methodCounts[e.method] || 0) + 1;
   });
   html += `<div class="stats-section">
@@ -1997,7 +2046,7 @@ async function renderStats() {
 
   // ── Domain / Path Tree ─────────────────────────────────────
   const domainMap = new Map();
-  allEntries.forEach((entry) => {
+  filteredEntries.forEach((entry) => {
     try {
       const u = new URL(entry.url);
       const domain = u.origin;
@@ -2090,6 +2139,12 @@ async function renderStats() {
   html += `</div>`;
 
   statsContent.innerHTML = html;
+
+  // Wire up stats type filter
+  const statsTypeSelect = statsContent.querySelector("#stats-filter-type");
+  if (statsTypeSelect) {
+    statsTypeSelect.addEventListener("change", renderStats);
+  }
 
   // Wire up "Add Rule" buttons — open modal pre-populated, don't save yet
   statsContent.querySelectorAll(".btn-add-rule").forEach((btn) => {
@@ -2226,7 +2281,7 @@ async function renderStats() {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       const entryId = btn.dataset.entryId;
-      const entry = allEntries.find((e) => e.id === entryId);
+      const entry = filteredEntries.find((e) => e.id === entryId);
       if (entry) showRequestDetail(entry);
     });
   });
