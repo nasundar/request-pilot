@@ -685,15 +685,18 @@ chrome.webRequest.onBeforeRequest.addListener(
         }
       }
     }
-    // Store body temporarily, will be merged in onSendHeaders
-    if (body) {
-      const existing = pendingRequests.get(details.requestId);
-      if (existing) {
-        existing.requestBody = body;
-      } else {
-        pendingRequests.set(details.requestId, { requestBody: body });
-      }
-    }
+    // Always create/update entry with core fields so type is never missing
+    const existing = pendingRequests.get(details.requestId) || {};
+    pendingRequests.set(details.requestId, {
+      ...existing,
+      id: details.requestId,
+      timestamp: details.timeStamp,
+      url: details.url,
+      method: details.method,
+      type: details.type,
+      tabId: details.tabId,
+      requestBody: body || existing.requestBody || null,
+    });
   },
   { urls: ["<all_urls>"] },
   ["requestBody"]
@@ -706,7 +709,7 @@ chrome.webRequest.onSendHeaders.addListener(
     pendingRequests.set(details.requestId, {
       ...existing,
       id: details.requestId,
-      timestamp: details.timeStamp,
+      timestamp: existing.timestamp || details.timeStamp,
       url: details.url,
       method: details.method,
       type: details.type,
@@ -725,18 +728,31 @@ chrome.webRequest.onSendHeaders.addListener(
 chrome.webRequest.onCompleted.addListener(
   (details) => {
     if (!sniffingEnabled || loggingPaused) return;
-    const entry = pendingRequests.get(details.requestId);
-    if (entry) {
-      entry.statusCode = details.statusCode;
-      entry.responseHeaders = details.responseHeaders || [];
-      entry.duration = Math.round(details.timeStamp - entry.timestamp);
-      networkLog.unshift(entry);
-      if (networkLog.length > MAX_NETWORK_ENTRIES) {
-        networkLog.length = MAX_NETWORK_ENTRIES;
-      }
-      pendingRequests.delete(details.requestId);
-      tryForwardEntry(entry);
+    let entry = pendingRequests.get(details.requestId);
+    // Create entry if earlier listeners didn't fire
+    if (!entry) {
+      entry = {
+        id: details.requestId,
+        timestamp: details.timeStamp,
+        url: details.url,
+        method: details.method,
+        type: details.type,
+        tabId: details.tabId,
+        requestHeaders: [],
+        requestBody: null,
+        responseBody: null,
+      };
     }
+    if (!entry.type) entry.type = details.type;
+    entry.statusCode = details.statusCode;
+    entry.responseHeaders = details.responseHeaders || [];
+    entry.duration = Math.round(details.timeStamp - (entry.timestamp || details.timeStamp));
+    networkLog.unshift(entry);
+    if (networkLog.length > MAX_NETWORK_ENTRIES) {
+      networkLog.length = MAX_NETWORK_ENTRIES;
+    }
+    pendingRequests.delete(details.requestId);
+    tryForwardEntry(entry);
   },
   { urls: ["<all_urls>"] },
   ["responseHeaders"]
@@ -745,18 +761,30 @@ chrome.webRequest.onCompleted.addListener(
 chrome.webRequest.onErrorOccurred.addListener(
   (details) => {
     if (!sniffingEnabled || loggingPaused) return;
-    const entry = pendingRequests.get(details.requestId);
-    if (entry) {
-      entry.statusCode = 0;
-      entry.error = details.error;
-      entry.responseHeaders = [];
-      networkLog.unshift(entry);
-      if (networkLog.length > MAX_NETWORK_ENTRIES) {
-        networkLog.length = MAX_NETWORK_ENTRIES;
-      }
-      pendingRequests.delete(details.requestId);
-      tryForwardEntry(entry);
+    let entry = pendingRequests.get(details.requestId);
+    if (!entry) {
+      entry = {
+        id: details.requestId,
+        timestamp: details.timeStamp,
+        url: details.url,
+        method: details.method,
+        type: details.type,
+        tabId: details.tabId,
+        requestHeaders: [],
+        requestBody: null,
+        responseBody: null,
+      };
     }
+    if (!entry.type) entry.type = details.type;
+    entry.statusCode = 0;
+    entry.error = details.error;
+    entry.responseHeaders = [];
+    networkLog.unshift(entry);
+    if (networkLog.length > MAX_NETWORK_ENTRIES) {
+      networkLog.length = MAX_NETWORK_ENTRIES;
+    }
+    pendingRequests.delete(details.requestId);
+    tryForwardEntry(entry);
   },
   { urls: ["<all_urls>"] }
 );
