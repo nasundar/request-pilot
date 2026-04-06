@@ -1095,15 +1095,16 @@ function getStatusClass(code) {
 /** Map Chrome ResourceType to DevTools-style category */
 function classifyResourceType(type) {
   switch (type) {
-    case "xmlhttprequest": case "fetch": return "fetch";
+    case "xmlhttprequest": return "fetch";
     case "main_frame": case "sub_frame": return "doc";
     case "script": return "js";
     case "stylesheet": return "css";
     case "image": return "img";
-    case "media": return "media";
+    case "media": case "object": return "media";
     case "font": return "font";
     case "websocket": return "ws";
-    default: return "other";
+    case "ping": case "csp_report": case "webtransport":
+    case "webbundle": case "other": default: return "other";
   }
 }
 
