@@ -1436,6 +1436,20 @@ body.standalone .log-filters {
   gap: 8px;
 }
 
+.domain-header .chevron,
+.path-row .chevron {
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+  transition: color 0.15s;
+}
+.domain-header:hover .chevron,
+.path-row:hover .chevron {
+  color: var(--accent);
+}
+
 .domain-header:hover {
   background: var(--bg-card-hover);
 }
@@ -1475,6 +1489,11 @@ body.standalone .log-filters {
   font-size: 12px;
   border-bottom: 1px solid var(--border);
   gap: 8px;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+.path-row:hover {
+  background: var(--bg-card-hover);
 }
 
 .path-row:last-child {

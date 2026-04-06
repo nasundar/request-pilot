@@ -2024,7 +2024,8 @@ async function renderStats() {
       : `<button class="btn-add-rule" data-url="${escapeAttr(domain + '/*')}" title="Add rule for this domain">+ Add Rule</button>`;
 
     html += `<div class="domain-group">
-      <div class="domain-header" onclick="this.parentElement.querySelector('.path-list').classList.toggle('hidden')">
+      <div class="domain-header">
+        <span class="chevron">▶</span>
         <span class="domain-name">${escapeHtml(domain)}</span>
         <div class="domain-stats">
           ${domainRuleBtn}
@@ -2052,7 +2053,8 @@ async function renderStats() {
       const pathAvg = pathDurations.length ? Math.round(pathDurations.reduce((a, b) => a + b, 0) / pathDurations.length) : null;
 
       html += `<div class="path-group">
-        <div class="path-row" onclick="this.parentElement.querySelector('.request-list').classList.toggle('hidden')">
+        <div class="path-row">
+          <span class="chevron">▶</span>
           <span class="path-name">${escapeHtml(path)}</span>
           <div class="path-badges">
             <span class="path-count">${entries.length}×</span>
@@ -2090,9 +2092,38 @@ async function renderStats() {
       const expanding = btnExpandAll.textContent.includes("Expand");
       statsContent.querySelectorAll(".path-list").forEach((pl) => pl.classList.toggle("hidden", !expanding));
       statsContent.querySelectorAll(".request-list").forEach((rl) => rl.classList.toggle("hidden", !expanding));
+      statsContent.querySelectorAll(".domain-header .chevron, .path-row .chevron").forEach((ch) => {
+        ch.textContent = expanding ? "▼" : "▶";
+      });
       btnExpandAll.textContent = expanding ? "Collapse All" : "Expand All";
     });
   }
+
+  // Wire up domain header collapse/expand
+  statsContent.querySelectorAll(".domain-header").forEach((header) => {
+    header.addEventListener("click", (e) => {
+      if (e.target.closest(".btn-add-rule")) return;
+      const pathList = header.parentElement.querySelector(".path-list");
+      const chevron = header.querySelector(".chevron");
+      if (pathList) {
+        const willShow = pathList.classList.toggle("hidden");
+        if (chevron) chevron.textContent = willShow ? "▶" : "▼";
+      }
+    });
+  });
+
+  // Wire up path row collapse/expand
+  statsContent.querySelectorAll(".path-row").forEach((row) => {
+    row.addEventListener("click", (e) => {
+      if (e.target.closest(".btn-add-rule")) return;
+      const reqList = row.parentElement.querySelector(".request-list");
+      const chevron = row.querySelector(".chevron");
+      if (reqList) {
+        const willShow = reqList.classList.toggle("hidden");
+        if (chevron) chevron.textContent = willShow ? "▶" : "▼";
+      }
+    });
+  });
 
   // Wire up View buttons in stats request rows
   statsContent.querySelectorAll(".btn-view-detail").forEach((btn) => {
