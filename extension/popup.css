@@ -193,6 +193,29 @@ body::-webkit-scrollbar-thumb {
 }
 
 /* ========== Desktop Connection Status Bar ========== */
+/* ========== Sniffing Status Bar ========== */
+.sniffing-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  background: var(--bg-input);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.sniffing-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--success);
+  animation: desktop-pulse 1.5s infinite;
+}
+.sniffing-dot.inactive {
+  background: var(--text-muted);
+  opacity: 0.5;
+  animation: none;
+}
+
 .desktop-status-bar {
   display: flex;
   align-items: center;

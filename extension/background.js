@@ -12,6 +12,9 @@ const MAX_LOG_ENTRIES = 100;
 // ── Pause / resume state ─────────────────────────────────────
 let loggingPaused = false;
 
+// ── Global sniffing kill-switch ──────────────────────────────
+let sniffingEnabled = true;
+
 // ── Debug counter for response body captures ─────────────────
 let captureDebugCount = 0;
 
@@ -389,6 +392,7 @@ async function handleMessage(msg) {
       return { paused: loggingPaused };
 
     case "captureResponseBody": {
+      if (!sniffingEnabled || loggingPaused) return { success: true };
       captureDebugCount++;
       const targetUrl = msg.url;
 
@@ -520,6 +524,16 @@ async function handleMessage(msg) {
         connected: isLiveConnected(),
         mode: liveMode,
       };
+
+    // ── Sniffing control ────────────────────────────────────────
+    case "setSniffingEnabled":
+      sniffingEnabled = !!msg.enabled;
+      await chrome.storage.local.set({ requestPilotSniffingEnabled: sniffingEnabled });
+      if (!sniffingEnabled) pendingRequests.clear();
+      return { success: true, enabled: sniffingEnabled };
+
+    case "getSniffingStatus":
+      return { enabled: sniffingEnabled };
 
     default:
       return { error: "Unknown action" };
@@ -654,7 +668,7 @@ const pendingRequests = new Map(); // requestId → partial entry
 // Capture request body before headers are sent
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
-    if (loggingPaused) return;
+    if (!sniffingEnabled || loggingPaused) return;
     let body = null;
     if (details.requestBody) {
       if (details.requestBody.formData) {
@@ -687,7 +701,7 @@ chrome.webRequest.onBeforeRequest.addListener(
 
 chrome.webRequest.onSendHeaders.addListener(
   (details) => {
-    if (loggingPaused) return;
+    if (!sniffingEnabled || loggingPaused) return;
     const existing = pendingRequests.get(details.requestId) || {};
     pendingRequests.set(details.requestId, {
       ...existing,
@@ -710,7 +724,7 @@ chrome.webRequest.onSendHeaders.addListener(
 
 chrome.webRequest.onCompleted.addListener(
   (details) => {
-    if (loggingPaused) return;
+    if (!sniffingEnabled || loggingPaused) return;
     const entry = pendingRequests.get(details.requestId);
     if (entry) {
       entry.statusCode = details.statusCode;
@@ -730,7 +744,7 @@ chrome.webRequest.onCompleted.addListener(
 
 chrome.webRequest.onErrorOccurred.addListener(
   (details) => {
-    if (loggingPaused) return;
+    if (!sniffingEnabled || loggingPaused) return;
     const entry = pendingRequests.get(details.requestId);
     if (entry) {
       entry.statusCode = 0;
@@ -772,5 +786,12 @@ chrome.storage.local.get('requestPilotLiveEnabled', (data) => {
   if (data.requestPilotLiveEnabled === true) {
     liveEnabled = true;
     connectToDesktop();
+  }
+});
+
+// Restore sniffing preference — enabled by default
+chrome.storage.local.get('requestPilotSniffingEnabled', (data) => {
+  if (data.requestPilotSniffingEnabled === false) {
+    sniffingEnabled = false;
   }
 });

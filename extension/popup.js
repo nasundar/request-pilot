@@ -119,6 +119,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadRules();
   attachEventListeners();
   updateDesktopStatus();
+  updateSniffingStatus();
   // Poll desktop connection status every 2 seconds
   setInterval(updateDesktopStatus, 2000);
 });
@@ -172,6 +173,30 @@ async function updateDesktopStatus() {
   }
 }
 
+async function updateSniffingStatus() {
+  try {
+    const status = await sendMessage({ action: 'getSniffingStatus' });
+    const dot = document.getElementById('sniffingDot');
+    const text = document.getElementById('sniffingStatusText');
+    const toggle = document.getElementById('sniffingToggle');
+    if (!dot || !text) return;
+
+    if (toggle && toggle.checked !== status.enabled) {
+      toggle._updating = true;
+      toggle.checked = status.enabled;
+      toggle._updating = false;
+    }
+
+    dot.className = 'sniffing-dot';
+    if (status.enabled) {
+      text.textContent = 'Sniffing: Active';
+    } else {
+      dot.classList.add('inactive');
+      text.textContent = 'Sniffing: Off';
+    }
+  } catch {}
+}
+
 function attachEventListeners() {
   // Tab switching
   $$(".tab-btn").forEach((btn) => {
@@ -193,6 +218,16 @@ function attachEventListeners() {
       const action = liveToggle.checked ? 'enableLiveCapture' : 'disableLiveCapture';
       await sendMessage({ action });
       updateDesktopStatus();
+    });
+  }
+
+  // Sniffing toggle
+  const sniffingToggle = document.getElementById('sniffingToggle');
+  if (sniffingToggle) {
+    sniffingToggle.addEventListener('change', async () => {
+      if (sniffingToggle._updating) return;
+      await sendMessage({ action: 'setSniffingEnabled', enabled: sniffingToggle.checked });
+      updateSniffingStatus();
     });
   }
 

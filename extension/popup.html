@@ -90,6 +90,16 @@
     <input type="file" id="file-import" accept=".json" class="hidden" />
   </header>
 
+  <!-- Sniffing Status -->
+  <div class="sniffing-status-bar" id="sniffingStatusBar">
+    <span class="sniffing-dot" id="sniffingDot"></span>
+    <span class="sniffing-status-text" id="sniffingStatusText">Sniffing: Active</span>
+    <label class="live-toggle" title="Enable/disable network request sniffing">
+      <input type="checkbox" id="sniffingToggle" checked />
+      <span class="live-toggle-slider"></span>
+    </label>
+  </div>
+
   <!-- Desktop Connection Status -->
   <div class="desktop-status-bar" id="desktopStatusBar">
     <span class="desktop-dot" id="desktopDot"></span>
