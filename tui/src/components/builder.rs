@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use crate::app::{App, BuilderFocus};
+use crate::app::{App, BuilderFocus, InputMode, InputPurpose, ConfirmPurpose};
 use crate::ui::theme;
 use crate::ui::truncate_to;
 
@@ -77,8 +77,8 @@ pub fn render_builder(frame: &mut Frame, app: &App, area: Rect) {
     render_method_url(frame, app, blk, chunks[0]);
     render_headers(frame, app, blk, chunks[1]);
     render_body(frame, app, blk, chunks[2]);
-    render_assertions(frame, blk, chunks[3]);
-    render_extracts(frame, blk, chunks[4]);
+    render_assertions(frame, app, blk, chunks[3]);
+    render_extracts(frame, app, blk, chunks[4]);
 
     // Render variable autocomplete overlay if open
     if app.var_ac_open && app.builder_focus == BuilderFocus::Url {
@@ -437,17 +437,30 @@ fn render_body(
 
 fn render_assertions(
     frame: &mut Frame,
+    app: &App,
     blk: &request_pilot_core::http_parser::TestBlock,
     area: Rect,
 ) {
+    let is_focused = app.builder_focus == BuilderFocus::Assertions;
+    let border_style = if is_focused {
+        Style::default().fg(theme::BLUE())
+    } else {
+        Style::default().fg(theme::TEXT_FAINT())
+    };
+    let title = if is_focused {
+        format!(" Assertions ({}) [a]dd [d]el ", blk.assertions.len())
+    } else {
+        format!(" Assertions ({}) ", blk.assertions.len())
+    };
     let block = Block::default()
-        .title(format!(" Assertions ({}) ", blk.assertions.len()))
+        .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::TEXT_FAINT()));
+        .border_style(border_style);
 
     if blk.assertions.is_empty() {
+        let hint = if is_focused { "  (none) — press [a] to add" } else { "  (none)" };
         frame.render_widget(
-            Paragraph::new("  (none)")
+            Paragraph::new(hint)
                 .block(block)
                 .style(Style::default().fg(theme::TEXT_FAINT())),
             area,
@@ -458,16 +471,25 @@ fn render_assertions(
     let items: Vec<ListItem> = blk
         .assertions
         .iter()
-        .map(|a| {
+        .enumerate()
+        .map(|(i, a)| {
             let full = format!("{} {} {}", a.left, a.operator, a.right);
             let max_a = (area.width as usize).saturating_sub(6);
             let display_a = truncate_to(&full, max_a);
+            let is_active = is_focused && i == app.builder_assert_cursor;
+            let style = if is_active {
+                Style::default().fg(theme::BG_DARK()).bg(theme::YELLOW()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::TEXT())
+            };
+            let bullet_style = if is_active {
+                Style::default().fg(theme::BG_DARK()).bg(theme::YELLOW())
+            } else {
+                Style::default().fg(theme::YELLOW())
+            };
             ListItem::new(Line::from(vec![
-                Span::styled("  ● ", Style::default().fg(theme::YELLOW())),
-                Span::styled(
-                    display_a,
-                    Style::default().fg(theme::TEXT()),
-                ),
+                Span::styled("  ● ", bullet_style),
+                Span::styled(display_a, style),
             ]))
         })
         .collect();
@@ -477,17 +499,30 @@ fn render_assertions(
 
 fn render_extracts(
     frame: &mut Frame,
+    app: &App,
     blk: &request_pilot_core::http_parser::TestBlock,
     area: Rect,
 ) {
+    let is_focused = app.builder_focus == BuilderFocus::Extracts;
+    let border_style = if is_focused {
+        Style::default().fg(theme::BLUE())
+    } else {
+        Style::default().fg(theme::TEXT_FAINT())
+    };
+    let title = if is_focused {
+        format!(" Extracts ({}) [a]dd [d]el ", blk.extracts.len())
+    } else {
+        format!(" Extracts ({}) ", blk.extracts.len())
+    };
     let block = Block::default()
-        .title(format!(" Extracts ({}) ", blk.extracts.len()))
+        .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::TEXT_FAINT()));
+        .border_style(border_style);
 
     if blk.extracts.is_empty() {
+        let hint = if is_focused { "  (none) — press [a] to add" } else { "  (none)" };
         frame.render_widget(
-            Paragraph::new("  (none)")
+            Paragraph::new(hint)
                 .block(block)
                 .style(Style::default().fg(theme::TEXT_FAINT())),
             area,
@@ -498,12 +533,29 @@ fn render_extracts(
     let items: Vec<ListItem> = blk
         .extracts
         .iter()
-        .map(|e| {
+        .enumerate()
+        .map(|(i, e)| {
+            let is_active = is_focused && i == app.builder_extract_cursor;
+            let var_style = if is_active {
+                Style::default().fg(theme::BG_DARK()).bg(theme::MAUVE()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::MAUVE())
+            };
+            let path_style = if is_active {
+                Style::default().fg(theme::BG_DARK()).bg(theme::MAUVE())
+            } else {
+                Style::default().fg(theme::TEXT())
+            };
+            let sep_style = if is_active {
+                Style::default().fg(theme::BG_DARK()).bg(theme::MAUVE())
+            } else {
+                Style::default().fg(theme::TEXT_FAINT())
+            };
             ListItem::new(Line::from(vec![
-                Span::styled("  ⇐ ", Style::default().fg(theme::MAUVE())),
-                Span::styled(&e.variable_name, Style::default().fg(theme::MAUVE())),
-                Span::styled(" = ", Style::default().fg(theme::TEXT_FAINT())),
-                Span::styled(&e.source_path, Style::default().fg(theme::TEXT())),
+                Span::styled("  ⇐ ", var_style),
+                Span::styled(e.variable_name.clone(), var_style),
+                Span::styled(" = ", sep_style),
+                Span::styled(e.source_path.clone(), path_style),
             ]))
         })
         .collect();
@@ -603,6 +655,7 @@ pub fn handle_builder_keys(app: &mut App, key: KeyEvent) {
                 // Let the char go through to the URL handler, then update filter
                 if app.builder_focus == BuilderFocus::Url {
                     handle_url_keys(app, key);
+                    app.flush_builder_to_file();
                     update_ac_from_url(app);
                     return;
                 }
@@ -610,6 +663,7 @@ pub fn handle_builder_keys(app: &mut App, key: KeyEvent) {
             KeyCode::Backspace => {
                 if app.builder_focus == BuilderFocus::Url {
                     handle_url_keys(app, key);
+                    app.flush_builder_to_file();
                     update_ac_from_url(app);
                     return;
                 }
@@ -636,15 +690,19 @@ pub fn handle_builder_keys(app: &mut App, key: KeyEvent) {
                 BuilderFocus::Method => BuilderFocus::Url,
                 BuilderFocus::Url => BuilderFocus::Headers,
                 BuilderFocus::Headers => BuilderFocus::Body,
-                BuilderFocus::Body => BuilderFocus::Method,
+                BuilderFocus::Body => BuilderFocus::Assertions,
+                BuilderFocus::Assertions => BuilderFocus::Extracts,
+                BuilderFocus::Extracts => BuilderFocus::Method,
             };
         }
         KeyCode::BackTab => {
             app.builder_focus = match app.builder_focus {
-                BuilderFocus::Method => BuilderFocus::Body,
+                BuilderFocus::Method => BuilderFocus::Extracts,
                 BuilderFocus::Url => BuilderFocus::Method,
                 BuilderFocus::Headers => BuilderFocus::Url,
                 BuilderFocus::Body => BuilderFocus::Headers,
+                BuilderFocus::Assertions => BuilderFocus::Body,
+                BuilderFocus::Extracts => BuilderFocus::Assertions,
             };
         }
         // Ctrl+Enter sends request
@@ -656,9 +714,19 @@ pub fn handle_builder_keys(app: &mut App, key: KeyEvent) {
         }
         _ => {
             match app.builder_focus {
-                BuilderFocus::Method => handle_method_keys(app, key),
+                BuilderFocus::Method => {
+                    handle_method_keys(app, key);
+                    // Method change always mutates — flush to keep code in sync
+                    if matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l')) {
+                        app.flush_builder_to_file();
+                    }
+                }
                 BuilderFocus::Url => {
                     handle_url_keys(app, key);
+                    // Flush on content-changing keys
+                    if matches!(key.code, KeyCode::Char(_) | KeyCode::Backspace) {
+                        app.flush_builder_to_file();
+                    }
                     // Auto-trigger on {{ typed
                     if matches!(key.code, KeyCode::Char('{')) {
                         let prefix = extract_var_prefix_from_url(app);
@@ -679,6 +747,8 @@ pub fn handle_builder_keys(app: &mut App, key: KeyEvent) {
                 }
                 BuilderFocus::Headers => handle_headers_keys(app, key),
                 BuilderFocus::Body => handle_body_keys(app, key),
+                BuilderFocus::Assertions => handle_assertions_keys(app, key),
+                BuilderFocus::Extracts => handle_extracts_keys(app, key),
             }
         }
     }
@@ -766,6 +836,7 @@ fn insert_var_autocomplete_builder(app: &mut App) {
             }
         }
     }
+    app.flush_builder_to_file();
 }
 
 fn handle_method_keys(app: &mut App, key: KeyEvent) {
@@ -872,6 +943,127 @@ fn handle_body_keys(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.builder_body_scroll = app.builder_body_scroll.saturating_sub(10);
+        }
+        _ => {}
+    }
+}
+
+fn handle_assertions_keys(app: &mut App, key: KeyEvent) {
+    let count = if let (Some(fi), Some(bi)) = (app.active_file_idx, app.active_block_idx) {
+        app.loaded_files.get(fi)
+            .and_then(|f| f.suite.blocks.get(bi))
+            .map(|b| b.assertions.len())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') => {
+            if count > 0 {
+                app.builder_assert_cursor = (app.builder_assert_cursor + 1).min(count - 1);
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.builder_assert_cursor = app.builder_assert_cursor.saturating_sub(1);
+        }
+        // Add assertion
+        KeyCode::Char('a') => {
+            app.input_mode = InputMode::Input {
+                prompt: "Left operand (e.g. status, $.field): ".to_string(),
+                purpose: InputPurpose::AssertLeft,
+                buffer: String::new(),
+            };
+        }
+        // Delete assertion
+        KeyCode::Char('d') => {
+            if count > 0 && app.builder_assert_cursor < count {
+                let idx = app.builder_assert_cursor;
+                if let (Some(fi), Some(bi)) = (app.active_file_idx, app.active_block_idx) {
+                    if let Some(a) = app.loaded_files[fi].suite.blocks[bi].assertions.get(idx) {
+                        let desc = format!("{} {} {}", a.left, a.operator, a.right);
+                        app.input_mode = InputMode::Confirm {
+                            prompt: format!("Delete assertion '{}'? (y/n)", desc),
+                            purpose: ConfirmPurpose::DeleteAssertion { index: idx },
+                        };
+                    }
+                }
+            }
+        }
+        // Edit assertion
+        KeyCode::Char('e') | KeyCode::Enter => {
+            if count > 0 && app.builder_assert_cursor < count {
+                let idx = app.builder_assert_cursor;
+                if let (Some(fi), Some(bi)) = (app.active_file_idx, app.active_block_idx) {
+                    if let Some(a) = app.loaded_files[fi].suite.blocks[bi].assertions.get(idx) {
+                        app.input_mode = InputMode::Input {
+                            prompt: "Left operand: ".to_string(),
+                            purpose: InputPurpose::EditAssertLeft { index: idx },
+                            buffer: a.left.clone(),
+                        };
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_extracts_keys(app: &mut App, key: KeyEvent) {
+    let count = if let (Some(fi), Some(bi)) = (app.active_file_idx, app.active_block_idx) {
+        app.loaded_files.get(fi)
+            .and_then(|f| f.suite.blocks.get(bi))
+            .map(|b| b.extracts.len())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') => {
+            if count > 0 {
+                app.builder_extract_cursor = (app.builder_extract_cursor + 1).min(count - 1);
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.builder_extract_cursor = app.builder_extract_cursor.saturating_sub(1);
+        }
+        // Add extract
+        KeyCode::Char('a') => {
+            app.input_mode = InputMode::Input {
+                prompt: "Variable name: ".to_string(),
+                purpose: InputPurpose::ExtractVarName,
+                buffer: String::new(),
+            };
+        }
+        // Delete extract
+        KeyCode::Char('d') => {
+            if count > 0 && app.builder_extract_cursor < count {
+                let idx = app.builder_extract_cursor;
+                if let (Some(fi), Some(bi)) = (app.active_file_idx, app.active_block_idx) {
+                    if let Some(e) = app.loaded_files[fi].suite.blocks[bi].extracts.get(idx) {
+                        app.input_mode = InputMode::Confirm {
+                            prompt: format!("Delete extract '{}'? (y/n)", e.variable_name),
+                            purpose: ConfirmPurpose::DeleteExtract { index: idx },
+                        };
+                    }
+                }
+            }
+        }
+        // Edit extract
+        KeyCode::Char('e') | KeyCode::Enter => {
+            if count > 0 && app.builder_extract_cursor < count {
+                let idx = app.builder_extract_cursor;
+                if let (Some(fi), Some(bi)) = (app.active_file_idx, app.active_block_idx) {
+                    if let Some(e) = app.loaded_files[fi].suite.blocks[bi].extracts.get(idx) {
+                        app.input_mode = InputMode::Input {
+                            prompt: "Variable name: ".to_string(),
+                            purpose: InputPurpose::EditExtractVarName { index: idx },
+                            buffer: e.variable_name.clone(),
+                        };
+                    }
+                }
+            }
         }
         _ => {}
     }

@@ -21,7 +21,7 @@ Comprehensive feature mapping across **Desktop** (Tauri v2), **TUI** (ratatui te
 | Load .env file | ✅ Via toolbar | ✅ Ctrl+L with autocomplete | N/A |
 | Unsaved indicator | ✅ Dot on tab | ✅ `[modified]` badge in editor | N/A |
 | File header tooltip | ✅ Hover file tab → parsed comment header | ❌ | N/A |
-| Builder auto-flush to file | ✅ Debounced sync on every edit | ⚡ `flush_builder_to_file()` exists, not wired | N/A |
+| Builder auto-flush to file | ✅ Debounced sync on every edit | ✅ `flush_builder_to_file()` on method/URL/directive changes | N/A |
 
 ---
 
@@ -34,8 +34,8 @@ Comprehensive feature mapping across **Desktop** (Tauri v2), **TUI** (ratatui te
 | Headers editing | ✅ Dynamic key/value rows, add/remove/toggle | ⚡ Read-only display | N/A |
 | Body editing | ✅ Textarea with syntax highlighting overlay | ⚡ Read-only display | N/A |
 | Body language detection | ✅ JSON, XML, SQL, PromQL coloring | N/A (read-only) | N/A |
-| Metadata accordion | ✅ Editable name, description, group, depends, mode, disabled | ⚡ View-only in inspector | N/A |
-| Assertions & Extracts sub-tab | ✅ Add/edit/remove assertions & extracts | ⚡ Read-only list display | N/A |
+| Metadata accordion | ✅ Editable name, description, group, depends, mode, disabled | ✅ Editable via inspector (n/d/r/p keys) | N/A |
+| Assertions & Extracts sub-tab | ✅ Add/edit/remove assertions & extracts | ✅ Add/edit/remove with a/e/d keys | N/A |
 | Compare multi-step tabs | ✅ Separate tab per step + comparison tab | ⚡ Special render, read-only | N/A |
 | Add compare step | ✅ + button adds new step | ❌ | N/A |
 | Comparison panel (diff rules) | ✅ Editable diff assertions | ⚡ Read-only display | N/A |
@@ -219,9 +219,9 @@ These are features present in Desktop but missing or limited in TUI:
 |-----|---------|-----|----------|
 | Builder headers editing | ✅ Full CRUD | ⚡ Read-only | Medium |
 | Builder body editing | ✅ Full textarea | ⚡ Read-only | Medium |
-| Builder metadata editing | ✅ Editable accordion | ⚡ View-only in inspector | Medium |
-| Builder assertions/extracts editing | ✅ Add/edit/remove | ⚡ Read-only list | Medium |
-| Builder auto-flush to file | ✅ Debounced on every edit | ⚡ Method exists, not wired | High |
+| Builder metadata editing | ✅ Editable accordion | ✅ Via inspector (n/d/r/p) | Closed |
+| Builder assertions/extracts editing | ✅ Add/edit/remove | ✅ Add/edit/remove (a/e/d) | Closed |
+| Builder auto-flush to file | ✅ Debounced on every edit | ✅ Flush on mutations | Closed |
 | Compare step tabs (editable) | ✅ Full CRUD per step | ⚡ Read-only | Low |
 | XML/YAML/CSV rendering | ✅ Formatted display | ❌ Raw text | Low |
 | Block/file/group tooltips | ✅ Rich hover info | ❌ | Low |

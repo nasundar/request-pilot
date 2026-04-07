@@ -29,6 +29,23 @@ pub enum InputPurpose {
     EditVarValue { name: String },
     ExportHistory,
     SaveFile,
+    // Assertion CRUD
+    AssertLeft,
+    AssertOperator { left: String },
+    AssertRight { left: String, operator: String },
+    EditAssertLeft { index: usize },
+    EditAssertOperator { index: usize, left: String },
+    EditAssertRight { index: usize, left: String, operator: String },
+    // Extract CRUD
+    ExtractVarName,
+    ExtractSourcePath { variable_name: String },
+    EditExtractVarName { index: usize },
+    EditExtractSourcePath { index: usize, variable_name: String },
+    // Metadata editing (inspector)
+    EditBlockName,
+    EditBlockDescription,
+    EditBlockGroup,
+    EditBlockDepends,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +53,8 @@ pub enum ConfirmPurpose {
     CloseFile { file_idx: usize },
     ClearHistory,
     DeleteVar { name: String },
+    DeleteAssertion { index: usize },
+    DeleteExtract { index: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +139,8 @@ pub enum BuilderFocus {
     Url,
     Headers,
     Body,
+    Assertions,
+    Extracts,
 }
 
 // --- Logs types ---
@@ -345,6 +366,8 @@ pub struct App {
     pub builder_url_cursor: usize,
     pub builder_body_scroll: u16,
     pub builder_header_cursor: usize,
+    pub builder_assert_cursor: usize,
+    pub builder_extract_cursor: usize,
 
     // Logs state
     pub log_entries: Vec<LogEntry>,
@@ -518,6 +541,8 @@ impl App {
             builder_url_cursor: 0,
             builder_body_scroll: 0,
             builder_header_cursor: 0,
+            builder_assert_cursor: 0,
+            builder_extract_cursor: 0,
             log_entries: Vec::new(),
             log_scroll: 0,
             log_filter: LogFilter::All,
@@ -1388,6 +1413,187 @@ impl App {
                     }
                 }
             }
+            // --- Assertion CRUD ---
+            InputPurpose::AssertLeft => {
+                if !value.is_empty() {
+                    self.input_mode = InputMode::Input {
+                        prompt: "Operator (==, !=, >, <, >=, <=, contains): ".to_string(),
+                        purpose: InputPurpose::AssertOperator { left: value },
+                        buffer: String::new(),
+                    };
+                    return;
+                }
+            }
+            InputPurpose::AssertOperator { left } => {
+                if !value.is_empty() {
+                    self.input_mode = InputMode::Input {
+                        prompt: "Right operand: ".to_string(),
+                        purpose: InputPurpose::AssertRight { left, operator: value },
+                        buffer: String::new(),
+                    };
+                    return;
+                }
+            }
+            InputPurpose::AssertRight { left, operator } => {
+                if let (Some(fi), Some(bi)) = (self.active_file_idx, self.active_block_idx) {
+                    if let Some(blk) = self.loaded_files[fi].suite.blocks.get_mut(bi) {
+                        blk.assertions.push(request_pilot_core::http_parser::Assertion {
+                            left,
+                            operator,
+                            right: value,
+                        });
+                        self.builder_assert_cursor = blk.assertions.len().saturating_sub(1);
+                        self.flush_builder_to_file();
+                        self.set_status("Assertion added".to_string());
+                    }
+                }
+            }
+            InputPurpose::EditAssertLeft { index } => {
+                if !value.is_empty() {
+                    // Pre-fill operator from existing assertion
+                    let existing_op = self.active_file_idx.and_then(|fi| {
+                        self.active_block_idx.and_then(|bi| {
+                            self.loaded_files.get(fi)
+                                .and_then(|f| f.suite.blocks.get(bi))
+                                .and_then(|b| b.assertions.get(index))
+                                .map(|a| a.operator.clone())
+                        })
+                    }).unwrap_or_default();
+                    self.input_mode = InputMode::Input {
+                        prompt: "Operator (==, !=, >, <, >=, <=, contains): ".to_string(),
+                        purpose: InputPurpose::EditAssertOperator { index, left: value },
+                        buffer: existing_op,
+                    };
+                    return;
+                }
+            }
+            InputPurpose::EditAssertOperator { index, left } => {
+                if !value.is_empty() {
+                    // Pre-fill right operand from existing assertion
+                    let existing_right = self.active_file_idx.and_then(|fi| {
+                        self.active_block_idx.and_then(|bi| {
+                            self.loaded_files.get(fi)
+                                .and_then(|f| f.suite.blocks.get(bi))
+                                .and_then(|b| b.assertions.get(index))
+                                .map(|a| a.right.clone())
+                        })
+                    }).unwrap_or_default();
+                    self.input_mode = InputMode::Input {
+                        prompt: "Right operand: ".to_string(),
+                        purpose: InputPurpose::EditAssertRight { index, left, operator: value },
+                        buffer: existing_right,
+                    };
+                    return;
+                }
+            }
+            InputPurpose::EditAssertRight { index, left, operator } => {
+                if let (Some(fi), Some(bi)) = (self.active_file_idx, self.active_block_idx) {
+                    if let Some(blk) = self.loaded_files[fi].suite.blocks.get_mut(bi) {
+                        if let Some(a) = blk.assertions.get_mut(index) {
+                            a.left = left;
+                            a.operator = operator;
+                            a.right = value;
+                            self.flush_builder_to_file();
+                            self.set_status("Assertion updated".to_string());
+                        }
+                    }
+                }
+            }
+            // --- Extract CRUD ---
+            InputPurpose::ExtractVarName => {
+                if !value.is_empty() {
+                    self.input_mode = InputMode::Input {
+                        prompt: "Source path (e.g. $.data.id): ".to_string(),
+                        purpose: InputPurpose::ExtractSourcePath { variable_name: value },
+                        buffer: String::new(),
+                    };
+                    return;
+                }
+            }
+            InputPurpose::ExtractSourcePath { variable_name } => {
+                if let (Some(fi), Some(bi)) = (self.active_file_idx, self.active_block_idx) {
+                    if let Some(blk) = self.loaded_files[fi].suite.blocks.get_mut(bi) {
+                        blk.extracts.push(request_pilot_core::http_parser::Extract {
+                            variable_name,
+                            source_path: value,
+                        });
+                        self.builder_extract_cursor = blk.extracts.len().saturating_sub(1);
+                        self.flush_builder_to_file();
+                        self.set_status("Extract added".to_string());
+                    }
+                }
+            }
+            InputPurpose::EditExtractVarName { index } => {
+                if !value.is_empty() {
+                    // Pre-fill source path from existing extract
+                    let existing_path = self.active_file_idx.and_then(|fi| {
+                        self.active_block_idx.and_then(|bi| {
+                            self.loaded_files.get(fi)
+                                .and_then(|f| f.suite.blocks.get(bi))
+                                .and_then(|b| b.extracts.get(index))
+                                .map(|e| e.source_path.clone())
+                        })
+                    }).unwrap_or_default();
+                    self.input_mode = InputMode::Input {
+                        prompt: "Source path (e.g. $.data.id): ".to_string(),
+                        purpose: InputPurpose::EditExtractSourcePath { index, variable_name: value },
+                        buffer: existing_path,
+                    };
+                    return;
+                }
+            }
+            InputPurpose::EditExtractSourcePath { index, variable_name } => {
+                if let (Some(fi), Some(bi)) = (self.active_file_idx, self.active_block_idx) {
+                    if let Some(blk) = self.loaded_files[fi].suite.blocks.get_mut(bi) {
+                        if let Some(e) = blk.extracts.get_mut(index) {
+                            e.variable_name = variable_name;
+                            e.source_path = value;
+                            self.flush_builder_to_file();
+                            self.set_status("Extract updated".to_string());
+                        }
+                    }
+                }
+            }
+            // --- Metadata editing ---
+            InputPurpose::EditBlockName => {
+                if let (Some(fi), Some(bi)) = (self.active_file_idx, self.active_block_idx) {
+                    if let Some(blk) = self.loaded_files[fi].suite.blocks.get_mut(bi) {
+                        blk.name = value;
+                        self.flush_builder_to_file();
+                        self.set_status("Block name updated".to_string());
+                    }
+                }
+            }
+            InputPurpose::EditBlockDescription => {
+                if let (Some(fi), Some(bi)) = (self.active_file_idx, self.active_block_idx) {
+                    if let Some(blk) = self.loaded_files[fi].suite.blocks.get_mut(bi) {
+                        blk.description = value;
+                        self.flush_builder_to_file();
+                        self.set_status("Description updated".to_string());
+                    }
+                }
+            }
+            InputPurpose::EditBlockGroup => {
+                if let (Some(fi), Some(bi)) = (self.active_file_idx, self.active_block_idx) {
+                    if let Some(blk) = self.loaded_files[fi].suite.blocks.get_mut(bi) {
+                        blk.group = if value.is_empty() { None } else { Some(value) };
+                        self.flush_builder_to_file();
+                        self.set_status("Group updated".to_string());
+                    }
+                }
+            }
+            InputPurpose::EditBlockDepends => {
+                if let (Some(fi), Some(bi)) = (self.active_file_idx, self.active_block_idx) {
+                    if let Some(blk) = self.loaded_files[fi].suite.blocks.get_mut(bi) {
+                        blk.depends = value.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        self.flush_builder_to_file();
+                        self.set_status("Dependencies updated".to_string());
+                    }
+                }
+            }
         }
     }
 
@@ -1401,6 +1607,34 @@ impl App {
             }
             ConfirmPurpose::DeleteVar { name } => {
                 self.delete_variable(&name);
+            }
+            ConfirmPurpose::DeleteAssertion { index } => {
+                if let (Some(fi), Some(bi)) = (self.active_file_idx, self.active_block_idx) {
+                    if let Some(blk) = self.loaded_files[fi].suite.blocks.get_mut(bi) {
+                        if index < blk.assertions.len() {
+                            blk.assertions.remove(index);
+                            if self.builder_assert_cursor >= blk.assertions.len() && !blk.assertions.is_empty() {
+                                self.builder_assert_cursor = blk.assertions.len() - 1;
+                            }
+                            self.flush_builder_to_file();
+                            self.set_status("Assertion deleted".to_string());
+                        }
+                    }
+                }
+            }
+            ConfirmPurpose::DeleteExtract { index } => {
+                if let (Some(fi), Some(bi)) = (self.active_file_idx, self.active_block_idx) {
+                    if let Some(blk) = self.loaded_files[fi].suite.blocks.get_mut(bi) {
+                        if index < blk.extracts.len() {
+                            blk.extracts.remove(index);
+                            if self.builder_extract_cursor >= blk.extracts.len() && !blk.extracts.is_empty() {
+                                self.builder_extract_cursor = blk.extracts.len() - 1;
+                            }
+                            self.flush_builder_to_file();
+                            self.set_status("Extract deleted".to_string());
+                        }
+                    }
+                }
             }
         }
     }

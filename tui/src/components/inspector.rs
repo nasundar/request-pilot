@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use crossterm::event::{KeyCode, KeyEvent};
-use crate::app::{App, TreeNode};
+use crate::app::{App, TreeNode, InputMode, InputPurpose};
 use crate::ui::theme;
 use request_pilot_core::history::HistoryEntry;
 
@@ -589,12 +589,28 @@ pub fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
     let hint_y = popup_area.y + popup_area.height - 1;
     if hint_y < area.height {
         let hint_area = Rect::new(popup_area.x + 2, hint_y, popup_area.width.saturating_sub(4), 1);
-        let hint = Paragraph::new(Line::from(vec![
+        let is_block = if !app.tree_nodes.is_empty() {
+            matches!(&app.tree_nodes[app.tree_cursor.min(app.tree_nodes.len() - 1)], crate::app::TreeNode::Block { .. })
+        } else { false };
+        let mut spans = vec![
             Span::styled("↑↓", Style::default().fg(theme::PEACH())),
             Span::styled("=scroll ", Style::default().fg(theme::TEXT_FAINT())),
             Span::styled("i/Esc", Style::default().fg(theme::PEACH())),
             Span::styled("=close", Style::default().fg(theme::TEXT_FAINT())),
-        ]));
+        ];
+        if is_block {
+            spans.extend([
+                Span::styled(" n", Style::default().fg(theme::PEACH())),
+                Span::styled("=name ", Style::default().fg(theme::TEXT_FAINT())),
+                Span::styled("d", Style::default().fg(theme::PEACH())),
+                Span::styled("=desc ", Style::default().fg(theme::TEXT_FAINT())),
+                Span::styled("r", Style::default().fg(theme::PEACH())),
+                Span::styled("=group ", Style::default().fg(theme::TEXT_FAINT())),
+                Span::styled("p", Style::default().fg(theme::PEACH())),
+                Span::styled("=deps", Style::default().fg(theme::TEXT_FAINT())),
+            ]);
+        }
+        let hint = Paragraph::new(Line::from(spans));
         frame.render_widget(hint, hint_area);
     }
 }
@@ -616,10 +632,79 @@ pub fn handle_inspector_keys(app: &mut App, key: KeyEvent) -> bool {
             app.inspect_scroll = app.inspect_scroll.saturating_sub(10);
         }
         KeyCode::Char('g') => { app.inspect_scroll = 0; }
-        KeyCode::Char('G') => { app.inspect_scroll = 200; } // large enough to hit bottom
+        KeyCode::Char('G') => { app.inspect_scroll = 200; }
+        // Metadata editing: n=name, d=description, r=group, p=depends
+        KeyCode::Char('n') => {
+            if let Some((fi, bi)) = get_inspected_block_idx(app) {
+                let buf = app.loaded_files[fi].suite.blocks[bi].name.clone();
+                app.active_file_idx = Some(fi);
+                app.active_block_idx = Some(bi);
+                app.input_mode = InputMode::Input {
+                    prompt: "Block name: ".to_string(),
+                    purpose: InputPurpose::EditBlockName,
+                    buffer: buf,
+                };
+            }
+        }
+        KeyCode::Char('d') => {
+            if let Some((fi, bi)) = get_inspected_block_idx(app) {
+                let buf = app.loaded_files[fi].suite.blocks[bi].description.clone();
+                app.active_file_idx = Some(fi);
+                app.active_block_idx = Some(bi);
+                app.input_mode = InputMode::Input {
+                    prompt: "Description: ".to_string(),
+                    purpose: InputPurpose::EditBlockDescription,
+                    buffer: buf,
+                };
+            }
+        }
+        KeyCode::Char('r') => {
+            if let Some((fi, bi)) = get_inspected_block_idx(app) {
+                let buf = app.loaded_files[fi].suite.blocks[bi].group.clone().unwrap_or_default();
+                app.active_file_idx = Some(fi);
+                app.active_block_idx = Some(bi);
+                app.input_mode = InputMode::Input {
+                    prompt: "Group (empty to remove): ".to_string(),
+                    purpose: InputPurpose::EditBlockGroup,
+                    buffer: buf,
+                };
+            }
+        }
+        KeyCode::Char('p') => {
+            if let Some((fi, bi)) = get_inspected_block_idx(app) {
+                let buf = app.loaded_files[fi].suite.blocks[bi].depends.join(", ");
+                app.active_file_idx = Some(fi);
+                app.active_block_idx = Some(bi);
+                app.input_mode = InputMode::Input {
+                    prompt: "Depends (comma-separated): ".to_string(),
+                    purpose: InputPurpose::EditBlockDepends,
+                    buffer: buf,
+                };
+            }
+        }
         _ => {}
     }
     true
+}
+
+/// Get the file/block indices of the block being inspected (if any).
+fn get_inspected_block_idx(app: &App) -> Option<(usize, usize)> {
+    if app.tree_nodes.is_empty() { return None; }
+    let node = &app.tree_nodes[app.tree_cursor.min(app.tree_nodes.len() - 1)];
+    match node {
+        TreeNode::Block { file_idx, block_idx } => {
+            // Validate indices exist
+            if app.loaded_files.get(*file_idx)
+                .and_then(|f| f.suite.blocks.get(*block_idx))
+                .is_some()
+            {
+                Some((*file_idx, *block_idx))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 fn extract_file_description(content: &str) -> Vec<String> {
