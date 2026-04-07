@@ -4984,6 +4984,326 @@ function escapeAttr(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// --- Variable Autocomplete (Ctrl+Space / {{ trigger) ---
+
+const varAutocomplete = $('#varAutocomplete');
+const varAutocompleteList = $('#varAutocompleteList');
+
+const acState = {
+  open: false,
+  cursor: 0,
+  items: [],        // [{name, value}]
+  filtered: [],     // [{name, value}]
+  prefix: '',       // text after {{ for filtering
+  targetEl: null,   // the input/textarea being completed
+  replaceStart: -1, // char index where {{ starts (for replacement)
+  isCodeEditor: false,
+};
+
+function collectAllVarNames() {
+  const vars = new Map();
+  // Suite variables from all loaded files
+  loadedFiles.forEach(file => {
+    if (file.suite.variables) {
+      file.suite.variables.forEach(([name, value]) => vars.set(name, value));
+    }
+  });
+  // Env vars
+  Object.entries(envVars).forEach(([name, value]) => {
+    if (value !== '') vars.set(name, value);
+  });
+  // Built-ins
+  vars.set('$timestamp', '(Unix timestamp)');
+  vars.set('$uuid', '(Random UUID v4)');
+  vars.set('$randomInt', '(Random 0–9999)');
+  return Array.from(vars.entries()).map(([name, value]) => ({ name, value }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function openVarAutocomplete(targetEl, prefix, replaceStart, isCodeEditor) {
+  acState.targetEl = targetEl;
+  acState.prefix = prefix;
+  acState.replaceStart = replaceStart;
+  acState.isCodeEditor = isCodeEditor;
+  acState.items = collectAllVarNames();
+  acState.cursor = 0;
+  acState.open = true;
+  filterAndRenderAC();
+  if (!acState.open) return; // filterAndRenderAC closed it (no matches)
+  positionAutocomplete(targetEl, isCodeEditor);
+  varAutocomplete.classList.remove('hidden');
+}
+
+function positionAutocomplete(el, isCodeEditor) {
+  // Use a hidden caret-measuring span to approximate cursor position
+  const rect = el.getBoundingClientRect();
+  let left, top;
+
+  if (el.tagName === 'TEXTAREA' || isCodeEditor) {
+    // For textareas, position below the element near cursor
+    const style = window.getComputedStyle(el);
+    const lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.4;
+    const paddingTop = parseFloat(style.paddingTop) || 0;
+    const paddingLeft = parseFloat(style.paddingLeft) || 0;
+
+    // Approximate cursor line from selectionStart
+    const text = el.value.substring(0, el.selectionStart);
+    const lines = text.split('\n');
+    const cursorLine = lines.length - 1;
+    const cursorCol = lines[cursorLine].length;
+
+    // Estimate position
+    const charWidth = measureCharWidth(style.fontFamily, style.fontSize);
+    top = rect.top + paddingTop + (cursorLine + 1) * lineHeight - el.scrollTop;
+    left = rect.left + paddingLeft + cursorCol * charWidth - el.scrollLeft;
+  } else {
+    // For regular inputs, position below the input
+    top = rect.bottom + 2;
+    left = rect.left;
+  }
+
+  // Clamp to viewport
+  const maxLeft = window.innerWidth - 400;
+  const maxTop = window.innerHeight - 260;
+  left = Math.max(4, Math.min(left, maxLeft));
+  top = Math.min(top, maxTop);
+
+  varAutocomplete.style.left = `${left}px`;
+  varAutocomplete.style.top = `${top}px`;
+}
+
+let _cachedCharWidth = null;
+function measureCharWidth(fontFamily, fontSize) {
+  if (_cachedCharWidth) return _cachedCharWidth;
+  const span = document.createElement('span');
+  span.style.cssText = `position:absolute;visibility:hidden;white-space:pre;font-family:${fontFamily};font-size:${fontSize}`;
+  span.textContent = 'x'.repeat(100);
+  document.body.appendChild(span);
+  _cachedCharWidth = span.offsetWidth / 100;
+  document.body.removeChild(span);
+  return _cachedCharWidth;
+}
+
+function filterAndRenderAC() {
+  const q = acState.prefix.toLowerCase();
+  acState.filtered = q
+    ? acState.items.filter(v => v.name.toLowerCase().includes(q))
+    : acState.items;
+
+  if (acState.filtered.length === 0) {
+    closeVarAutocomplete();
+    return;
+  }
+  acState.cursor = Math.min(acState.cursor, acState.filtered.length - 1);
+
+  varAutocompleteList.innerHTML = acState.filtered.map((v, i) => {
+    const cls = i === acState.cursor ? 'var-autocomplete-item active' : 'var-autocomplete-item';
+    const valDisplay = v.value.length > 40 ? v.value.slice(0, 37) + '…' : v.value;
+    return `<div class="${cls}" data-idx="${i}">
+      <span class="var-name">${escapeHtml(v.name)}</span>
+      <span class="var-value">${escapeHtml(valDisplay)}</span>
+    </div>`;
+  }).join('');
+
+  // Click handlers
+  varAutocompleteList.querySelectorAll('.var-autocomplete-item').forEach(item => {
+    item.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      acState.cursor = parseInt(item.dataset.idx);
+      insertSelectedVar();
+    });
+  });
+
+  // Scroll active item into view
+  const activeItem = varAutocompleteList.querySelector('.active');
+  if (activeItem) activeItem.scrollIntoView({ block: 'nearest' });
+}
+
+function insertSelectedVar() {
+  const selected = acState.filtered[acState.cursor];
+  if (!selected || !acState.targetEl) { closeVarAutocomplete(); return; }
+
+  const el = acState.targetEl;
+  const insertion = `{{${selected.name}}}`;
+  const start = acState.replaceStart;
+  const cursorPos = el.selectionStart;
+
+  // Replace from {{ start to current cursor with the full variable reference
+  // Also consume trailing `}}` if cursor is inside an existing placeholder
+  const before = el.value.substring(0, start);
+  let afterCursor = el.value.substring(cursorPos);
+  if (afterCursor.startsWith('}}')) {
+    afterCursor = afterCursor.substring(2);
+  } else if (afterCursor.match(/^[^{}]*\}\}/)) {
+    // Cursor inside {{prefix|suffix}} — consume through the closing }}
+    const closeIdx = afterCursor.indexOf('}}');
+    if (closeIdx >= 0) afterCursor = afterCursor.substring(closeIdx + 2);
+  }
+  el.value = before + insertion + afterCursor;
+
+  // Set cursor after the inserted variable
+  const newPos = start + insertion.length;
+  el.selectionStart = el.selectionEnd = newPos;
+
+  // Fire input event so listeners pick up the change
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+
+  closeVarAutocomplete();
+  el.focus();
+}
+
+function closeVarAutocomplete() {
+  acState.open = false;
+  acState.targetEl = null;
+  varAutocomplete.classList.add('hidden');
+}
+
+function handleACKeydown(e) {
+  if (!acState.open) return false;
+
+  switch (e.key) {
+    case 'ArrowDown':
+      e.preventDefault();
+      acState.cursor = Math.min(acState.cursor + 1, acState.filtered.length - 1);
+      filterAndRenderAC();
+      return true;
+    case 'ArrowUp':
+      e.preventDefault();
+      acState.cursor = Math.max(acState.cursor - 1, 0);
+      filterAndRenderAC();
+      return true;
+    case 'Enter':
+    case 'Tab':
+      e.preventDefault();
+      insertSelectedVar();
+      return true;
+    case 'Escape':
+      e.preventDefault();
+      closeVarAutocomplete();
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** Detect {{ trigger or Ctrl+Space in an input/textarea. */
+function wireVarAutocomplete(el, isCodeEditor = false) {
+  el.addEventListener('keydown', (e) => {
+    // If autocomplete is open, let it handle keys first
+    if (handleACKeydown(e)) return;
+
+    // Ctrl+Space trigger
+    if (e.key === ' ' && e.ctrlKey) {
+      e.preventDefault();
+      const pos = el.selectionStart;
+      const textBefore = el.value.substring(0, pos);
+      // Check if we're already inside {{ }}
+      const lastOpen = textBefore.lastIndexOf('{{');
+      const lastClose = textBefore.lastIndexOf('}}');
+      let prefix = '';
+      let replaceStart = pos;
+      if (lastOpen > lastClose && lastOpen >= 0) {
+        prefix = textBefore.substring(lastOpen + 2);
+        replaceStart = lastOpen;
+      }
+      openVarAutocomplete(el, prefix, replaceStart, isCodeEditor);
+      return;
+    }
+  });
+
+  el.addEventListener('input', () => {
+    const pos = el.selectionStart;
+    const textBefore = el.value.substring(0, pos);
+    const lastOpen = textBefore.lastIndexOf('{{');
+    const lastClose = textBefore.lastIndexOf('}}');
+
+    if (lastOpen > lastClose && lastOpen >= 0) {
+      const prefix = textBefore.substring(lastOpen + 2);
+      // Only auto-open if prefix is reasonable (no newlines, not too long)
+      if (prefix.length <= 40 && !prefix.includes('\n')) {
+        if (!acState.open) {
+          openVarAutocomplete(el, prefix, lastOpen, isCodeEditor);
+        } else {
+          acState.prefix = prefix;
+          acState.cursor = 0;
+          filterAndRenderAC();
+        }
+        return;
+      }
+    }
+
+    // Close if no longer inside {{
+    if (acState.open && acState.targetEl === el) {
+      closeVarAutocomplete();
+    }
+  });
+
+  el.addEventListener('blur', () => {
+    // Small delay to allow click on dropdown item
+    setTimeout(() => {
+      if (acState.open && acState.targetEl === el) closeVarAutocomplete();
+    }, 200);
+  });
+}
+
+// Wire autocomplete to main inputs
+wireVarAutocomplete(urlInput);
+wireVarAutocomplete(bodyInput);
+wireVarAutocomplete(codeEditor, true);
+
+// Wire to header value inputs dynamically (they're created/destroyed)
+// We use event delegation on headersContainer
+headersContainer.addEventListener('keydown', (e) => {
+  if (e.target.classList.contains('kv-value') || e.target.classList.contains('kv-key')) {
+    if (handleACKeydown(e)) return;
+    if (e.key === ' ' && e.ctrlKey) {
+      e.preventDefault();
+      const el = e.target;
+      const pos = el.selectionStart;
+      const textBefore = el.value.substring(0, pos);
+      const lastOpen = textBefore.lastIndexOf('{{');
+      const lastClose = textBefore.lastIndexOf('}}');
+      let prefix = '';
+      let replaceStart = pos;
+      if (lastOpen > lastClose && lastOpen >= 0) {
+        prefix = textBefore.substring(lastOpen + 2);
+        replaceStart = lastOpen;
+      }
+      openVarAutocomplete(el, prefix, replaceStart, false);
+    }
+  }
+});
+headersContainer.addEventListener('input', (e) => {
+  if (e.target.classList.contains('kv-value') || e.target.classList.contains('kv-key')) {
+    const el = e.target;
+    const pos = el.selectionStart;
+    const textBefore = el.value.substring(0, pos);
+    const lastOpen = textBefore.lastIndexOf('{{');
+    const lastClose = textBefore.lastIndexOf('}}');
+    if (lastOpen > lastClose && lastOpen >= 0) {
+      const prefix = textBefore.substring(lastOpen + 2);
+      if (prefix.length <= 40) {
+        if (!acState.open) {
+          openVarAutocomplete(el, prefix, lastOpen, false);
+        } else if (acState.targetEl === el) {
+          acState.prefix = prefix;
+          acState.cursor = 0;
+          filterAndRenderAC();
+        }
+        return;
+      }
+    }
+    if (acState.open && acState.targetEl === el) closeVarAutocomplete();
+  }
+});
+
+// Close autocomplete on any click outside
+document.addEventListener('mousedown', (e) => {
+  if (acState.open && !varAutocomplete.contains(e.target) && e.target !== acState.targetEl) {
+    closeVarAutocomplete();
+  }
+});
+
 // --- Variable Tooltip: JWT & Token Detection ---
 
 function isJwt(value) {

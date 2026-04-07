@@ -5,7 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::{App, Mode, Focus};
@@ -556,6 +556,73 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
             bottom_area,
         );
     }
+
+    // Render variable autocomplete overlay if open
+    if app.var_ac_open && !app.var_ac_filtered.is_empty() {
+        use ratatui::widgets::Clear;
+
+        let max_items = 8u16;
+        let item_count = app.var_ac_filtered.len().min(max_items as usize) as u16;
+        let popup_height = item_count + 2;
+        let popup_width = 45u16.min(area.width.saturating_sub(gutter_width + 2));
+
+        // Position below cursor line
+        let cursor_screen_line = (app.code_editor_cursor_line as u16).saturating_sub(app.code_editor_scroll);
+        let popup_y = area.y + chrome_rows.saturating_sub(1) + cursor_screen_line + 1;
+        let popup_x = area.x + gutter_width + 2;
+
+        let popup_area = Rect {
+            x: popup_x.min(area.x + area.width - popup_width),
+            y: popup_y.min(area.y + area.height - popup_height),
+            width: popup_width,
+            height: popup_height.min(area.y + area.height - popup_y),
+        };
+
+        if popup_area.height >= 3 {
+            frame.render_widget(Clear, popup_area);
+
+            let block = Block::default()
+                .title(" Variables (↑↓ Enter) ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::BLUE()))
+                .style(Style::default().bg(theme::BG_SURFACE()));
+
+            // Scroll so cursor is always visible
+            let scroll_offset = if app.var_ac_cursor >= max_items as usize {
+                app.var_ac_cursor - (max_items as usize) + 1
+            } else {
+                0
+            };
+
+            let items: Vec<ListItem> = app.var_ac_filtered.iter().enumerate()
+                .skip(scroll_offset)
+                .take(max_items as usize)
+                .map(|(i, (name, value))| {
+                    let is_active = i == app.var_ac_cursor;
+                    let style = if is_active {
+                        Style::default().fg(theme::BG_DARK()).bg(theme::BLUE()).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme::TEXT())
+                    };
+                    let val_style = if is_active {
+                        Style::default().fg(theme::BG_DARK()).bg(theme::BLUE())
+                    } else {
+                        Style::default().fg(theme::TEXT_DIM())
+                    };
+                    let max_name = (popup_width as usize).saturating_sub(8);
+                    let display_name = crate::ui::truncate_to(name, max_name);
+                    let max_val = (popup_width as usize).saturating_sub(display_name.len() + 6);
+                    let display_val = crate::ui::truncate_to(value, max_val);
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!(" {}", display_name), style),
+                        Span::styled(format!(" {}", display_val), val_style),
+                    ]))
+                })
+                .collect();
+
+            frame.render_widget(List::new(items).block(block), popup_area);
+        }
+    }
 }
 
 fn compute_search_matches(content: &str, query: &str) -> Vec<(usize, usize)> {
@@ -577,6 +644,43 @@ fn compute_search_matches(content: &str, query: &str) -> Vec<(usize, usize)> {
 
 pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
     let total_lines = app.code_editor_content.split('\n').count();
+
+    // Variable autocomplete takes priority
+    if app.var_ac_open {
+        match key.code {
+            KeyCode::Down => {
+                app.var_ac_cursor = (app.var_ac_cursor + 1).min(app.var_ac_filtered.len().saturating_sub(1));
+                return;
+            }
+            KeyCode::Up => {
+                app.var_ac_cursor = app.var_ac_cursor.saturating_sub(1);
+                return;
+            }
+            KeyCode::Enter | KeyCode::Tab => {
+                insert_var_autocomplete_code_editor(app);
+                return;
+            }
+            KeyCode::Esc => {
+                app.close_var_autocomplete();
+                return;
+            }
+            KeyCode::Char(c) => {
+                // Let the char go through to the editor, then update filter
+                insert_char_at_cursor(app, c);
+                update_ac_from_code_editor(app);
+                return;
+            }
+            KeyCode::Backspace => {
+                delete_char_before_cursor(app);
+                update_ac_from_code_editor(app);
+                return;
+            }
+            _ => {
+                app.close_var_autocomplete();
+                // Fall through to normal key handling below
+            }
+        }
+    }
 
     // Goto-line mini-input mode
     if app.editor_goto_active {
@@ -650,6 +754,12 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
 
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
+            KeyCode::Char(' ') if app.code_editor_editing => {
+                // Variable autocomplete
+                let prefix = extract_var_prefix_code_editor(app);
+                app.open_var_autocomplete(&prefix);
+                return;
+            }
             KeyCode::Char('s') => { app.save_code_editor(); }
             KeyCode::Char('u') => {
                 app.code_editor_cursor_line = app.code_editor_cursor_line.saturating_sub(15);
@@ -935,6 +1045,16 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
             app.code_editor_content.insert(off, c);
             app.code_editor_cursor_col += 1;
             app.code_editor_modified = true;
+            // Auto-trigger autocomplete on {{
+            if c == '{' {
+                let new_off = line_col_to_offset(
+                    &app.code_editor_content, app.code_editor_cursor_line, app.code_editor_cursor_col,
+                );
+                let text_before = &app.code_editor_content[..new_off];
+                if text_before.ends_with("{{") {
+                    app.open_var_autocomplete("");
+                }
+            }
         }
         _ => {}
     }
@@ -1043,3 +1163,130 @@ fn clipboard_get() -> Option<String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Variable autocomplete helpers for code editor
+// ---------------------------------------------------------------------------
+
+/// Insert a character at the current cursor position (used by autocomplete).
+fn insert_char_at_cursor(app: &mut App, c: char) {
+    let off = line_col_to_offset(
+        &app.code_editor_content, app.code_editor_cursor_line, app.code_editor_cursor_col,
+    );
+    app.code_editor_content.insert(off, c);
+    app.code_editor_cursor_col += 1;
+    app.code_editor_modified = true;
+}
+
+/// Delete the character before the cursor (used by autocomplete).
+fn delete_char_before_cursor(app: &mut App) {
+    if app.code_editor_cursor_col > 0 {
+        let off = line_col_to_offset(
+            &app.code_editor_content, app.code_editor_cursor_line, app.code_editor_cursor_col,
+        );
+        if off > 0 {
+            let prev_off = line_col_to_offset(
+                &app.code_editor_content, app.code_editor_cursor_line, app.code_editor_cursor_col - 1,
+            );
+            app.code_editor_content.replace_range(prev_off..off, "");
+            app.code_editor_cursor_col -= 1;
+            app.code_editor_modified = true;
+        }
+    }
+}
+
+/// Extract variable prefix from code editor content at cursor (text after last `{{`).
+fn extract_var_prefix_code_editor(app: &App) -> String {
+    let off = line_col_to_offset(
+        &app.code_editor_content, app.code_editor_cursor_line, app.code_editor_cursor_col,
+    );
+    let text_before = &app.code_editor_content[..off];
+    if let Some(pos) = text_before.rfind("{{") {
+        let after_close = text_before.rfind("}}").unwrap_or(0);
+        if pos > after_close || after_close == 0 {
+            return text_before[pos + 2..].to_string();
+        }
+    }
+    String::new()
+}
+
+/// Update autocomplete filter based on current code editor text.
+fn update_ac_from_code_editor(app: &mut App) {
+    let prefix = extract_var_prefix_code_editor(app);
+    let off = line_col_to_offset(
+        &app.code_editor_content, app.code_editor_cursor_line, app.code_editor_cursor_col,
+    );
+    let text_before = &app.code_editor_content[..off];
+    if let Some(pos) = text_before.rfind("{{") {
+        let after_close = text_before.rfind("}}").unwrap_or(0);
+        if pos > after_close || after_close == 0 {
+            app.update_var_autocomplete(&prefix);
+            return;
+        }
+    }
+    app.close_var_autocomplete();
+}
+
+/// Insert the selected autocomplete variable into the code editor.
+fn insert_var_autocomplete_code_editor(app: &mut App) {
+    if app.var_ac_filtered.is_empty() {
+        app.close_var_autocomplete();
+        return;
+    }
+    let selected = app.var_ac_filtered[app.var_ac_cursor].0.clone();
+    app.close_var_autocomplete();
+
+    let off = line_col_to_offset(
+        &app.code_editor_content, app.code_editor_cursor_line, app.code_editor_cursor_col,
+    );
+    let text_before = &app.code_editor_content[..off];
+
+    if let Some(open_pos) = text_before.rfind("{{") {
+        let after_close = text_before.rfind("}}").unwrap_or(0);
+        if open_pos > after_close || after_close == 0 {
+            let insertion = format!("{{{{{}}}}}", selected);
+            // Also consume trailing `}}` if cursor is inside an existing placeholder
+            let text_after = &app.code_editor_content[off..];
+            let end_off = if text_after.starts_with("}}") {
+                off + 2
+            } else if let Some(close_idx) = text_after.find("}}") {
+                // Check there are no `{` before the `}}` (i.e. still inside same placeholder)
+                let between = &text_after[..close_idx];
+                if !between.contains('{') && !between.contains('\n') {
+                    off + close_idx + 2
+                } else {
+                    off
+                }
+            } else {
+                off
+            };
+            app.code_editor_content.replace_range(open_pos..end_off, &insertion);
+            let new_off = open_pos + insertion.len();
+            let (new_line, new_col) = offset_to_line_col(&app.code_editor_content, new_off);
+            app.code_editor_cursor_line = new_line;
+            app.code_editor_cursor_col = new_col;
+            app.code_editor_modified = true;
+            return;
+        }
+    }
+
+    // No {{ found — insert full {{var}} at cursor
+    let insertion = format!("{{{{{}}}}}", selected);
+    app.code_editor_content.insert_str(off, &insertion);
+    app.code_editor_cursor_col += insertion.chars().count();
+    app.code_editor_modified = true;
+}
+
+/// Convert a byte offset back to (line, col).
+fn offset_to_line_col(content: &str, target_offset: usize) -> (usize, usize) {
+    let mut offset = 0;
+    for (i, line) in content.split('\n').enumerate() {
+        let line_end = offset + line.len();
+        if target_offset <= line_end {
+            let col = line[..target_offset - offset].chars().count();
+            return (i, col);
+        }
+        offset = line_end + 1;
+    }
+    let total = content.split('\n').count();
+    (total.saturating_sub(1), content.split('\n').last().map_or(0, |l| l.chars().count()))
+}

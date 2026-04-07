@@ -79,6 +79,11 @@ pub fn render_builder(frame: &mut Frame, app: &App, area: Rect) {
     render_body(frame, app, blk, chunks[2]);
     render_assertions(frame, blk, chunks[3]);
     render_extracts(frame, blk, chunks[4]);
+
+    // Render variable autocomplete overlay if open
+    if app.var_ac_open && app.builder_focus == BuilderFocus::Url {
+        render_var_autocomplete(frame, app, chunks[0]);
+    }
 }
 
 fn render_method_url(
@@ -506,12 +511,125 @@ fn render_extracts(
     frame.render_widget(List::new(items).block(block), area);
 }
 
+/// Render variable autocomplete popup below the URL bar.
+pub fn render_var_autocomplete(frame: &mut Frame, app: &App, url_area: Rect) {
+    use ratatui::widgets::Clear;
+
+    if app.var_ac_filtered.is_empty() { return; }
+
+    let max_items = 8u16;
+    let item_count = app.var_ac_filtered.len().min(max_items as usize) as u16;
+    let popup_height = item_count + 2; // borders
+    let popup_width = url_area.width.min(50).max(30);
+
+    let popup_area = Rect {
+        x: url_area.x + 1,
+        y: url_area.y + url_area.height,
+        width: popup_width,
+        height: popup_height.min(frame.area().height.saturating_sub(url_area.y + url_area.height)),
+    };
+
+    if popup_area.height < 3 { return; }
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(" Variables (↑↓ Enter) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BLUE()))
+        .style(Style::default().bg(theme::BG_SURFACE()));
+
+    // Scroll so cursor is always visible
+    let scroll_offset = if app.var_ac_cursor >= max_items as usize {
+        app.var_ac_cursor - (max_items as usize) + 1
+    } else {
+        0
+    };
+
+    let items: Vec<ListItem> = app.var_ac_filtered.iter().enumerate()
+        .skip(scroll_offset)
+        .take(max_items as usize)
+        .map(|(i, (name, value))| {
+            let is_active = i == app.var_ac_cursor;
+            let style = if is_active {
+                Style::default().fg(theme::BG_DARK()).bg(theme::BLUE()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::TEXT())
+            };
+            let val_style = if is_active {
+                Style::default().fg(theme::BG_DARK()).bg(theme::BLUE())
+            } else {
+                Style::default().fg(theme::TEXT_DIM())
+            };
+            let max_name = (popup_width as usize).saturating_sub(8);
+            let display_name = truncate_to(name, max_name);
+            let max_val = (popup_width as usize).saturating_sub(display_name.len() + 6);
+            let display_val = truncate_to(value, max_val);
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {}", display_name), style),
+                Span::styled(format!(" {}", display_val), val_style),
+            ]))
+        })
+        .collect();
+
+    frame.render_widget(List::new(items).block(block), popup_area);
+}
+
 // ---------------------------------------------------------------------------
 // Key handling
 // ---------------------------------------------------------------------------
 
 pub fn handle_builder_keys(app: &mut App, key: KeyEvent) {
+    // If autocomplete is open, handle its keys first
+    if app.var_ac_open {
+        match key.code {
+            KeyCode::Down => {
+                app.var_ac_cursor = (app.var_ac_cursor + 1).min(app.var_ac_filtered.len().saturating_sub(1));
+                return;
+            }
+            KeyCode::Up => {
+                app.var_ac_cursor = app.var_ac_cursor.saturating_sub(1);
+                return;
+            }
+            KeyCode::Enter | KeyCode::Tab => {
+                insert_var_autocomplete_builder(app);
+                return;
+            }
+            KeyCode::Esc => {
+                app.close_var_autocomplete();
+                return;
+            }
+            KeyCode::Char(_c) => {
+                // Let the char go through to the URL handler, then update filter
+                if app.builder_focus == BuilderFocus::Url {
+                    handle_url_keys(app, key);
+                    update_ac_from_url(app);
+                    return;
+                }
+            }
+            KeyCode::Backspace => {
+                if app.builder_focus == BuilderFocus::Url {
+                    handle_url_keys(app, key);
+                    update_ac_from_url(app);
+                    return;
+                }
+            }
+            _ => {
+                app.close_var_autocomplete();
+                // Fall through to normal key handling below
+            }
+        }
+    }
+
     match key.code {
+        // Ctrl+Space opens autocomplete
+        KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.builder_focus == BuilderFocus::Url {
+                let prefix = extract_var_prefix_from_url(app);
+                app.open_var_autocomplete(&prefix);
+            }
+            return;
+        }
         // Tab cycles builder sub-focus
         KeyCode::Tab => {
             app.builder_focus = match app.builder_focus {
@@ -539,9 +657,112 @@ pub fn handle_builder_keys(app: &mut App, key: KeyEvent) {
         _ => {
             match app.builder_focus {
                 BuilderFocus::Method => handle_method_keys(app, key),
-                BuilderFocus::Url => handle_url_keys(app, key),
+                BuilderFocus::Url => {
+                    handle_url_keys(app, key);
+                    // Auto-trigger on {{ typed
+                    if matches!(key.code, KeyCode::Char('{')) {
+                        let prefix = extract_var_prefix_from_url(app);
+                        if prefix.is_empty() || !prefix.contains('\n') {
+                            // Check if we just typed the second {
+                            if let (Some(fi), Some(bi)) = (app.active_file_idx, app.active_block_idx) {
+                                if let Some(file) = app.loaded_files.get(fi) {
+                                    if let Some(blk) = file.suite.blocks.get(bi) {
+                                        let text_before: String = blk.request.url.chars().take(app.builder_url_cursor).collect();
+                                        if text_before.ends_with("{{") {
+                                            app.open_var_autocomplete("");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 BuilderFocus::Headers => handle_headers_keys(app, key),
                 BuilderFocus::Body => handle_body_keys(app, key),
+            }
+        }
+    }
+}
+
+/// Extract the variable prefix from URL text before cursor (text after last `{{`).
+fn extract_var_prefix_from_url(app: &App) -> String {
+    if let (Some(fi), Some(bi)) = (app.active_file_idx, app.active_block_idx) {
+        if let Some(file) = app.loaded_files.get(fi) {
+            if let Some(blk) = file.suite.blocks.get(bi) {
+                let text_before: String = blk.request.url.chars().take(app.builder_url_cursor).collect();
+                if let Some(pos) = text_before.rfind("{{") {
+                    let after_close = text_before.rfind("}}").unwrap_or(0);
+                    if pos > after_close || after_close == 0 {
+                        return text_before[pos + 2..].to_string();
+                    }
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Update autocomplete filter based on current URL text.
+fn update_ac_from_url(app: &mut App) {
+    let prefix = extract_var_prefix_from_url(app);
+    if let (Some(fi), Some(bi)) = (app.active_file_idx, app.active_block_idx) {
+        if let Some(file) = app.loaded_files.get(fi) {
+            if let Some(blk) = file.suite.blocks.get(bi) {
+                let text_before: String = blk.request.url.chars().take(app.builder_url_cursor).collect();
+                let has_open = text_before.rfind("{{").map(|p| {
+                    let close = text_before.rfind("}}").unwrap_or(0);
+                    p > close || close == 0
+                }).unwrap_or(false);
+                if has_open {
+                    app.update_var_autocomplete(&prefix);
+                    return;
+                }
+            }
+        }
+    }
+    app.close_var_autocomplete();
+}
+
+/// Insert the selected autocomplete variable into the builder URL.
+fn insert_var_autocomplete_builder(app: &mut App) {
+    if app.var_ac_filtered.is_empty() {
+        app.close_var_autocomplete();
+        return;
+    }
+    let selected = app.var_ac_filtered[app.var_ac_cursor].0.clone();
+    app.close_var_autocomplete();
+
+    if let (Some(fi), Some(bi)) = (app.active_file_idx, app.active_block_idx) {
+        if let Some(file) = app.loaded_files.get_mut(fi) {
+            if let Some(blk) = file.suite.blocks.get_mut(bi) {
+                let text_before: String = blk.request.url.chars().take(app.builder_url_cursor).collect();
+                // Find the {{ that started this autocomplete
+                if let Some(open_pos) = text_before.rfind("{{") {
+                    let insertion = format!("{{{{{}}}}}", selected);
+                    let before: String = blk.request.url.chars().take(open_pos).collect();
+                    // Consume trailing `}}` if cursor is inside an existing placeholder
+                    let after_text: String = blk.request.url.chars().skip(app.builder_url_cursor).collect();
+                    let after: String = if after_text.starts_with("}}") {
+                        after_text.chars().skip(2).collect()
+                    } else if let Some(close_idx) = after_text.find("}}") {
+                        let between = &after_text[..close_idx];
+                        if !between.contains('{') {
+                            after_text[close_idx + 2..].to_string()
+                        } else {
+                            after_text
+                        }
+                    } else {
+                        after_text
+                    };
+                    blk.request.url = format!("{}{}{}", before, insertion, after);
+                    app.builder_url_cursor = open_pos + insertion.chars().count();
+                } else {
+                    // No {{ found — insert full {{var}} at cursor
+                    let insertion = format!("{{{{{}}}}}", selected);
+                    let byte_pos = blk.request.url.char_indices().nth(app.builder_url_cursor).map(|(i, _)| i).unwrap_or(blk.request.url.len());
+                    blk.request.url.insert_str(byte_pos, &insertion);
+                    app.builder_url_cursor += insertion.chars().count();
+                }
             }
         }
     }

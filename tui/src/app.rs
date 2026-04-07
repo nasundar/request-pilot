@@ -373,6 +373,12 @@ pub struct App {
     pub auto_run_popup_open: bool,
     pub auto_run_popup_cursor: usize,
 
+    // Variable autocomplete state
+    pub var_ac_open: bool,
+    pub var_ac_cursor: usize,
+    pub var_ac_prefix: String,
+    pub var_ac_filtered: Vec<(String, String)>, // (name, value)
+
     // Channel receiver (set up in run())
     runner_rx: Option<mpsc::UnboundedReceiver<RunnerMessage>>,
     runner_tx: mpsc::UnboundedSender<RunnerMessage>,
@@ -529,6 +535,10 @@ impl App {
             auto_run_next_due: None,
             auto_run_popup_open: false,
             auto_run_popup_cursor: 0,
+            var_ac_open: false,
+            var_ac_cursor: 0,
+            var_ac_prefix: String::new(),
+            var_ac_filtered: Vec::new(),
             runner_rx: Some(rx),
             runner_tx: tx,
             next_file_id: 0,
@@ -876,6 +886,77 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Regenerate file.content from file.suite after builder edits.
+    /// Clears stale results and marks code editor as modified.
+    pub fn flush_builder_to_file(&mut self) {
+        if let Some(fi) = self.active_file_idx {
+            if let Some(file) = self.loaded_files.get_mut(fi) {
+                let content = generate_http_content(&file.suite);
+                file.content = content.clone();
+                file.results = None;
+                self.code_editor_content = content;
+                self.code_editor_modified = true;
+            }
+        }
+    }
+
+    /// Collect all variable names and values for autocomplete.
+    pub fn collect_all_vars(&self) -> Vec<(String, String)> {
+        let mut vars: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        // Suite variables from all loaded files
+        for file in &self.loaded_files {
+            for (k, v) in &file.suite.variables {
+                vars.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        // Env vars override
+        for (k, v) in &self.env_vars {
+            vars.insert(k.clone(), v.clone());
+        }
+        // Built-ins
+        vars.insert("$timestamp".into(), "(Unix timestamp)".into());
+        vars.insert("$uuid".into(), "(Random UUID v4)".into());
+        vars.insert("$randomInt".into(), "(Random 0–9999)".into());
+        vars.into_iter().collect()
+    }
+
+    /// Open variable autocomplete with current prefix for filtering.
+    pub fn open_var_autocomplete(&mut self, prefix: &str) {
+        self.var_ac_prefix = prefix.to_string();
+        let all = self.collect_all_vars();
+        let q = prefix.to_lowercase();
+        self.var_ac_filtered = if q.is_empty() {
+            all
+        } else {
+            all.into_iter().filter(|(n, _)| n.to_lowercase().contains(&q)).collect()
+        };
+        self.var_ac_cursor = 0;
+        self.var_ac_open = !self.var_ac_filtered.is_empty();
+    }
+
+    /// Update autocomplete filter with new prefix.
+    pub fn update_var_autocomplete(&mut self, prefix: &str) {
+        self.var_ac_prefix = prefix.to_string();
+        let all = self.collect_all_vars();
+        let q = prefix.to_lowercase();
+        self.var_ac_filtered = if q.is_empty() {
+            all
+        } else {
+            all.into_iter().filter(|(n, _)| n.to_lowercase().contains(&q)).collect()
+        };
+        if self.var_ac_filtered.is_empty() {
+            self.var_ac_open = false;
+        }
+        self.var_ac_cursor = self.var_ac_cursor.min(self.var_ac_filtered.len().saturating_sub(1));
+    }
+
+    /// Close variable autocomplete.
+    pub fn close_var_autocomplete(&mut self) {
+        self.var_ac_open = false;
+        self.var_ac_prefix.clear();
+        self.var_ac_filtered.clear();
     }
 
     pub fn stop_live_capture(&mut self) {
