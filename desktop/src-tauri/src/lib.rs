@@ -309,6 +309,24 @@ fn save_file_with_dialog(
     }
 }
 
+/// Write content to a known file path (for files already saved once).
+/// Only allows writing to .http files to limit surface area.
+#[tauri::command]
+fn write_file(path: String, content: String) -> Result<(), String> {
+    let canon = std::path::Path::new(&path);
+    // Restrict to .http files only
+    match canon.extension().and_then(|e| e.to_str()) {
+        Some("http") => {}
+        _ => return Err("write_file only allows .http files".into()),
+    }
+    // Ensure path is absolute (came from a prior save dialog)
+    if !canon.is_absolute() {
+        return Err("write_file requires an absolute path".into());
+    }
+    std::fs::write(canon, &content)
+        .map_err(|e| format!("Failed to write {}: {}", path, e))
+}
+
 /// Add a history entry directly (e.g. from live capture).
 #[tauri::command]
 fn add_history_entry(
@@ -487,6 +505,7 @@ pub fn run() {
             poll_device_code,
             check_variables,
             save_file_with_dialog,
+            write_file,
             add_history_entry,
             update_history_entry,
             start_live_capture,

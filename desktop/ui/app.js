@@ -11,7 +11,9 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
 // --- Global State ---
-let loadedFiles = [];        // [{name, content, suite: TestSuite, results: TestRunResults|null}]
+// File entry: {name, content, suite, results, savedPath: string|null}
+// savedPath: null = temp/unsaved, string = persisted to disk
+let loadedFiles = [];
 let activeFileIndex = -1;
 let activeBlockIndex = -1;
 let envVars = {};            // {name: value} — from .env file
@@ -912,14 +914,124 @@ function remapResults(fileIdx, results) {
   return { ...results, block_results: remapped };
 }
 
+/** Build a request block object from the current builder UI state. */
+function blockFromBuilder() {
+  const method = methodSelect.value;
+  const url = urlInput.value.trim();
+  if (!url) return null;
+
+  const headers = [];
+  headersContainer.querySelectorAll('.kv-row').forEach(row => {
+    const key = row.querySelector('.kv-key').value.trim();
+    const val = row.querySelector('.kv-value').value.trim();
+    if (key) headers.push([key, val]);
+  });
+
+  let body = null;
+  if (bodyType.value !== 'none' && bodyInput.value.trim()) {
+    body = bodyInput.value.trim();
+  }
+
+  return {
+    name: `${method} ${url.split('?')[0].split('/').slice(-2).join('/')}`,
+    block_type: 'test',
+    description: '',
+    request: { method, url, headers, body },
+    assertions: [],
+    extracts: [],
+    disabled: false,
+    group: null,
+    depends: [],
+    mode: null,
+    dev_auth: null,
+  };
+}
+
+/** Ensure a file exists for the builder. Creates temp file if none loaded. */
+async function ensureBuilderFile() {
+  if (activeFileIndex >= 0 && loadedFiles[activeFileIndex]) return;
+
+  // Create a minimal temp file
+  const content = '@variables\n';
+  const suite = await invoke('parse_test_file', { content });
+  loadedFiles.push({ name: 'untitled.http', content, suite, results: null, savedPath: null });
+  activeFileIndex = loadedFiles.length - 1;
+  activeBlockIndex = -1;
+  renderFileTree();
+}
+
+/** Flush builder UI state into the active file's suite and regenerate content.
+ *  Returns true on success, false on failure. */
+async function flushBuilderToFile() {
+  const block = blockFromBuilder();
+  if (!block) return true; // nothing to flush
+
+  await ensureBuilderFile();
+  const file = loadedFiles[activeFileIndex];
+
+  // Snapshot blocks in case we need to rollback
+  const prevBlocks = [...file.suite.blocks];
+  const prevBlockIndex = activeBlockIndex;
+
+  if (activeBlockIndex >= 0 && activeBlockIndex < file.suite.blocks.length) {
+    // Update existing block in-place
+    file.suite.blocks[activeBlockIndex] = {
+      ...file.suite.blocks[activeBlockIndex],
+      request: block.request,
+    };
+  } else {
+    // Append new block
+    file.suite.blocks.push(block);
+    activeBlockIndex = file.suite.blocks.length - 1;
+  }
+
+  // Clear stale results since suite changed
+  file.results = null;
+
+  // Regenerate .http content from suite
+  try {
+    const content = await invoke('generate_http', { suite: file.suite });
+    file.content = content;
+    // Keep code editor in sync if visible
+    if (currentMode === 'code') {
+      codeEditor.value = content;
+      codeEditorContent = content;
+      codeEditorModified = false;
+      codeEditor.classList.remove('modified');
+      updateHighlight();
+    }
+    renderFileTree();
+    return true;
+  } catch (err) {
+    // Rollback suite mutation on failure
+    file.suite.blocks = prevBlocks;
+    activeBlockIndex = prevBlockIndex;
+    rpLog('warn', 'Failed to regenerate .http content', String(err));
+    showToast('Failed to sync builder to file', 'error');
+    return false;
+  }
+}
+
 // --- Send Request ---
+let sendInFlight = false;
 async function sendRequest() {
+  if (sendInFlight) return;
+  sendInFlight = true;
+
   const method = methodSelect.value;
   let url = urlInput.value.trim();
 
   if (!url) {
     showToast('Please enter a URL', 'error');
     urlInput.focus();
+    sendInFlight = false;
+    return;
+  }
+
+  // Flush builder state to file so code and builder stay in sync
+  const flushed = await flushBuilderToFile();
+  if (!flushed) {
+    sendInFlight = false;
     return;
   }
 
@@ -958,6 +1070,7 @@ async function sendRequest() {
   } finally {
     sendBtn.disabled = false;
     sendBtn.classList.remove('loading');
+    sendInFlight = false;
     refreshHistoryIfVisible();
   }
 }
@@ -1551,7 +1664,8 @@ async function loadFile(file) {
       name: file.name,
       content,
       suite,
-      results: null
+      results: null,
+      savedPath: file.path || null,
     };
 
     loadedFiles.push(fileEntry);
@@ -2196,12 +2310,13 @@ function renderFileTree() {
     node.className = `file-node${isFileExpanded ? ' expanded' : ''}`;
     node.dataset.fileIdx = fileIdx;
 
+    const unsavedDot = file.savedPath ? '' : '<span class="node-unsaved" title="Unsaved">●</span>';
     const header = document.createElement('div');
     header.className = 'file-node-header';
     header.innerHTML = `
       <span class="node-chevron">\u25B8</span>
       <span class="node-icon">\uD83D\uDCC4</span>
-      <span class="node-name" title="${escapeAttr(file.name)}">${escapeHtml(file.name)}</span>
+      <span class="node-name" title="${escapeAttr(file.name)}">${escapeHtml(file.name)}${unsavedDot}</span>
       <button class="node-run" title="Run this file">\u25B6</button>
       <button class="node-close" title="Close file">\u2715</button>
     `;
@@ -4428,7 +4543,19 @@ function buildSuiteWithDisabledFlags(fileIdx) {
 
 async function syncCodeToBuilder() {
   const content = codeEditor.value;
-  if (!content.trim()) return true;
+  if (!content.trim()) {
+    // Empty content — update in-memory state but don't parse
+    if (activeFileIndex >= 0 && loadedFiles[activeFileIndex]) {
+      loadedFiles[activeFileIndex].content = content;
+      loadedFiles[activeFileIndex].suite = { variables: {}, blocks: [], auto_run: null };
+      loadedFiles[activeFileIndex].results = null;
+    }
+    codeEditorContent = content;
+    codeEditorModified = false;
+    codeEditor.classList.remove('modified');
+    renderFileTree();
+    return true;
+  }
 
   try {
     const suite = await invoke('parse_test_file', { content });
@@ -4439,7 +4566,7 @@ async function syncCodeToBuilder() {
       loadedFiles[activeFileIndex].results = null;
     } else {
       const name = codeEditorFilename.textContent || 'untitled.http';
-      loadedFiles.push({ name, content, suite, results: null });
+      loadedFiles.push({ name, content, suite, results: null, savedPath: null });
       activeFileIndex = loadedFiles.length - 1;
     }
 
@@ -4778,8 +4905,44 @@ codeEditor.addEventListener('keydown', (e) => {
 });
 
 codeSaveBtn.addEventListener('click', async () => {
-  await syncCodeToBuilder();
-  showToast('File saved', 'success');
+  // Sync code editor content to builder state first
+  const ok = await syncCodeToBuilder();
+  if (!ok) return;
+
+  if (activeFileIndex < 0 || !loadedFiles[activeFileIndex]) {
+    showToast('No file to save', 'error');
+    return;
+  }
+
+  const file = loadedFiles[activeFileIndex];
+
+  if (file.savedPath) {
+    // File already has a disk location — write directly
+    try {
+      await invoke('write_file', { path: file.savedPath, content: file.content });
+      showToast(`Saved to ${file.savedPath.split(/[\\/]/).pop()}`, 'success');
+    } catch (err) {
+      showToast('Save failed: ' + err, 'error');
+    }
+  } else {
+    // Temp file — open Save As dialog
+    try {
+      const path = await invoke('save_file_with_dialog', {
+        defaultName: file.name,
+        content: file.content,
+        title: 'Save HTTP File',
+        filters: [['HTTP Files', 'http']],
+      });
+      if (!path) return; // cancelled
+      file.savedPath = path;
+      file.name = path.split(/[\\/]/).pop();
+      codeEditorFilename.textContent = file.name;
+      renderFileTree();
+      showToast(`Saved to ${file.name}`, 'success');
+    } catch (err) {
+      showToast('Save failed: ' + err, 'error');
+    }
+  }
 });
 
 codeRevertBtn.addEventListener('click', () => {
@@ -4804,7 +4967,7 @@ GET {{baseUrl}}/health
   const name = 'untitled.http';
 
   invoke('parse_test_file', { content: template }).then(parsedSuite => {
-    loadedFiles.push({ name, content: template, suite: parsedSuite, results: null });
+    loadedFiles.push({ name, content: template, suite: parsedSuite, results: null, savedPath: null });
     activeFileIndex = loadedFiles.length - 1;
     activeBlockIndex = -1;
 
@@ -6881,8 +7044,7 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key === 's') {
     e.preventDefault();
     if (currentMode === 'code') {
-      syncCodeToBuilder();
-      showToast('File saved', 'success');
+      codeSaveBtn.click();
     }
   }
   // Zoom shortcuts
@@ -7922,6 +8084,7 @@ function startNewCaptureSession() {
       content: initialContent,
       suite,
       results: null,
+      savedPath: null,
     });
     liveCaptureFileIndex = loadedFiles.length - 1;
     activeFileIndex = liveCaptureFileIndex;

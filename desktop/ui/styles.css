@@ -643,6 +643,12 @@ html, body {
   white-space: nowrap;
 }
 
+.node-unsaved {
+  color: var(--accent-color);
+  margin-left: 4px;
+  font-size: 10px;
+}
+
 .file-node-header .node-close {
   display: none;
   width: 16px;
@@ -3311,6 +3317,8 @@ input:focus, select:focus, textarea:focus { outline: none; }
   word-wrap: normal;
   overflow: hidden;
   pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .code-editor-highlight code {
   font-family: inherit;
