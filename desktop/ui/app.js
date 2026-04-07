@@ -447,6 +447,26 @@ const codeLineNumbers = $('#codeLineNumbers');
 const splitPanels     = $('.split-panels');
 const urlBar          = $('.url-bar');
 
+// Block metadata accordion refs
+const blockMetaAccordion = $('#blockMetaAccordion');
+const blockMetaHeader = $('#blockMetaHeader');
+const blockMetaChevron = $('#blockMetaChevron');
+const blockMetaBody   = $('#blockMetaBody');
+const blockMetaSummary = $('#blockMetaSummary');
+const metaName        = $('#metaName');
+const metaDescription = $('#metaDescription');
+const metaBlockType   = $('#metaBlockType');
+const metaGroup       = $('#metaGroup');
+const metaDepends     = $('#metaDepends');
+const metaMode        = $('#metaMode');
+const metaDevAuth     = $('#metaDevAuth');
+const metaDisabled    = $('#metaDisabled');
+const metaCompare     = $('#metaCompare');
+const builderNormal   = $('#builderNormal');
+const compareStepsView = $('#compareStepsView');
+const compareStepsTabs = $('#compareStepsTabs');
+const compareStepsContent = $('#compareStepsContent');
+
 // History panel refs
 const historyPanel        = $('#historyPanel');
 const historyStats        = $('#historyStats');
@@ -932,18 +952,23 @@ function blockFromBuilder() {
     body = bodyInput.value.trim();
   }
 
+  // Read metadata from accordion
+  const name = metaName.value.trim() || `${method} ${url.split('?')[0].split('/').slice(-2).join('/')}`;
   return {
-    name: `${method} ${url.split('?')[0].split('/').slice(-2).join('/')}`,
-    block_type: 'test',
-    description: '',
+    name,
+    block_type: metaBlockType.value || 'test',
+    description: metaDescription.value.trim(),
     request: { method, url, headers, body },
     assertions: [],
     extracts: [],
-    disabled: false,
-    group: null,
-    depends: [],
-    mode: null,
-    dev_auth: null,
+    disabled: metaDisabled.checked,
+    group: metaGroup.value.trim() || null,
+    depends: metaDepends.value.split(',').map(s => s.trim()).filter(Boolean),
+    mode: metaMode.value || null,
+    dev_auth: metaDevAuth.value.trim() || null,
+    compare: metaCompare.checked,
+    steps: [],
+    diff: null,
   };
 }
 
@@ -2600,6 +2625,643 @@ function closeFile(fileIdx) {
   recomputeAutoRun();
 }
 
+// --- Block Metadata Accordion ---
+blockMetaHeader.addEventListener('click', () => {
+  const expanded = blockMetaAccordion.classList.toggle('expanded');
+  blockMetaBody.classList.toggle('hidden', !expanded);
+});
+
+/** Populate metadata accordion from the given block. */
+function populateMetadata(block) {
+  metaName.value = block.name || '';
+  metaDescription.value = block.description || '';
+  metaBlockType.value = block.block_type || 'test';
+  metaGroup.value = block.group || '';
+  metaDepends.value = (block.depends || []).join(', ');
+  metaMode.value = block.mode || '';
+  metaDevAuth.value = block.dev_auth || '';
+  metaDisabled.checked = !!block.disabled;
+  metaCompare.checked = !!block.compare;
+
+  // Build summary line
+  const parts = [];
+  if (block.name) parts.push(block.name);
+  if (block.block_type && block.block_type !== 'test') parts.push(`[${block.block_type}]`);
+  if (block.group) parts.push(`group: ${block.group}`);
+  if (block.compare) parts.push('compare');
+  blockMetaSummary.textContent = parts.join('  ·  ');
+}
+
+/** Read metadata fields back into the active block. Returns true if anything changed. */
+function applyMetadataToBlock() {
+  if (activeFileIndex < 0 || activeBlockIndex < 0) return false;
+  const file = loadedFiles[activeFileIndex];
+  if (!file) return false;
+  const block = file.suite.blocks[activeBlockIndex];
+  if (!block) return false;
+
+  let changed = false;
+  const set = (field, val) => { if (block[field] !== val) { block[field] = val; changed = true; } };
+
+  set('name', metaName.value.trim());
+  set('description', metaDescription.value.trim());
+  set('block_type', metaBlockType.value);
+  set('group', metaGroup.value.trim() || null);
+  set('mode', metaMode.value || null);
+  set('dev_auth', metaDevAuth.value.trim() || null);
+  set('disabled', metaDisabled.checked);
+  set('compare', metaCompare.checked);
+
+  const newDeps = metaDepends.value.split(',').map(s => s.trim()).filter(Boolean);
+  if (JSON.stringify(block.depends) !== JSON.stringify(newDeps)) {
+    block.depends = newDeps;
+    changed = true;
+  }
+
+  return changed;
+}
+
+// Auto-apply metadata on field change (debounced)
+let metaDebounceTimer = null;
+let stepFlushTimer = null;
+function onMetaFieldChange() {
+  clearTimeout(metaDebounceTimer);
+  // Capture current indices to avoid race if user switches blocks
+  const fi = activeFileIndex, bi = activeBlockIndex;
+  metaDebounceTimer = setTimeout(async () => {
+    if (fi !== activeFileIndex || bi !== activeBlockIndex) return;
+    if (applyMetadataToBlock()) {
+      const file = loadedFiles[fi];
+      if (file) {
+        file.results = null;
+        // Regenerate .http content
+        try {
+          const content = await invoke('generate_http', { suite: file.suite });
+          file.content = content;
+          if (currentMode === 'code') {
+            codeEditor.value = content;
+            codeEditorContent = content;
+            updateHighlight();
+          }
+        } catch (e) { rpLog('warn', 'Meta flush failed', String(e)); }
+      }
+      // Update summary in accordion
+      const block = file?.suite?.blocks?.[bi];
+      if (block) {
+        const parts = [];
+        if (block.name) parts.push(block.name);
+        if (block.block_type && block.block_type !== 'test') parts.push(`[${block.block_type}]`);
+        if (block.group) parts.push(`group: ${block.group}`);
+        if (block.compare) parts.push('compare');
+        blockMetaSummary.textContent = parts.join('  ·  ');
+      }
+      renderFileTree();
+    }
+  }, 300);
+}
+
+// Special handler for compare toggle — needs to initialize steps and switch view
+metaCompare.addEventListener('change', async () => {
+  if (activeFileIndex < 0 || activeBlockIndex < 0) return;
+  const file = loadedFiles[activeFileIndex];
+  const block = file?.suite?.blocks?.[activeBlockIndex];
+  if (!block) return;
+
+  block.compare = metaCompare.checked;
+  file.results = null;
+
+  if (block.compare && (!block.steps || block.steps.length === 0)) {
+    // Initialize with two default steps from current request
+    block.steps = [
+      { name: 'baseline', request: { ...block.request, headers: [...(block.request.headers || [])] }, assertions: [], extracts: [] },
+      { name: 'candidate', request: { method: block.request.method || 'GET', url: '', headers: [], body: null }, assertions: [], extracts: [] },
+    ];
+    block.diff = { step_a: 'baseline', step_b: 'candidate' };
+    // Append default diff assertion, preserving any existing assertions
+    if (!block.assertions) block.assertions = [];
+    block.assertions.push({ left: '$diff.match', operator: '==', right: 'true' });
+  } else if (!block.compare) {
+    // Keep steps data but switch to normal view
+    builderNormal.classList.remove('hidden');
+    compareStepsView.classList.add('hidden');
+  }
+
+  if (block.compare && block.steps && block.steps.length > 0) {
+    activeCompareStepIdx = 0;
+    renderCompareSteps(activeFileIndex, activeBlockIndex);
+    builderNormal.classList.add('hidden');
+    compareStepsView.classList.remove('hidden');
+  }
+
+  // Flush content
+  try {
+    const content = await invoke('generate_http', { suite: file.suite });
+    file.content = content;
+    if (currentMode === 'code') {
+      codeEditor.value = content;
+      codeEditorContent = content;
+      updateHighlight();
+    }
+  } catch (e) { rpLog('warn', 'Compare toggle flush failed', String(e)); }
+
+  renderFileTree();
+});
+[metaName, metaDescription, metaGroup, metaDepends, metaDevAuth].forEach(el => {
+  el.addEventListener('input', onMetaFieldChange);
+});
+[metaBlockType, metaMode, metaDisabled].forEach(el => {
+  el.addEventListener('change', onMetaFieldChange);
+});
+
+// --- Compare Steps Rendering ---
+let activeCompareStepIdx = 0;
+
+/** Render the compare steps tabs and content for a compare block. */
+function renderCompareSteps(fileIdx, blockIdx) {
+  const file = loadedFiles[fileIdx];
+  const block = file.suite.blocks[blockIdx];
+  const br = file.results?.block_results?.[blockIdx];
+
+  if (!block.compare || !block.steps || block.steps.length === 0) {
+    compareStepsView.classList.add('hidden');
+    builderNormal.classList.remove('hidden');
+    return;
+  }
+
+  builderNormal.classList.add('hidden');
+  compareStepsView.classList.remove('hidden');
+
+  // Build tabs: one per step + Comparison tab + Add Step
+  let tabsHtml = '';
+  block.steps.forEach((step, si) => {
+    const sr = br?.step_results?.[si];
+    let statusDot = '';
+    if (sr) {
+      const cls = sr.error ? 'failed' : 'passed';
+      statusDot = `<span class="step-status ${cls}"></span>`;
+    }
+    const activeClass = si === activeCompareStepIdx ? 'active' : '';
+    tabsHtml += `<button class="compare-step-tab ${activeClass}" data-step-idx="${si}">${escapeHtml(step.name)}${statusDot}</button>`;
+  });
+
+  // Comparison tab (always last real tab)
+  const compIdx = block.steps.length;
+  const compActive = activeCompareStepIdx === compIdx ? 'active' : '';
+  tabsHtml += `<button class="compare-step-tab tab-comparison ${compActive}" data-step-idx="${compIdx}">⇄ Comparison</button>`;
+
+  // Add step button
+  tabsHtml += `<button class="compare-step-tab" data-action="add-step" title="Add a new step">+</button>`;
+
+  compareStepsTabs.innerHTML = tabsHtml;
+
+  // Wire tab clicks
+  compareStepsTabs.querySelectorAll('.compare-step-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      if (tab.dataset.action === 'add-step') {
+        addCompareStep(fileIdx, blockIdx);
+        return;
+      }
+      activeCompareStepIdx = parseInt(tab.dataset.stepIdx);
+      renderCompareSteps(fileIdx, blockIdx);
+    });
+  });
+
+  // Render active tab content
+  if (activeCompareStepIdx < block.steps.length) {
+    renderStepPanel(fileIdx, blockIdx, activeCompareStepIdx);
+  } else {
+    renderComparisonPanel(fileIdx, blockIdx);
+  }
+}
+
+/** Render a single step's editable panel. */
+function renderStepPanel(fileIdx, blockIdx, stepIdx) {
+  const file = loadedFiles[fileIdx];
+  const block = file.suite.blocks[blockIdx];
+  const step = block.steps[stepIdx];
+  const sr = file.results?.block_results?.[blockIdx]?.step_results?.[stepIdx];
+
+  let html = '<div class="compare-step-panel">';
+
+  // Step name
+  html += `<div class="step-field">
+    <label>Step Name</label>
+    <input type="text" class="meta-input step-name-input" value="${escapeAttr(step.name)}" data-step-idx="${stepIdx}" spellcheck="false">
+  </div>`;
+
+  // URL bar
+  const methods = ['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'];
+  html += `<div class="step-url-bar">
+    <select class="step-method" data-step-idx="${stepIdx}">
+      ${methods.map(m => `<option value="${m}"${step.request.method === m ? ' selected' : ''}>${m}</option>`).join('')}
+    </select>
+    <input type="text" class="step-url" value="${escapeAttr(step.request.url || '')}" data-step-idx="${stepIdx}" placeholder="https://..." spellcheck="false">
+  </div>`;
+
+  // Headers
+  html += `<div class="step-field"><label>Headers</label><div class="step-kv-container" data-step-idx="${stepIdx}">`;
+  if (step.request.headers && step.request.headers.length > 0) {
+    step.request.headers.forEach(([k, v], hi) => {
+      html += `<div class="step-kv-row">
+        <input type="text" class="step-hdr-key" value="${escapeAttr(k)}" placeholder="Header" data-hi="${hi}" spellcheck="false">
+        <input type="text" class="step-hdr-val" value="${escapeAttr(v)}" placeholder="Value" data-hi="${hi}" spellcheck="false">
+        <button class="btn-icon step-hdr-remove" data-hi="${hi}" title="Remove">×</button>
+      </div>`;
+    });
+  }
+  html += `</div><button class="btn btn-ghost btn-xs step-add-btn step-add-header" data-step-idx="${stepIdx}">+ Header</button></div>`;
+
+  // Body
+  html += `<div class="step-field"><label>Body</label>
+    <textarea class="step-body-area" data-step-idx="${stepIdx}" spellcheck="false" placeholder="Request body...">${escapeHtml(step.request.body || '')}</textarea>
+  </div>`;
+
+  // Step assertions
+  html += `<div class="step-assertions-area"><label style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px">Assertions</label>`;
+  if (step.assertions && step.assertions.length > 0) {
+    step.assertions.forEach((a, ai) => {
+      const passed = sr?.assertion_results?.[ai]?.passed;
+      const statusCls = passed === true ? 'style="border-left:2px solid var(--success-color)"' : passed === false ? 'style="border-left:2px solid var(--error-color)"' : '';
+      html += `<div class="step-assertion-row" ${statusCls}>
+        <input type="text" value="${escapeAttr(a.left)}" class="step-assert-left" data-ai="${ai}" style="flex:2" spellcheck="false">
+        <select class="step-assert-op" data-ai="${ai}">
+          ${['==','!=','>','<','>=','<=','contains'].map(op => `<option${a.operator === op ? ' selected' : ''}>${op}</option>`).join('')}
+        </select>
+        <input type="text" value="${escapeAttr(a.right)}" class="step-assert-right" data-ai="${ai}" style="flex:2" spellcheck="false">
+        <button class="btn-icon step-assert-remove" data-ai="${ai}" title="Remove">×</button>
+      </div>`;
+    });
+  }
+  html += `<button class="btn btn-ghost btn-xs step-add-btn step-add-assertion" data-step-idx="${stepIdx}">+ Assertion</button></div>`;
+
+  // Step extracts
+  html += `<div class="step-assertions-area" style="margin-top:6px"><label style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px">Extracts</label>`;
+  if (step.extracts && step.extracts.length > 0) {
+    step.extracts.forEach((ex, ei) => {
+      html += `<div class="step-assertion-row">
+        <input type="text" value="${escapeAttr(ex.variable_name)}" class="step-extract-var" data-ei="${ei}" style="flex:1" placeholder="variable" spellcheck="false">
+        <span style="color:var(--text-muted)">=</span>
+        <input type="text" value="${escapeAttr(ex.source_path)}" class="step-extract-path" data-ei="${ei}" style="flex:2" placeholder="$.json.path" spellcheck="false">
+        <button class="btn-icon step-extract-remove" data-ei="${ei}" title="Remove">×</button>
+      </div>`;
+    });
+  }
+  html += `<button class="btn btn-ghost btn-xs step-add-btn step-add-extract" data-step-idx="${stepIdx}">+ Extract</button></div>`;
+
+  // Remove step button
+  if (block.steps.length > 1) {
+    html += `<div style="margin-top:10px;text-align:right">
+      <button class="btn btn-ghost btn-xs step-remove-btn" data-step-idx="${stepIdx}" style="color:var(--error-color)">🗑 Remove Step</button>
+    </div>`;
+  }
+
+  // Step response preview (if run)
+  if (sr?.response) {
+    const r = sr.response;
+    html += `<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">
+      <label style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px">Response</label>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
+        <span class="status-badge status-${String(r.status)[0]}xx">${r.status} ${escapeHtml(r.status_text || '')}</span>
+        · ${r.time_ms}ms · ${formatBytes(r.body?.length || 0)}
+      </div>
+    </div>`;
+  }
+
+  html += '</div>';
+  compareStepsContent.innerHTML = html;
+
+  // Wire step panel events
+  wireStepPanelEvents(fileIdx, blockIdx, stepIdx);
+}
+
+/** Wire all interactive events within a step panel. */
+function wireStepPanelEvents(fileIdx, blockIdx, stepIdx) {
+  const file = loadedFiles[fileIdx];
+  const block = file.suite.blocks[blockIdx];
+  const step = block.steps[stepIdx];
+  const panel = compareStepsContent;
+
+  const scheduleFlush = () => {
+    file.results = null;
+    clearTimeout(stepFlushTimer);
+    stepFlushTimer = setTimeout(async () => {
+      try {
+        const content = await invoke('generate_http', { suite: file.suite });
+        file.content = content;
+        if (currentMode === 'code') {
+          codeEditor.value = content;
+          codeEditorContent = content;
+          updateHighlight();
+        }
+      } catch (e) { rpLog('warn', 'Step flush failed', String(e)); }
+    }, 400);
+  };
+
+  // Step name
+  panel.querySelector('.step-name-input')?.addEventListener('input', (e) => {
+    const oldName = step.name;
+    const newName = e.target.value.trim();
+    step.name = newName;
+    // Update diff directive references if they pointed to old name
+    if (block.diff) {
+      if (block.diff.step_a === oldName) block.diff.step_a = newName;
+      if (block.diff.step_b === oldName) block.diff.step_b = newName;
+    }
+    scheduleFlush();
+  });
+
+  // Method + URL
+  panel.querySelector('.step-method')?.addEventListener('change', (e) => {
+    step.request.method = e.target.value;
+    scheduleFlush();
+  });
+  panel.querySelector('.step-url')?.addEventListener('input', (e) => {
+    step.request.url = e.target.value;
+    scheduleFlush();
+  });
+
+  // Headers
+  panel.querySelectorAll('.step-hdr-key, .step-hdr-val').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const hi = parseInt(inp.dataset.hi);
+      const row = inp.closest('.step-kv-row');
+      step.request.headers[hi] = [
+        row.querySelector('.step-hdr-key').value.trim(),
+        row.querySelector('.step-hdr-val').value.trim(),
+      ];
+      scheduleFlush();
+    });
+  });
+  panel.querySelectorAll('.step-hdr-remove').forEach(btn => {
+    btn.addEventListener('click', () => {
+      step.request.headers.splice(parseInt(btn.dataset.hi), 1);
+      renderCompareSteps(fileIdx, blockIdx);
+      scheduleFlush();
+    });
+  });
+  panel.querySelector('.step-add-header')?.addEventListener('click', () => {
+    if (!step.request.headers) step.request.headers = [];
+    step.request.headers.push(['', '']);
+    renderCompareSteps(fileIdx, blockIdx);
+  });
+
+  // Body
+  panel.querySelector('.step-body-area')?.addEventListener('input', (e) => {
+    step.request.body = e.target.value || null;
+    scheduleFlush();
+  });
+
+  // Assertions
+  panel.querySelectorAll('.step-assert-left, .step-assert-op, .step-assert-right').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const ai = parseInt(inp.dataset.ai);
+      const row = inp.closest('.step-assertion-row');
+      step.assertions[ai] = {
+        left: row.querySelector('.step-assert-left').value.trim(),
+        operator: row.querySelector('.step-assert-op').value,
+        right: row.querySelector('.step-assert-right').value.trim(),
+      };
+      scheduleFlush();
+    });
+    inp.addEventListener('change', () => inp.dispatchEvent(new Event('input')));
+  });
+  panel.querySelectorAll('.step-assert-remove').forEach(btn => {
+    btn.addEventListener('click', () => {
+      step.assertions.splice(parseInt(btn.dataset.ai), 1);
+      renderCompareSteps(fileIdx, blockIdx);
+      scheduleFlush();
+    });
+  });
+  panel.querySelector('.step-add-assertion')?.addEventListener('click', () => {
+    if (!step.assertions) step.assertions = [];
+    step.assertions.push({ left: 'status', operator: '==', right: '200' });
+    renderCompareSteps(fileIdx, blockIdx);
+  });
+
+  // Extracts
+  panel.querySelectorAll('.step-extract-var, .step-extract-path').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const ei = parseInt(inp.dataset.ei);
+      const row = inp.closest('.step-assertion-row');
+      step.extracts[ei] = {
+        variable_name: row.querySelector('.step-extract-var').value.trim(),
+        source_path: row.querySelector('.step-extract-path').value.trim(),
+      };
+      scheduleFlush();
+    });
+  });
+  panel.querySelectorAll('.step-extract-remove').forEach(btn => {
+    btn.addEventListener('click', () => {
+      step.extracts.splice(parseInt(btn.dataset.ei), 1);
+      renderCompareSteps(fileIdx, blockIdx);
+      scheduleFlush();
+    });
+  });
+  panel.querySelector('.step-add-extract')?.addEventListener('click', () => {
+    if (!step.extracts) step.extracts = [];
+    step.extracts.push({ variable_name: '', source_path: '' });
+    renderCompareSteps(fileIdx, blockIdx);
+  });
+
+  // Remove step
+  panel.querySelector('.step-remove-btn')?.addEventListener('click', () => {
+    block.steps.splice(stepIdx, 1);
+    // Fix diff directive if needed
+    if (block.diff) {
+      const names = block.steps.map(s => s.name);
+      if (!names.includes(block.diff.step_a) || !names.includes(block.diff.step_b)) {
+        block.diff = null;
+      }
+    }
+    activeCompareStepIdx = Math.min(activeCompareStepIdx, block.steps.length - 1);
+    renderCompareSteps(fileIdx, blockIdx);
+    scheduleFlush();
+  });
+}
+
+/** Add a new step to a compare block. */
+function addCompareStep(fileIdx, blockIdx) {
+  const block = loadedFiles[fileIdx].suite.blocks[blockIdx];
+  const stepNum = block.steps.length + 1;
+  block.steps.push({
+    name: `step-${stepNum}`,
+    request: { method: 'GET', url: '', headers: [], body: null },
+    assertions: [],
+    extracts: [],
+  });
+  activeCompareStepIdx = block.steps.length - 1;
+  renderCompareSteps(fileIdx, blockIdx);
+}
+
+/** Render the Comparison tab for a compare block. */
+function renderComparisonPanel(fileIdx, blockIdx) {
+  const file = loadedFiles[fileIdx];
+  const block = file.suite.blocks[blockIdx];
+  const br = file.results?.block_results?.[blockIdx];
+  const diff = br?.diff_result;
+
+  let html = '<div class="compare-diff-panel">';
+
+  // Diff directive editor
+  const stepNames = block.steps.map(s => s.name);
+  html += `<div class="step-field"><label>Diff Steps</label>
+    <div style="display:flex;gap:6px;align-items:center">
+      <select class="meta-select diff-step-a">
+        <option value="">Select step A</option>
+        ${stepNames.map(n => `<option value="${escapeAttr(n)}"${block.diff?.step_a === n ? ' selected' : ''}>${escapeHtml(n)}</option>`).join('')}
+      </select>
+      <span style="color:var(--text-muted)">↔</span>
+      <select class="meta-select diff-step-b">
+        <option value="">Select step B</option>
+        ${stepNames.map(n => `<option value="${escapeAttr(n)}"${block.diff?.step_b === n ? ' selected' : ''}>${escapeHtml(n)}</option>`).join('')}
+      </select>
+    </div>
+  </div>`;
+
+  // Block-level assertions editor
+  html += `<div class="step-assertions-area" style="margin-top:10px"><label style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px">Comparison Assertions</label>`;
+  if (block.assertions && block.assertions.length > 0) {
+    block.assertions.forEach((a, ai) => {
+      const passed = br?.assertion_results?.[ai]?.passed;
+      const statusCls = passed === true ? 'style="border-left:2px solid var(--success-color)"' : passed === false ? 'style="border-left:2px solid var(--error-color)"' : '';
+      html += `<div class="step-assertion-row" ${statusCls}>
+        <input type="text" value="${escapeAttr(a.left)}" class="comp-assert-left" data-ai="${ai}" style="flex:2" spellcheck="false">
+        <select class="comp-assert-op" data-ai="${ai}">
+          ${['==','!=','>','<','>=','<=','contains'].map(op => `<option${a.operator === op ? ' selected' : ''}>${op}</option>`).join('')}
+        </select>
+        <input type="text" value="${escapeAttr(a.right)}" class="comp-assert-right" data-ai="${ai}" style="flex:2" spellcheck="false">
+        <button class="btn-icon comp-assert-remove" data-ai="${ai}" title="Remove">×</button>
+      </div>`;
+    });
+  }
+  html += `<button class="btn btn-ghost btn-xs step-add-btn comp-add-assertion">+ Assertion</button></div>`;
+
+  // Block-level extracts editor
+  html += `<div class="step-assertions-area" style="margin-top:6px"><label style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px">Extracts</label>`;
+  if (block.extracts && block.extracts.length > 0) {
+    block.extracts.forEach((ex, ei) => {
+      html += `<div class="step-assertion-row">
+        <input type="text" value="${escapeAttr(ex.variable_name)}" class="comp-extract-var" data-ei="${ei}" style="flex:1" placeholder="variable" spellcheck="false">
+        <span style="color:var(--text-muted)">=</span>
+        <input type="text" value="${escapeAttr(ex.source_path)}" class="comp-extract-path" data-ei="${ei}" style="flex:2" placeholder="$diff.path" spellcheck="false">
+        <button class="btn-icon comp-extract-remove" data-ei="${ei}" title="Remove">×</button>
+      </div>`;
+    });
+  }
+  html += `<button class="btn btn-ghost btn-xs step-add-btn comp-add-extract">+ Extract</button></div>`;
+
+  // Diff results summary (if run)
+  if (diff) {
+    html += `<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
+      <label style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px">Diff Results</label>
+      <div class="diff-summary-inline" style="margin-top:6px">
+        <span class="diff-badge ${diff.match_exact ? 'match' : 'mismatch'}">${diff.match_exact ? '✓ Exact Match' : (diff.similarity * 100).toFixed(1) + '% Similar'}</span>
+        <span class="diff-badge">${diff.is_json ? 'JSON' : 'Text'}</span>
+        ${diff.added_count ? `<span class="diff-badge added">+${diff.added_count} added</span>` : ''}
+        ${diff.removed_count ? `<span class="diff-badge removed">-${diff.removed_count} removed</span>` : ''}
+        ${diff.changed_count ? `<span class="diff-badge changed">Δ${diff.changed_count} changed</span>` : ''}
+      </div>
+      <button class="btn btn-primary btn-xs" onclick="openDiffViewer(${fileIdx}, ${blockIdx})" style="margin-top:6px">🔍 View Full Diff</button>
+    </div>`;
+  }
+
+  html += '</div>';
+  compareStepsContent.innerHTML = html;
+
+  // Wire comparison panel events
+  wireComparisonPanelEvents(fileIdx, blockIdx);
+}
+
+/** Wire events on the Comparison tab. */
+function wireComparisonPanelEvents(fileIdx, blockIdx) {
+  const file = loadedFiles[fileIdx];
+  const block = file.suite.blocks[blockIdx];
+  const panel = compareStepsContent;
+
+  const scheduleFlush = () => {
+    file.results = null;
+    clearTimeout(stepFlushTimer);
+    stepFlushTimer = setTimeout(async () => {
+      try {
+        const content = await invoke('generate_http', { suite: file.suite });
+        file.content = content;
+        if (currentMode === 'code') {
+          codeEditor.value = content;
+          codeEditorContent = content;
+          updateHighlight();
+        }
+      } catch (e) { rpLog('warn', 'Comparison flush failed', String(e)); }
+    }, 400);
+  };
+
+  // Diff step selectors
+  const diffA = panel.querySelector('.diff-step-a');
+  const diffB = panel.querySelector('.diff-step-b');
+  const onDiffChange = () => {
+    const a = diffA?.value, b = diffB?.value;
+    if (a && b && a !== b) {
+      block.diff = { step_a: a, step_b: b };
+    } else if (!a && !b) {
+      block.diff = null;
+    }
+    scheduleFlush();
+  };
+  diffA?.addEventListener('change', onDiffChange);
+  diffB?.addEventListener('change', onDiffChange);
+
+  // Block assertions
+  panel.querySelectorAll('.comp-assert-left, .comp-assert-op, .comp-assert-right').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const ai = parseInt(inp.dataset.ai);
+      const row = inp.closest('.step-assertion-row');
+      block.assertions[ai] = {
+        left: row.querySelector('.comp-assert-left').value.trim(),
+        operator: row.querySelector('.comp-assert-op').value,
+        right: row.querySelector('.comp-assert-right').value.trim(),
+      };
+      scheduleFlush();
+    });
+    inp.addEventListener('change', () => inp.dispatchEvent(new Event('input')));
+  });
+  panel.querySelectorAll('.comp-assert-remove').forEach(btn => {
+    btn.addEventListener('click', () => {
+      block.assertions.splice(parseInt(btn.dataset.ai), 1);
+      renderComparisonPanel(fileIdx, blockIdx);
+      scheduleFlush();
+    });
+  });
+  panel.querySelector('.comp-add-assertion')?.addEventListener('click', () => {
+    if (!block.assertions) block.assertions = [];
+    block.assertions.push({ left: '$diff.match', operator: '==', right: 'true' });
+    renderComparisonPanel(fileIdx, blockIdx);
+  });
+
+  // Block extracts
+  panel.querySelectorAll('.comp-extract-var, .comp-extract-path').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const ei = parseInt(inp.dataset.ei);
+      const row = inp.closest('.step-assertion-row');
+      block.extracts[ei] = {
+        variable_name: row.querySelector('.comp-extract-var').value.trim(),
+        source_path: row.querySelector('.comp-extract-path').value.trim(),
+      };
+      scheduleFlush();
+    });
+  });
+  panel.querySelectorAll('.comp-extract-remove').forEach(btn => {
+    btn.addEventListener('click', () => {
+      block.extracts.splice(parseInt(btn.dataset.ei), 1);
+      renderComparisonPanel(fileIdx, blockIdx);
+      scheduleFlush();
+    });
+  });
+  panel.querySelector('.comp-add-extract')?.addEventListener('click', () => {
+    if (!block.extracts) block.extracts = [];
+    block.extracts.push({ variable_name: '', source_path: '' });
+    renderComparisonPanel(fileIdx, blockIdx);
+  });
+}
+
 // --- Block Selection ---
 function selectBlock(fileIdx, blockIdx) {
   activeFileIndex = fileIdx;
@@ -2610,36 +3272,60 @@ function selectBlock(fileIdx, blockIdx) {
   const block = file.suite.blocks[blockIdx];
   if (!block) return;
 
-  // Load request into editor
-  const req = block.request;
-  if (req) {
-    methodSelect.value = req.method || 'GET';
-    updateMethodColor();
-    urlInput.value = req.url || '';
+  // Populate metadata accordion
+  populateMetadata(block);
 
-    headersContainer.innerHTML = '';
-    if (req.headers && req.headers.length > 0) {
-      req.headers.forEach(([k, v]) => headersContainer.appendChild(createHeaderRow(k, v)));
-    } else {
-      headersContainer.appendChild(createHeaderRow());
-    }
+  // Determine if this is a compare block with steps
+  const isCompare = block.compare && block.steps && block.steps.length > 0;
 
-    if (req.body) {
-      const isJson = req.body.trim().startsWith('{') || req.body.trim().startsWith('[');
-      bodyType.value = isJson ? 'json' : 'text';
-      bodyInput.value = req.body;
-      bodyInput.disabled = false;
-    } else {
-      bodyType.value = 'none';
-      bodyInput.value = '';
-      bodyInput.disabled = true;
+  if (isCompare) {
+    // Show compare steps view, hide normal builder
+    builderNormal.classList.add('hidden');
+    compareStepsView.classList.remove('hidden');
+    // Show url bar but with the first step info (or hide send for compare)
+    if (block.steps[0]) {
+      methodSelect.value = block.steps[0].request.method || 'GET';
+      updateMethodColor();
+      urlInput.value = block.steps[0].request.url || '';
     }
-    bodyType.dispatchEvent(new Event('change'));
+    activeCompareStepIdx = Math.min(activeCompareStepIdx, block.steps.length);
+    renderCompareSteps(fileIdx, blockIdx);
+  } else {
+    // Normal block — show builder, hide compare view
+    builderNormal.classList.remove('hidden');
+    compareStepsView.classList.add('hidden');
+
+    // Load request into editor
+    const req = block.request;
+    if (req) {
+      methodSelect.value = req.method || 'GET';
+      updateMethodColor();
+      urlInput.value = req.url || '';
+
+      headersContainer.innerHTML = '';
+      if (req.headers && req.headers.length > 0) {
+        req.headers.forEach(([k, v]) => headersContainer.appendChild(createHeaderRow(k, v)));
+      } else {
+        headersContainer.appendChild(createHeaderRow());
+      }
+
+      if (req.body) {
+        const isJson = req.body.trim().startsWith('{') || req.body.trim().startsWith('[');
+        bodyType.value = isJson ? 'json' : 'text';
+        bodyInput.value = req.body;
+        bodyInput.disabled = false;
+      } else {
+        bodyType.value = 'none';
+        bodyInput.value = '';
+        bodyInput.disabled = true;
+      }
+      bodyType.dispatchEvent(new Event('change'));
+    }
   }
 
   // Show response if block has been run
   const br = file.results?.block_results?.[blockIdx];
-  if (block.compare && br?.step_results?.length > 0) {
+  if (isCompare && br?.step_results?.length > 0) {
     const firstStepResp = br.step_results[0].response;
     if (firstStepResp) {
       displayResponse(firstStepResp);
@@ -2656,7 +3342,6 @@ function selectBlock(fileIdx, blockIdx) {
   }
 
   // Show assertions tab if block has assertions, extracts, or run results
-  const isCompare = block.compare && block.steps && block.steps.length > 0;
   const hasDirectives = isCompare || (block.assertions && block.assertions.length > 0) || (block.extracts && block.extracts.length > 0);
   const hasResults = br && (br.assertion_results?.length > 0 || br.extract_results?.length > 0 || br.error);
   if (hasDirectives || hasResults) {
@@ -4148,7 +4833,7 @@ function showToast(message, type = 'info') {
 // --- Utilities ---
 
 function escapeAttr(str) {
-  return String(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // --- Variable Tooltip: JWT & Token Detection ---

@@ -299,37 +299,110 @@
       <div class="split-panels">
         <!-- Request Panel -->
         <section class="panel request-panel" id="requestPanel">
-          <div class="panel-header">
-            <span class="panel-title">REQUEST</span>
-          </div>
-          <div class="sub-tabs">
-            <button class="sub-tab active" data-subtab="req-headers">Headers</button>
-            <button class="sub-tab" data-subtab="req-body">Body</button>
-          </div>
-          <div class="sub-content active" id="subtab-req-headers">
-            <div id="headersContainer" class="kv-container">
-              <div class="kv-row">
-                <input type="checkbox" class="kv-toggle" checked title="Enable this header">
-                <input type="text" class="kv-key" placeholder="Header name" spellcheck="false">
-                <input type="text" class="kv-value" placeholder="Header value" spellcheck="false">
-                <button class="btn-icon kv-remove" title="Remove">×</button>
+          <!-- Block Metadata Accordion -->
+          <div class="block-meta-accordion" id="blockMetaAccordion">
+            <div class="block-meta-header" id="blockMetaHeader">
+              <span class="block-meta-chevron" id="blockMetaChevron">▸</span>
+              <span class="block-meta-title">Block Metadata</span>
+              <span class="block-meta-summary" id="blockMetaSummary"></span>
+            </div>
+            <div class="block-meta-body hidden" id="blockMetaBody">
+              <div class="meta-field">
+                <label>Name</label>
+                <input type="text" id="metaName" class="meta-input" placeholder="Block name" spellcheck="false">
+              </div>
+              <div class="meta-field">
+                <label>Description</label>
+                <input type="text" id="metaDescription" class="meta-input" placeholder="Brief description" spellcheck="false">
+              </div>
+              <div class="meta-field-row">
+                <div class="meta-field">
+                  <label>Type</label>
+                  <select id="metaBlockType" class="meta-select">
+                    <option value="test">Test</option>
+                    <option value="setup">Setup</option>
+                    <option value="teardown">Teardown</option>
+                    <option value="request">Request</option>
+                  </select>
+                </div>
+                <div class="meta-field">
+                  <label>Group</label>
+                  <input type="text" id="metaGroup" class="meta-input" placeholder="Group name" spellcheck="false">
+                </div>
+              </div>
+              <div class="meta-field-row">
+                <div class="meta-field">
+                  <label>Depends</label>
+                  <input type="text" id="metaDepends" class="meta-input" placeholder="Comma-separated dependencies" spellcheck="false">
+                </div>
+                <div class="meta-field">
+                  <label>Mode</label>
+                  <select id="metaMode" class="meta-select">
+                    <option value="">None</option>
+                    <option value="app">App</option>
+                    <option value="dev">Dev</option>
+                  </select>
+                </div>
+              </div>
+              <div class="meta-field-row">
+                <div class="meta-field">
+                  <label>Dev Auth Scope</label>
+                  <input type="text" id="metaDevAuth" class="meta-input" placeholder="Azure scope" spellcheck="false">
+                </div>
+                <div class="meta-field meta-field-inline">
+                  <label>
+                    <input type="checkbox" id="metaDisabled">
+                    Disabled
+                  </label>
+                  <label>
+                    <input type="checkbox" id="metaCompare">
+                    Compare mode
+                  </label>
+                </div>
               </div>
             </div>
-            <button id="addHeaderBtn" class="btn btn-ghost btn-sm add-row-btn">+ Add Header</button>
           </div>
-          <div class="sub-content" id="subtab-req-body">
-            <div class="body-controls">
-              <select id="bodyType" class="body-type-select">
-                <option value="none">None</option>
-                <option value="json">JSON</option>
-                <option value="text">Raw Text</option>
-                <option value="form">Form URL-Encoded</option>
-              </select>
+
+          <!-- Normal builder content -->
+          <div id="builderNormal">
+            <div class="panel-header">
+              <span class="panel-title">REQUEST</span>
             </div>
-            <div class="body-editor-wrapper" id="bodyEditorWrapper">
-              <pre class="body-highlight" id="bodyHighlight"><code></code></pre>
-              <textarea id="bodyInput" class="body-input" placeholder="Request body..." spellcheck="false" disabled></textarea>
+            <div class="sub-tabs">
+              <button class="sub-tab active" data-subtab="req-headers">Headers</button>
+              <button class="sub-tab" data-subtab="req-body">Body</button>
             </div>
+            <div class="sub-content active" id="subtab-req-headers">
+              <div id="headersContainer" class="kv-container">
+                <div class="kv-row">
+                  <input type="checkbox" class="kv-toggle" checked title="Enable this header">
+                  <input type="text" class="kv-key" placeholder="Header name" spellcheck="false">
+                  <input type="text" class="kv-value" placeholder="Header value" spellcheck="false">
+                  <button class="btn-icon kv-remove" title="Remove">×</button>
+                </div>
+              </div>
+              <button id="addHeaderBtn" class="btn btn-ghost btn-sm add-row-btn">+ Add Header</button>
+            </div>
+            <div class="sub-content" id="subtab-req-body">
+              <div class="body-controls">
+                <select id="bodyType" class="body-type-select">
+                  <option value="none">None</option>
+                  <option value="json">JSON</option>
+                  <option value="text">Raw Text</option>
+                  <option value="form">Form URL-Encoded</option>
+                </select>
+              </div>
+              <div class="body-editor-wrapper" id="bodyEditorWrapper">
+                <pre class="body-highlight" id="bodyHighlight"><code></code></pre>
+                <textarea id="bodyInput" class="body-input" placeholder="Request body..." spellcheck="false" disabled></textarea>
+              </div>
+            </div>
+          </div>
+
+          <!-- Compare steps view (shown for compare blocks) -->
+          <div id="compareStepsView" class="hidden">
+            <div class="compare-steps-tabs" id="compareStepsTabs"></div>
+            <div class="compare-steps-content" id="compareStepsContent"></div>
           </div>
         </section>
 
