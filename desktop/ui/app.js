@@ -466,6 +466,7 @@ const builderNormal   = $('#builderNormal');
 const compareStepsView = $('#compareStepsView');
 const compareStepsTabs = $('#compareStepsTabs');
 const compareStepsContent = $('#compareStepsContent');
+const builderDirectivesContent = $('#builderDirectivesContent');
 
 // History panel refs
 const historyPanel        = $('#historyPanel');
@@ -2684,6 +2685,7 @@ function applyMetadataToBlock() {
 // Auto-apply metadata on field change (debounced)
 let metaDebounceTimer = null;
 let stepFlushTimer = null;
+let directiveFlushTimer = null;
 function onMetaFieldChange() {
   clearTimeout(metaDebounceTimer);
   // Capture current indices to avoid race if user switches blocks
@@ -3262,6 +3264,149 @@ function wireComparisonPanelEvents(fileIdx, blockIdx) {
   });
 }
 
+// --- Builder Directives (Assertions & Extracts for normal blocks) ---
+
+/** Render editable assertions and extracts for a normal (non-compare) block. */
+function renderBuilderDirectives(fileIdx, blockIdx) {
+  const file = loadedFiles[fileIdx];
+  if (!file) return;
+  const block = file.suite.blocks[blockIdx];
+  if (!block) return;
+  const br = file.results?.block_results?.[blockIdx];
+
+  let html = '<div class="compare-step-panel">';
+
+  // Assertions
+  html += `<div class="step-assertions-area"><label style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px">Assertions</label>`;
+  if (block.assertions && block.assertions.length > 0) {
+    block.assertions.forEach((a, ai) => {
+      const passed = br?.assertion_results?.[ai]?.passed;
+      const statusCls = passed === true ? 'style="border-left:2px solid var(--green)"' : passed === false ? 'style="border-left:2px solid var(--red)"' : '';
+      html += `<div class="step-assertion-row" ${statusCls}>
+        <input type="text" value="${escapeAttr(a.left)}" class="bldr-assert-left" data-ai="${ai}" style="flex:2" placeholder="status or $.path" spellcheck="false">
+        <select class="bldr-assert-op" data-ai="${ai}">
+          ${['==','!=','>','<','>=','<=','contains'].map(op => `<option${a.operator === op ? ' selected' : ''}>${op}</option>`).join('')}
+        </select>
+        <input type="text" value="${escapeAttr(a.right)}" class="bldr-assert-right" data-ai="${ai}" style="flex:2" placeholder="expected value" spellcheck="false">
+        <button class="btn-icon bldr-assert-remove" data-ai="${ai}" title="Remove">×</button>
+      </div>`;
+    });
+  } else {
+    html += `<div style="font-size:11px;color:var(--text-muted);padding:4px 0">No assertions yet</div>`;
+  }
+  html += `<button class="btn btn-ghost btn-xs step-add-btn bldr-add-assertion">+ Assertion</button></div>`;
+
+  // Extracts
+  html += `<div class="step-assertions-area" style="margin-top:10px"><label style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px">Extracts</label>`;
+  if (block.extracts && block.extracts.length > 0) {
+    block.extracts.forEach((ex, ei) => {
+      const er = br?.extract_results?.[ei];
+      const valStr = er?.value ?? '';
+      const statusCls = er ? (er.success ? 'style="border-left:2px solid var(--green)"' : 'style="border-left:2px solid var(--red)"') : '';
+      html += `<div class="step-assertion-row" ${statusCls}>
+        <input type="text" value="${escapeAttr(ex.variable_name)}" class="bldr-extract-var" data-ei="${ei}" style="flex:1" placeholder="variable_name" spellcheck="false">
+        <span style="color:var(--text-muted)">=</span>
+        <input type="text" value="${escapeAttr(ex.source_path)}" class="bldr-extract-path" data-ei="${ei}" style="flex:2" placeholder="$.json.path" spellcheck="false">
+        <button class="btn-icon bldr-extract-remove" data-ei="${ei}" title="Remove">×</button>
+      </div>`;
+      if (er && er.value != null) {
+        html += `<div style="font-size:10px;color:var(--text-muted);padding:0 0 2px 20px">→ ${escapeHtml(valStr)}</div>`;
+      }
+    });
+  } else {
+    html += `<div style="font-size:11px;color:var(--text-muted);padding:4px 0">No extracts yet</div>`;
+  }
+  html += `<button class="btn btn-ghost btn-xs step-add-btn bldr-add-extract">+ Extract</button></div>`;
+
+  html += '</div>';
+  builderDirectivesContent.innerHTML = html;
+
+  // Wire events
+  wireBuilderDirectiveEvents(fileIdx, blockIdx);
+}
+
+/** Wire events for the builder assertions/extracts panel. */
+function wireBuilderDirectiveEvents(fileIdx, blockIdx) {
+  const file = loadedFiles[fileIdx];
+  const block = file.suite.blocks[blockIdx];
+  const panel = builderDirectivesContent;
+
+  const scheduleFlush = () => {
+    file.results = null;
+    clearTimeout(directiveFlushTimer);
+    directiveFlushTimer = setTimeout(async () => {
+      try {
+        const content = await invoke('generate_http', { suite: file.suite });
+        file.content = content;
+        if (currentMode === 'code') {
+          codeEditor.value = content;
+          codeEditorContent = content;
+          updateHighlight();
+        }
+      } catch (e) { rpLog('warn', 'Directive flush failed', String(e)); }
+    }, 400);
+  };
+
+  // Assertions
+  panel.querySelectorAll('.bldr-assert-left, .bldr-assert-op, .bldr-assert-right').forEach(inp => {
+    const handler = () => {
+      const ai = parseInt(inp.dataset.ai);
+      const row = inp.closest('.step-assertion-row');
+      block.assertions[ai] = {
+        left: row.querySelector('.bldr-assert-left').value.trim(),
+        operator: row.querySelector('.bldr-assert-op').value,
+        right: row.querySelector('.bldr-assert-right').value.trim(),
+      };
+      scheduleFlush();
+    };
+    inp.addEventListener('input', handler);
+    inp.addEventListener('change', handler);
+  });
+  panel.querySelectorAll('.bldr-assert-remove').forEach(btn => {
+    btn.addEventListener('click', () => {
+      block.assertions.splice(parseInt(btn.dataset.ai), 1);
+      file.results = null;
+      renderBuilderDirectives(fileIdx, blockIdx);
+      scheduleFlush();
+    });
+  });
+  panel.querySelector('.bldr-add-assertion')?.addEventListener('click', () => {
+    if (!block.assertions) block.assertions = [];
+    block.assertions.push({ left: 'status', operator: '==', right: '200' });
+    file.results = null;
+    renderBuilderDirectives(fileIdx, blockIdx);
+    scheduleFlush();
+  });
+
+  // Extracts
+  panel.querySelectorAll('.bldr-extract-var, .bldr-extract-path').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const ei = parseInt(inp.dataset.ei);
+      const row = inp.closest('.step-assertion-row');
+      block.extracts[ei] = {
+        variable_name: row.querySelector('.bldr-extract-var').value.trim(),
+        source_path: row.querySelector('.bldr-extract-path').value.trim(),
+      };
+      scheduleFlush();
+    });
+  });
+  panel.querySelectorAll('.bldr-extract-remove').forEach(btn => {
+    btn.addEventListener('click', () => {
+      block.extracts.splice(parseInt(btn.dataset.ei), 1);
+      file.results = null;
+      renderBuilderDirectives(fileIdx, blockIdx);
+      scheduleFlush();
+    });
+  });
+  panel.querySelector('.bldr-add-extract')?.addEventListener('click', () => {
+    if (!block.extracts) block.extracts = [];
+    block.extracts.push({ variable_name: '', source_path: '' });
+    file.results = null;
+    renderBuilderDirectives(fileIdx, blockIdx);
+    scheduleFlush();
+  });
+}
+
 // --- Block Selection ---
 function selectBlock(fileIdx, blockIdx) {
   activeFileIndex = fileIdx;
@@ -3321,6 +3466,9 @@ function selectBlock(fileIdx, blockIdx) {
       }
       bodyType.dispatchEvent(new Event('change'));
     }
+
+    // Render assertions & extracts in builder sub-tab
+    renderBuilderDirectives(fileIdx, blockIdx);
   }
 
   // Show response if block has been run

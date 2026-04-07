@@ -371,6 +371,7 @@
             <div class="sub-tabs">
               <button class="sub-tab active" data-subtab="req-headers">Headers</button>
               <button class="sub-tab" data-subtab="req-body">Body</button>
+              <button class="sub-tab" data-subtab="req-directives">Assertions & Extracts</button>
             </div>
             <div class="sub-content active" id="subtab-req-headers">
               <div id="headersContainer" class="kv-container">
@@ -396,6 +397,9 @@
                 <pre class="body-highlight" id="bodyHighlight"><code></code></pre>
                 <textarea id="bodyInput" class="body-input" placeholder="Request body..." spellcheck="false" disabled></textarea>
               </div>
+            </div>
+            <div class="sub-content" id="subtab-req-directives">
+              <div id="builderDirectivesContent" class="builder-directives-content"></div>
             </div>
           </div>
 
