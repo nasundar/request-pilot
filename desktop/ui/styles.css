@@ -1955,6 +1955,18 @@ html, body {
   caret-color: var(--text-primary);
   background: transparent;
 }
+/* When highlighting overlay is active, keep selection text transparent so the
+   overlay isn't visually doubled with the textarea's native selected text. */
+.body-editor-wrapper.highlighting .body-input::selection {
+  background: var(--accent-dim);
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+.body-editor-wrapper.highlighting .body-input::-moz-selection {
+  background: var(--accent-dim);
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
 .body-editor-wrapper.highlighting .body-highlight {
   color: var(--text-primary);
 }
@@ -3687,7 +3699,19 @@ input:focus, select:focus, textarea:focus { outline: none; }
 }
 .code-editor::placeholder { color: var(--text-muted); }
 .code-editor.modified { border-top: 2px solid var(--orange); }
-.code-editor::selection { background: var(--accent-dim); }
+/* Keep textarea text transparent during selection so overlay isn't doubled.
+   The global ::selection rule sets color: var(--text-primary), which would
+   make the underlying (transparent) text visible on top of the overlay. */
+.code-editor::selection {
+  background: var(--accent-dim);
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+.code-editor::-moz-selection {
+  background: var(--accent-dim);
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
 
 /* Syntax highlight token colors */
 .hl-comment { color: var(--text-muted); }
