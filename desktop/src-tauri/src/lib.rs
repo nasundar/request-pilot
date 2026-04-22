@@ -72,6 +72,11 @@ fn parse_test_file(content: String) -> Result<http_parser::TestSuite, String> {
 }
 
 #[tauri::command]
+fn block_start_lines(content: String) -> Result<Vec<usize>, String> {
+    Ok(http_parser::block_start_lines(&content))
+}
+
+#[tauri::command]
 fn parse_duration(interval: String) -> Result<Option<u64>, String> {
     Ok(request_pilot_core::duration::parse_duration_secs(&interval))
 }
@@ -485,6 +490,7 @@ pub fn run() {
             send_request,
             parse_http_file,
             parse_test_file,
+            block_start_lines,
             parse_duration,
             generate_http,
             run_test_suite,

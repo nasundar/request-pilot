@@ -449,12 +449,12 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
     ]);
     let hints_line = if app.code_editor_editing {
         Line::from(vec![Span::styled(
-            " Type to edit  Ctrl+S=save  /=search  Ctrl+G=goto  Esc=view mode ",
+            " Type to edit  Ctrl+S=save  Ctrl+Enter=run  /=search  Ctrl+G=goto  Esc=view mode ",
             Style::default().fg(theme::TEXT_FAINT()),
         )])
     } else {
         Line::from(vec![Span::styled(
-            " ↑↓=move  Ctrl+U/D=page  /=search  n/N=match  i/e=edit mode  Esc=exit ",
+            " ↑↓=move  Ctrl+U/D=page  Ctrl+Enter=run  /=search  n/N=match  i/e=edit mode  Esc=exit ",
             Style::default().fg(theme::TEXT_FAINT()),
         )])
     };
@@ -761,6 +761,11 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
                 return;
             }
             KeyCode::Char('s') => { app.save_code_editor(); }
+            KeyCode::Enter => {
+                // Run the block at the cursor. Works in both view and edit
+                // modes so users can Ctrl+Enter without toggling edit.
+                app.run_code_block_at_cursor();
+            }
             KeyCode::Char('u') => {
                 app.code_editor_cursor_line = app.code_editor_cursor_line.saturating_sub(15);
                 clamp_cursor_col(app);

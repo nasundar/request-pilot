@@ -164,6 +164,86 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
     }
 }
 
+/// Returns the 0-based starting line number of each runnable block in the same
+/// order and count as `parse_test_suite(content).blocks`. Blocks that the parser
+/// skips (@variables block, file-level comment-only headers) are excluded, so
+/// the returned indices map 1:1 to `TestSuite.blocks`.
+///
+/// A block "starts" on the line where its `###` separator sits (or line 0 if
+/// the file begins with a block without a leading `###`).
+pub fn block_start_lines(content: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut seen_any_runnable = false;
+
+    // Walk lines, splitting at lines that start with "###" (possibly with
+    // trailing text — matching the split("###") behavior of parse_test_suite).
+    // We buffer each raw block along with the line number where it started.
+    let mut current_start: usize = 0;
+    let mut current_lines: Vec<&str> = Vec::new();
+    let lines: Vec<&str> = content.split('\n').collect();
+
+    let flush = |current_start: usize,
+                 current_lines: &[&str],
+                 starts: &mut Vec<usize>,
+                 seen_any_runnable: &mut bool| {
+        let block_text: String = current_lines.join("\n");
+        let block = block_text.trim();
+        if block.is_empty() {
+            return;
+        }
+        let has_variables = block
+            .lines()
+            .any(|l| l.trim().starts_with("@variables"));
+        if has_variables {
+            return;
+        }
+        let is_header_block = !*seen_any_runnable
+            && block.lines().all(|l| {
+                let t = l.trim();
+                t.is_empty() || t.starts_with('#')
+            });
+        if is_header_block {
+            return;
+        }
+        // Only record if parse_test_block would actually produce a block.
+        if parse_test_block(block).is_some() {
+            starts.push(current_start);
+            *seen_any_runnable = true;
+        }
+    };
+
+    for (idx, line) in lines.iter().enumerate() {
+        // `split("###")` in parse_test_suite splits on ANY occurrence of "###",
+        // including mid-line. In practice block separators are always on their
+        // own line, so we split on lines whose trimmed content starts with "###".
+        if line.trim_start().starts_with("###") {
+            flush(
+                current_start,
+                &current_lines,
+                &mut starts,
+                &mut seen_any_runnable,
+            );
+            current_lines.clear();
+            current_start = idx;
+            // Include everything after the "###" marker on this line as part of
+            // the new block's first line (mirrors split("###") behavior).
+            let trimmed_start = line.trim_start();
+            let after = trimmed_start.trim_start_matches('#');
+            current_lines.push(after);
+        } else {
+            current_lines.push(line);
+        }
+    }
+    flush(
+        current_start,
+        &current_lines,
+        &mut starts,
+        &mut seen_any_runnable,
+    );
+
+    starts
+}
+
 fn parse_variables_block(block: &str, variables: &mut Vec<(String, String)>) {
     let mut past_header = false;
     for line in block.lines() {
@@ -713,6 +793,41 @@ fn parse_request_from_lines(
 mod tests {
     use super::*;
 
+    // ── block_start_lines: 1:1 mapping with parse_test_suite.blocks ──
+    #[test]
+    fn block_start_lines_skips_variables_and_header() {
+        let input = "\
+# File header comment
+# @auto_run 30s
+
+### @variables
+baseUrl = https://example.com
+
+### @test First
+GET {{baseUrl}}/a
+
+### @test Second
+GET {{baseUrl}}/b
+";
+        let suite = parse_test_suite(input);
+        let starts = block_start_lines(input);
+        assert_eq!(starts.len(), suite.blocks.len());
+        assert_eq!(suite.blocks.len(), 2);
+        // Find expected line indices of each ### @test marker.
+        let lines: Vec<&str> = input.split('\n').collect();
+        let first = lines.iter().position(|l| l.starts_with("### @test First")).unwrap();
+        let second = lines.iter().position(|l| l.starts_with("### @test Second")).unwrap();
+        assert_eq!(starts[0], first);
+        assert_eq!(starts[1], second);
+    }
+
+    #[test]
+    fn block_start_lines_no_leading_separator() {
+        let input = "GET https://example.com/api\n";
+        let suite = parse_test_suite(input);
+        let starts = block_start_lines(input);
+        assert_eq!(starts.len(), suite.blocks.len());
+    }
     // ── parse: simple GET ────────────────────────────────────────────
     #[test]
     fn parse_simple_get() {

@@ -440,6 +440,7 @@ const codeEditor      = $('#codeEditor');
 const codeEditorFilename = $('#codeEditorFilename');
 const codeSaveBtn     = $('#codeSaveBtn');
 const codeRevertBtn   = $('#codeRevertBtn');
+const codeRunBtn      = $('#codeRunBtn');
 const newFileBtn      = $('#newFileBtn');
 const codeEditorHighlightCode = $('#codeEditorHighlightCode');
 const codeEditorHighlight = $('#codeEditorHighlight');
@@ -6106,6 +6107,65 @@ codeRevertBtn.addEventListener('click', () => {
   showToast('Reverted to last saved', 'info');
 });
 
+// Run the block the cursor is currently on (from code mode).
+// If there are unsaved changes, parse+sync them first; if parsing fails,
+// surface the error and don't run (would otherwise execute stale block).
+async function runBlockAtCursor() {
+  if (activeFileIndex < 0 || !loadedFiles[activeFileIndex]) {
+    showToast('No file loaded', 'error');
+    return;
+  }
+
+  if (codeEditorModified) {
+    const ok = await syncCodeToBuilder();
+    if (!ok) return; // parse error toast already shown
+  }
+
+  const file = loadedFiles[activeFileIndex];
+  if (!file.suite || !file.suite.blocks || file.suite.blocks.length === 0) {
+    showToast('No runnable blocks in file', 'error');
+    return;
+  }
+
+  const content = codeEditor.value;
+  let starts;
+  try {
+    starts = await invoke('block_start_lines', { content });
+  } catch (err) {
+    showToast(`Could not locate block: ${err}`, 'error');
+    return;
+  }
+
+  if (!Array.isArray(starts) || starts.length === 0) {
+    showToast('No runnable blocks in file', 'error');
+    return;
+  }
+
+  // Figure out cursor line (0-indexed).
+  const caret = codeEditor.selectionStart || 0;
+  const cursorLine = (codeEditor.value.substring(0, caret).match(/\n/g) || []).length;
+
+  // Find the block whose start_line is the greatest that is <= cursorLine.
+  // If cursor is before the first block, use the first block.
+  let blockIdx = 0;
+  for (let i = 0; i < starts.length; i++) {
+    if (starts[i] <= cursorLine) blockIdx = i;
+    else break;
+  }
+
+  // Guard: blockIdx must be a real runnable block in the suite.
+  if (blockIdx >= file.suite.blocks.length) {
+    showToast('Block mapping mismatch — try saving first', 'error');
+    return;
+  }
+
+  await runSingleBlock(activeFileIndex, blockIdx);
+}
+
+if (codeRunBtn) {
+  codeRunBtn.addEventListener('click', () => { runBlockAtCursor(); });
+}
+
 // --- New File ---
 newFileBtn.addEventListener('click', () => {
   const template = `### @variables
@@ -8172,10 +8232,14 @@ document.querySelector('.diff-viewer-tabs')?.addEventListener('click', (e) => {
 
 // --- Keyboard Shortcuts ---
 document.addEventListener('keydown', (e) => {
-  // Ctrl+Enter -> Send
+  // Ctrl+Enter -> Send (builder) / Run block at cursor (code mode)
   if (e.ctrlKey && !e.shiftKey && e.key === 'Enter') {
     e.preventDefault();
-    sendRequest();
+    if (currentMode === 'code') {
+      runBlockAtCursor();
+    } else {
+      sendRequest();
+    }
   }
   // Ctrl+Shift+Enter -> Run All
   if (e.ctrlKey && e.shiftKey && e.key === 'Enter') {

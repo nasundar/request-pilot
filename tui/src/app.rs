@@ -657,6 +657,69 @@ impl App {
         }
     }
 
+    /// Run the block the cursor is currently on in the code editor.
+    /// If the buffer has unsaved changes, parses into memory first (no disk
+    /// write). If parsing fails or no block maps to the cursor, status is
+    /// updated and no run is queued.
+    pub fn run_code_block_at_cursor(&mut self) {
+        let fi = match self.active_file_idx {
+            Some(i) => i,
+            None => {
+                self.set_status("No file loaded".into());
+                return;
+            }
+        };
+
+        // If modified, flush parsed content into the in-memory suite so the
+        // block index we compute matches what we'll actually run. We don't
+        // write to disk — this is a "run" action, not a "save" action.
+        if self.code_editor_modified {
+            let content = self.code_editor_content.clone();
+            let suite = parse_test_suite(&content);
+            if let Some(file) = self.loaded_files.get_mut(fi) {
+                file.content = content;
+                file.suite = suite;
+            }
+            self.rebuild_tree();
+        }
+
+        let file = match self.loaded_files.get(fi) {
+            Some(f) => f,
+            None => {
+                self.set_status("No file loaded".into());
+                return;
+            }
+        };
+
+        if file.suite.blocks.is_empty() {
+            self.set_status("No runnable blocks in file".into());
+            return;
+        }
+
+        let starts = request_pilot_core::http_parser::block_start_lines(&self.code_editor_content);
+        if starts.is_empty() {
+            self.set_status("No runnable blocks in file".into());
+            return;
+        }
+
+        let cursor_line = self.code_editor_cursor_line;
+        let mut block_idx = 0usize;
+        for (i, &start) in starts.iter().enumerate() {
+            if start <= cursor_line {
+                block_idx = i;
+            } else {
+                break;
+            }
+        }
+
+        if block_idx >= file.suite.blocks.len() {
+            self.set_status("Block mapping mismatch — try saving first".into());
+            return;
+        }
+
+        self.queue_run_single(fi, block_idx);
+    }
+
     pub fn queue_run_group(&mut self, file_idx: usize, block_indices: Vec<usize>) {
         if !self.is_running && !block_indices.is_empty() {
             self.run_group_queued = Some((file_idx, block_indices));
