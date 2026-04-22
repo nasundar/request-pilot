@@ -371,6 +371,7 @@
             </div>
             <div class="sub-tabs">
               <button class="sub-tab active" data-subtab="req-headers">Headers</button>
+              <button class="sub-tab" data-subtab="req-params">Params</button>
               <button class="sub-tab" data-subtab="req-body">Body</button>
               <button class="sub-tab" data-subtab="req-directives">Assertions & Extracts</button>
             </div>
@@ -384,6 +385,10 @@
                 </div>
               </div>
               <button id="addHeaderBtn" class="btn btn-ghost btn-sm add-row-btn">+ Add Header</button>
+            </div>
+            <div class="sub-content" id="subtab-req-params">
+              <div id="paramsContainer" class="kv-container"></div>
+              <button id="addParamBtn" class="btn btn-ghost btn-sm add-row-btn">+ Add Parameter</button>
             </div>
             <div class="sub-content" id="subtab-req-body">
               <div class="body-controls">

@@ -14,6 +14,30 @@ use crate::ui::truncate_to;
 
 const METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
+/// Parse query params from a URL. Splits on FIRST '?' and FIRST '=' only;
+/// preserves duplicate keys, empty values, and original order. Fragment is
+/// stripped. Returns a list of (key, value, has_equals) triples.
+fn parse_url_params(url: &str) -> Vec<(String, String, bool)> {
+    // Strip fragment first.
+    let without_frag = match url.find('#') {
+        Some(i) => &url[..i],
+        None => url,
+    };
+    let q = match without_frag.find('?') {
+        Some(i) => &without_frag[i + 1..],
+        None => return Vec::new(),
+    };
+    if q.is_empty() {
+        return Vec::new();
+    }
+    q.split('&')
+        .map(|pair| match pair.find('=') {
+            Some(i) => (pair[..i].to_string(), pair[i + 1..].to_string(), true),
+            None => (pair.to_string(), String::new(), false),
+        })
+        .collect()
+}
+
 fn method_color(method: &str) -> ratatui::style::Color {
     match method {
         "GET" => theme::GREEN(),
@@ -63,10 +87,12 @@ pub fn render_builder(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    let params = parse_url_params(&blk.request.url);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // method + URL
+            Constraint::Length(params.len().max(1) as u16 + 2), // params (derived from URL)
             Constraint::Length(blk.request.headers.len().max(1) as u16 + 2), // headers
             Constraint::Min(3),   // body
             Constraint::Length(blk.assertions.len().max(1) as u16 + 2), // assertions
@@ -75,10 +101,11 @@ pub fn render_builder(frame: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     render_method_url(frame, app, blk, chunks[0]);
-    render_headers(frame, app, blk, chunks[1]);
-    render_body(frame, app, blk, chunks[2]);
-    render_assertions(frame, app, blk, chunks[3]);
-    render_extracts(frame, app, blk, chunks[4]);
+    render_params(frame, app, &params, chunks[1]);
+    render_headers(frame, app, blk, chunks[2]);
+    render_body(frame, app, blk, chunks[3]);
+    render_assertions(frame, app, blk, chunks[4]);
+    render_extracts(frame, app, blk, chunks[5]);
 
     // Render variable autocomplete overlay if open
     if app.var_ac_open && app.builder_focus == BuilderFocus::Url {
@@ -316,6 +343,59 @@ fn highlight_variables(text: &str, focused: bool) -> Vec<Span<'_>> {
         spans.push(Span::styled(rest, base_style));
     }
     spans
+}
+
+fn render_params(
+    frame: &mut Frame,
+    app: &App,
+    params: &[(String, String, bool)],
+    area: Rect,
+) {
+    let is_focused = app.builder_focus == BuilderFocus::Params;
+    let border_style = if is_focused {
+        Style::default().fg(theme::BLUE())
+    } else {
+        Style::default().fg(theme::TEXT_FAINT())
+    };
+
+    let block = Block::default()
+        .title(format!(" Params ({}) ", params.len()))
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .style(if is_focused {
+            Style::default().bg(theme::BG_FOCUS())
+        } else {
+            Style::default()
+        });
+
+    if params.is_empty() {
+        frame.render_widget(
+            Paragraph::new("  (derived from URL — none)")
+                .block(block)
+                .style(Style::default().fg(theme::TEXT_FAINT())),
+            area,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = params
+        .iter()
+        .map(|(k, v, has_eq)| {
+            let max_val = (area.width as usize).saturating_sub(k.len() + 6);
+            let display_val = truncate_to(v, max_val);
+            let separator = if *has_eq { "= " } else { "  " };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("  {}", k),
+                    Style::default().fg(theme::LAVENDER()),
+                ),
+                Span::styled(format!(" {}", separator), Style::default().fg(theme::TEXT_FAINT())),
+                Span::styled(display_val, Style::default().fg(theme::TEXT())),
+            ]))
+        })
+        .collect();
+
+    frame.render_widget(List::new(items).block(block), area);
 }
 
 fn render_headers(
@@ -688,7 +768,8 @@ pub fn handle_builder_keys(app: &mut App, key: KeyEvent) {
         KeyCode::Tab => {
             app.builder_focus = match app.builder_focus {
                 BuilderFocus::Method => BuilderFocus::Url,
-                BuilderFocus::Url => BuilderFocus::Headers,
+                BuilderFocus::Url => BuilderFocus::Params,
+                BuilderFocus::Params => BuilderFocus::Headers,
                 BuilderFocus::Headers => BuilderFocus::Body,
                 BuilderFocus::Body => BuilderFocus::Assertions,
                 BuilderFocus::Assertions => BuilderFocus::Extracts,
@@ -699,7 +780,8 @@ pub fn handle_builder_keys(app: &mut App, key: KeyEvent) {
             app.builder_focus = match app.builder_focus {
                 BuilderFocus::Method => BuilderFocus::Extracts,
                 BuilderFocus::Url => BuilderFocus::Method,
-                BuilderFocus::Headers => BuilderFocus::Url,
+                BuilderFocus::Params => BuilderFocus::Url,
+                BuilderFocus::Headers => BuilderFocus::Params,
                 BuilderFocus::Body => BuilderFocus::Headers,
                 BuilderFocus::Assertions => BuilderFocus::Body,
                 BuilderFocus::Extracts => BuilderFocus::Assertions,
@@ -749,6 +831,7 @@ pub fn handle_builder_keys(app: &mut App, key: KeyEvent) {
                 BuilderFocus::Body => handle_body_keys(app, key),
                 BuilderFocus::Assertions => handle_assertions_keys(app, key),
                 BuilderFocus::Extracts => handle_extracts_keys(app, key),
+                BuilderFocus::Params => handle_params_keys(app, key),
             }
         }
     }
@@ -927,6 +1010,20 @@ fn handle_headers_keys(app: &mut App, key: KeyEvent) {
             }
             _ => {}
         }
+    }
+}
+
+/// Params focus is a read-only derived view of the URL's query string.
+/// Pressing 'e' jumps focus to the URL field so the user can edit params
+/// directly (which is the source of truth). This mirrors the desktop model
+/// where URL <-> Params sync automatically.
+fn handle_params_keys(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Char('e') | KeyCode::Enter => {
+            app.builder_focus = BuilderFocus::Url;
+            app.set_status("Editing URL (Params derives from URL query)".into());
+        }
+        _ => {}
     }
 }
 

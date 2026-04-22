@@ -1414,6 +1414,10 @@ GET https://example.com/third
 
         handle_key(&mut app, key(KeyCode::Tab));
         assert_eq!(app.focus, Focus::Builder);
+        assert_eq!(app.builder_focus, BuilderFocus::Params);
+
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Builder);
         assert_eq!(app.builder_focus, BuilderFocus::Headers);
     }
 

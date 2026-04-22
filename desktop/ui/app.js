@@ -400,6 +400,8 @@ const urlInput        = $('#urlInput');
 const sendBtn         = $('#sendBtn');
 const addHeaderBtn    = $('#addHeaderBtn');
 const headersContainer= $('#headersContainer');
+const addParamBtn     = $('#addParamBtn');
+const paramsContainer = $('#paramsContainer');
 const bodyType        = $('#bodyType');
 const bodyInput       = $('#bodyInput');
 const bodyHighlight   = $('#bodyHighlight');
@@ -741,6 +743,154 @@ headersContainer.querySelector('.kv-remove')?.addEventListener('click', function
   this.closest('.kv-row').remove();
   if (headersContainer.children.length === 0) headersContainer.appendChild(createHeaderRow());
 });
+
+// --- URL Query Parameters (derived from URL, editable) ---
+//
+// The URL is the single source of truth. The Params tab is an ephemeral view
+// derived from the URL; edits in Params rebuild the URL while preserving
+// scheme/path/fragment and row order. We deliberately avoid URLSearchParams
+// because it normalizes percent-encoding (e.g. %20 <-> + and %2B <-> +) which
+// would silently mutate the user's URL.
+//
+// We're currently suppressing the refresh loop where URL changes trigger a
+// params re-render (which would reset focus/order), so don't assign in both
+// directions at once — use `paramsSyncLock`.
+let paramsSyncLock = false;
+
+function splitUrlParts(url) {
+  // Returns { base, query, fragment }. Splits on FIRST '?' and FIRST '#' only.
+  let fragment = '';
+  let rest = url;
+  const hashIdx = rest.indexOf('#');
+  if (hashIdx >= 0) {
+    fragment = rest.substring(hashIdx); // keeps leading '#'
+    rest = rest.substring(0, hashIdx);
+  }
+  const qIdx = rest.indexOf('?');
+  if (qIdx < 0) return { base: rest, query: null, fragment };
+  return {
+    base: rest.substring(0, qIdx),
+    query: rest.substring(qIdx + 1),
+    fragment,
+  };
+}
+
+function parseQueryToParams(query) {
+  // query may be null, '', or 'a=1&b=2&flag&c='.
+  // Each pair split on FIRST '=' only. A missing '=' means hasEquals=false.
+  if (query == null || query === '') return [];
+  return query.split('&').map(pair => {
+    const eq = pair.indexOf('=');
+    if (eq < 0) return { key: pair, value: '', hasEquals: false };
+    return { key: pair.substring(0, eq), value: pair.substring(eq + 1), hasEquals: true };
+  });
+}
+
+function buildQueryFromParams(params) {
+  const parts = params
+    .filter(p => p.key !== '' || p.value !== '' || p.hasEquals)
+    .map(p => p.hasEquals ? `${p.key}=${p.value}` : p.key);
+  return parts.join('&');
+}
+
+function createParamRow(key = '', value = '', hasEquals = true) {
+  const row = document.createElement('div');
+  row.className = 'kv-row';
+  row.dataset.hasEquals = hasEquals ? '1' : '0';
+  row.innerHTML = `
+    <input type="checkbox" class="kv-toggle" checked title="Include in URL">
+    <input type="text" class="kv-key" placeholder="Parameter name" value="${escapeAttr(key)}" spellcheck="false">
+    <input type="text" class="kv-value" placeholder="Value" value="${escapeAttr(value)}" spellcheck="false">
+    <button class="btn-icon kv-remove" title="Remove">&times;</button>
+  `;
+  row.querySelector('.kv-remove').addEventListener('click', () => {
+    row.remove();
+    rebuildUrlFromParams();
+    scheduleLiveBuilderFlush();
+  });
+  row.querySelector('.kv-toggle').addEventListener('change', () => {
+    rebuildUrlFromParams();
+    scheduleLiveBuilderFlush();
+  });
+  row.querySelector('.kv-key').addEventListener('input', () => {
+    // User typed a key — they probably want a k=v pair now.
+    if (row.querySelector('.kv-value').value !== '' ||
+        row.querySelector('.kv-key').value !== '') {
+      row.dataset.hasEquals = '1';
+    }
+    rebuildUrlFromParams();
+    scheduleLiveBuilderFlush();
+  });
+  row.querySelector('.kv-value').addEventListener('input', () => {
+    row.dataset.hasEquals = '1';
+    rebuildUrlFromParams();
+    scheduleLiveBuilderFlush();
+  });
+  return row;
+}
+
+function renderParamsFromUrl() {
+  if (paramsSyncLock) return;
+  paramsSyncLock = true;
+  try {
+    const { query } = splitUrlParts(urlInput.value || '');
+    const params = parseQueryToParams(query);
+    paramsContainer.innerHTML = '';
+    if (params.length === 0) {
+      // Keep one empty row so users can add a first param easily.
+      paramsContainer.appendChild(createParamRow('', '', true));
+      return;
+    }
+    for (const p of params) {
+      paramsContainer.appendChild(createParamRow(p.key, p.value, p.hasEquals));
+    }
+  } finally {
+    paramsSyncLock = false;
+  }
+}
+
+function rebuildUrlFromParams() {
+  if (paramsSyncLock) return;
+  paramsSyncLock = true;
+  try {
+    const parts = splitUrlParts(urlInput.value || '');
+    const params = [];
+    paramsContainer.querySelectorAll('.kv-row').forEach(row => {
+      const enabled = row.querySelector('.kv-toggle')?.checked ?? true;
+      const key = row.querySelector('.kv-key').value;
+      const value = row.querySelector('.kv-value').value;
+      const hasEquals = row.dataset.hasEquals === '1';
+      if (!enabled) return;
+      if (key === '' && value === '' && !hasEquals) return;
+      params.push({ key, value, hasEquals: hasEquals || value !== '' });
+    });
+    const query = buildQueryFromParams(params);
+    const newUrl = parts.base + (query ? '?' + query : '') + (parts.fragment || '');
+    if (newUrl !== urlInput.value) {
+      urlInput.value = newUrl;
+    }
+  } finally {
+    paramsSyncLock = false;
+  }
+}
+
+if (addParamBtn) {
+  addParamBtn.addEventListener('click', () => {
+    paramsContainer.appendChild(createParamRow('', '', true));
+    // Don't rebuild URL yet — empty rows contribute nothing.
+  });
+}
+
+// When the user types in the URL field, re-derive the params view.
+urlInput.addEventListener('input', () => {
+  if (paramsSyncLock) return;
+  renderParamsFromUrl();
+});
+
+// Initial render so the Params tab shows an empty-row placeholder before
+// a block is selected.
+renderParamsFromUrl();
+
 
 // --- Extra Headers (injected into all test runs) ---
 function createExtraHeaderRow(key = '', value = '', enabled = true) {
@@ -3512,6 +3662,9 @@ function selectBlock(fileIdx, blockIdx) {
     // Render assertions & extracts in builder sub-tab
     renderBuilderDirectives(fileIdx, blockIdx);
   }
+
+  // Sync the Params tab to whatever URL just got loaded.
+  renderParamsFromUrl();
 
   // Show response if block has been run
   const br = file.results?.block_results?.[blockIdx];

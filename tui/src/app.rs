@@ -137,6 +137,7 @@ pub enum HistoryPopup {
 pub enum BuilderFocus {
     Method,
     Url,
+    Params,
     Headers,
     Body,
     Assertions,
