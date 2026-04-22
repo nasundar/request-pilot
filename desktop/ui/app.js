@@ -673,8 +673,45 @@ const METHOD_COLORS = {
 function updateMethodColor() {
   methodSelect.style.color = METHOD_COLORS[methodSelect.value] || '#e6edf3';
 }
-methodSelect.addEventListener('change', updateMethodColor);
+methodSelect.addEventListener('change', () => { updateMethodColor(); scheduleLiveBuilderFlush(); });
 updateMethodColor();
+
+// --- Live Builder -> File Sync (silent) ---
+// When the user edits any builder field, debounce-flush to the in-memory
+// file.content/suite so that switching to code mode shows the latest edits
+// immediately. We intentionally skip the codeEditor.value assignment and
+// file-tree re-render here — those happen when the user actually switches
+// modes or on explicit save/send.
+let liveBuilderFlushTimer = null;
+async function flushBuilderLive() {
+  // Only flush if we actually have an active file and block to update.
+  // We don't auto-create a file here to avoid surprising side effects.
+  if (activeFileIndex < 0 || !loadedFiles[activeFileIndex]) return;
+  if (activeBlockIndex < 0) return;
+  const block = blockFromBuilder();
+  if (!block) return;
+  const file = loadedFiles[activeFileIndex];
+  if (activeBlockIndex >= file.suite.blocks.length) return;
+  file.suite.blocks[activeBlockIndex] = {
+    ...file.suite.blocks[activeBlockIndex],
+    request: block.request,
+  };
+  file.results = null;
+  try {
+    const content = await invoke('generate_http', {
+      suite: buildSuiteWithDisabledFlags(activeFileIndex),
+    });
+    file.content = content;
+  } catch (_err) {
+    // Silent — code mode will show whatever generate_http produces
+    // next time it's invoked.
+  }
+}
+function scheduleLiveBuilderFlush() {
+  if (currentMode !== 'builder') return;
+  clearTimeout(liveBuilderFlushTimer);
+  liveBuilderFlushTimer = setTimeout(flushBuilderLive, 250);
+}
 
 // --- Headers key-value ---
 function createHeaderRow(key = '', value = '', enabled = true) {
@@ -689,12 +726,15 @@ function createHeaderRow(key = '', value = '', enabled = true) {
   row.querySelector('.kv-remove').addEventListener('click', () => {
     row.remove();
     if (headersContainer.children.length === 0) headersContainer.appendChild(createHeaderRow());
+    scheduleLiveBuilderFlush();
   });
+  row.querySelector('.kv-toggle').addEventListener('change', scheduleLiveBuilderFlush);
   return row;
 }
 
 addHeaderBtn.addEventListener('click', () => {
   headersContainer.appendChild(createHeaderRow());
+  scheduleLiveBuilderFlush();
 });
 
 headersContainer.querySelector('.kv-remove')?.addEventListener('click', function() {
@@ -852,7 +892,7 @@ function highlightBody() {
   bodyHighlight.scrollLeft = bodyInput.scrollLeft;
 }
 
-bodyInput.addEventListener('input', highlightBody);
+bodyInput.addEventListener('input', () => { highlightBody(); scheduleLiveBuilderFlush(); });
 bodyInput.addEventListener('scroll', () => {
   bodyHighlight.scrollTop = bodyInput.scrollTop;
   bodyHighlight.scrollLeft = bodyInput.scrollLeft;
@@ -1106,6 +1146,7 @@ sendBtn.addEventListener('click', sendRequest);
 urlInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey) sendRequest();
 });
+urlInput.addEventListener('input', scheduleLiveBuilderFlush);
 
 // --- Content-Type Detection ---
 function detectContentType(body, headers) {
@@ -5276,6 +5317,7 @@ headersContainer.addEventListener('keydown', (e) => {
 });
 headersContainer.addEventListener('input', (e) => {
   if (e.target.classList.contains('kv-value') || e.target.classList.contains('kv-key')) {
+    scheduleLiveBuilderFlush();
     const el = e.target;
     const pos = el.selectionStart;
     const textBefore = el.value.substring(0, pos);
@@ -5552,6 +5594,8 @@ async function switchMode(mode) {
 
   // When leaving code mode, sync code back to builder
   if (currentMode === 'code') {
+    // Cancel any pending live code parse — we're about to do a full sync.
+    clearTimeout(liveCodeParseTimer);
     const ok = await syncCodeToBuilder();
     if (!ok) return;
   }
@@ -5561,8 +5605,14 @@ async function switchMode(mode) {
     closeHistoryDetail();
   }
 
-  // When entering code mode, sync builder to code editor
+  // When entering code mode, flush any pending builder edits first so the
+  // generated .http content reflects the latest state.
   if (mode === 'code') {
+    if (liveBuilderFlushTimer) {
+      clearTimeout(liveBuilderFlushTimer);
+      liveBuilderFlushTimer = null;
+      await flushBuilderLive();
+    }
     await syncBuilderToCode();
   }
 
@@ -6038,11 +6088,49 @@ document.addEventListener('click', (e) => {
   }
 });
 
+// --- Live Code <-> Suite Sync (silent) ---
+// When the user types in the code editor we keep the in-memory suite
+// up-to-date on a debounce, so switching to builder mode reflects the
+// latest edits immediately without needing a save. This path is silent:
+// no block selection change, no toasts, no modified-flag changes.
+let liveCodeParseTimer = null;
+let liveCodeParseRev = 0;
+function scheduleLiveCodeParse() {
+  clearTimeout(liveCodeParseTimer);
+  liveCodeParseTimer = setTimeout(async () => {
+    if (activeFileIndex < 0 || !loadedFiles[activeFileIndex]) return;
+    const rev = ++liveCodeParseRev;
+    const content = codeEditor.value;
+    // Always update raw content immediately (so builder rebuild reads latest).
+    loadedFiles[activeFileIndex].content = content;
+    if (!content.trim()) {
+      if (rev === liveCodeParseRev) {
+        loadedFiles[activeFileIndex].suite = { variables: [], blocks: [], auto_run: null };
+      }
+      return;
+    }
+    try {
+      const suite = await invoke('parse_test_file', { content });
+      // Only apply if this is still the latest parse request.
+      if (rev !== liveCodeParseRev) return;
+      const file = loadedFiles[activeFileIndex];
+      if (!file) return;
+      file.suite = suite;
+      syncDisabledFromSuite(activeFileIndex);
+      renderFileTree();
+    } catch (_err) {
+      // Silent — keep previous suite on parse failure. Ctrl+Enter / Save
+      // will surface the error if the user explicitly tries to run/save.
+    }
+  }, 250);
+}
+
 // --- Code Editor Events ---
 codeEditor.addEventListener('input', () => {
   codeEditorModified = codeEditor.value !== codeEditorContent;
   codeEditor.classList.toggle('modified', codeEditorModified);
   updateHighlight();
+  scheduleLiveCodeParse();
 });
 
 codeEditor.addEventListener('scroll', syncEditorScroll);

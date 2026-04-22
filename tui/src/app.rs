@@ -990,6 +990,25 @@ impl App {
         }
     }
 
+    /// Live sync from the code editor buffer into the in-memory suite.
+    /// Parses silently — does NOT write to disk, does NOT touch the edit
+    /// cursor, and does NOT clear the modified flag. Intended to be called
+    /// after every code-editor mutation so that switching to builder mode
+    /// reflects the latest edits without requiring a save. On parse failure,
+    /// the previous suite is kept (errors surface on save / Ctrl+Enter).
+    pub fn flush_code_to_builder(&mut self) {
+        if let Some(fi) = self.active_file_idx {
+            let content = self.code_editor_content.clone();
+            let suite = parse_test_suite(&content);
+            if let Some(file) = self.loaded_files.get_mut(fi) {
+                file.content = content;
+                file.suite = suite;
+                file.results = None;
+            }
+            self.rebuild_tree();
+        }
+    }
+
     /// Collect all variable names and values for autocomplete.
     pub fn collect_all_vars(&self) -> Vec<(String, String)> {
         let mut vars: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();

@@ -643,6 +643,28 @@ fn compute_search_matches(content: &str, query: &str) -> Vec<(usize, usize)> {
 }
 
 pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
+    // Fingerprint the buffer before handling the key so we can detect
+    // mutations and flush the live code->suite sync exactly once.
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    app.code_editor_content.hash(&mut hasher);
+    let before_fp = hasher.finish();
+
+    handle_editor_keys_inner(app, key);
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    app.code_editor_content.hash(&mut hasher);
+    let after_fp = hasher.finish();
+
+    if before_fp != after_fp {
+        // Keep the in-memory suite up to date so switching to builder mode
+        // reflects the latest code edits without needing a Ctrl+S save.
+        // This does NOT write to disk.
+        app.flush_code_to_builder();
+    }
+}
+
+fn handle_editor_keys_inner(app: &mut App, key: KeyEvent) {
     let total_lines = app.code_editor_content.split('\n').count();
 
     // Variable autocomplete takes priority
