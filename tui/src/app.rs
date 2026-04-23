@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use request_pilot_core::http_parser::{TestSuite, parse_test_suite, generate_http_content};
+use request_pilot_core::http_parser::{TestSuite, TestBlock, ParsedRequest, parse_test_suite, generate_http_content};
 use request_pilot_core::test_runner::{BlockProgress, ProgressHandler, TestRunResults, BlockResult};
 use request_pilot_core::history::{HistoryStore, HistoryEntry};
 use crossterm::event::{self, Event, KeyEventKind};
@@ -951,6 +951,64 @@ impl App {
             None
         };
         self.set_status("Created new file".to_string());
+    }
+
+    /// Append a new empty test block to the current file (creating a scratch
+    /// file if none is loaded) and focus it in the builder so the user can
+    /// start typing immediately.
+    pub fn new_test_block(&mut self) {
+        if self.active_file_idx.is_none() || self.loaded_files.is_empty() {
+            // Create a scratch file with no blocks so the new test is the first.
+            let file_id = self.next_file_id;
+            self.next_file_id += 1;
+            self.loaded_files.push(LoadedFile {
+                id: file_id,
+                path: None,
+                name: "untitled.http".to_string(),
+                content: String::new(),
+                suite: TestSuite::default(),
+                results: None,
+                expanded: true,
+                group_expanded: HashMap::new(),
+            });
+            self.active_file_idx = Some(self.loaded_files.len() - 1);
+        }
+
+        let fi = match self.active_file_idx {
+            Some(i) => i,
+            None => return,
+        };
+        let blank = TestBlock {
+            block_type: "test".to_string(),
+            name: String::new(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: Vec::new(),
+            request: ParsedRequest {
+                name: None,
+                method: "GET".to_string(),
+                url: String::new(),
+                headers: Vec::new(),
+                body: None,
+            },
+            assertions: Vec::new(),
+            extracts: Vec::new(),
+            compare: false,
+            steps: Vec::new(),
+            diff: None,
+            errors: Default::default(),
+        };
+        if let Some(file) = self.loaded_files.get_mut(fi) {
+            file.suite.blocks.push(blank);
+            self.active_block_idx = Some(file.suite.blocks.len() - 1);
+        }
+        self.builder_focus = BuilderFocus::Url;
+        self.flush_builder_to_file();
+        self.rebuild_tree();
+        self.set_status("New test block — type URL to begin".to_string());
     }
 
     pub fn save_current_file(&mut self) {

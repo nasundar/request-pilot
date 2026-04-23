@@ -444,6 +444,7 @@ const codeSaveBtn     = $('#codeSaveBtn');
 const codeRevertBtn   = $('#codeRevertBtn');
 const codeRunBtn      = $('#codeRunBtn');
 const newFileBtn      = $('#newFileBtn');
+const newTestBtn      = $('#newTestBtn');
 const codeEditorHighlightCode = $('#codeEditorHighlightCode');
 const codeEditorHighlight = $('#codeEditorHighlight');
 const codeLineNumbers = $('#codeLineNumbers');
@@ -686,27 +687,46 @@ updateMethodColor();
 // modes or on explicit save/send.
 let liveBuilderFlushTimer = null;
 async function flushBuilderLive() {
-  // Only flush if we actually have an active file and block to update.
-  // We don't auto-create a file here to avoid surprising side effects.
-  if (activeFileIndex < 0 || !loadedFiles[activeFileIndex]) return;
-  if (activeBlockIndex < 0) return;
+  // Silent version of flushBuilderToFile used on every keystroke in the
+  // builder. Auto-creates a temp file + appends a new block if none exist
+  // yet, so users can start typing from a blank slate and the code view
+  // will reflect the request without any explicit save action.
   const block = blockFromBuilder();
-  if (!block) return;
+  if (!block) return; // URL empty — nothing meaningful yet
+  await ensureBuilderFile();
   const file = loadedFiles[activeFileIndex];
-  if (activeBlockIndex >= file.suite.blocks.length) return;
-  file.suite.blocks[activeBlockIndex] = {
-    ...file.suite.blocks[activeBlockIndex],
-    request: block.request,
-  };
+  if (!file) return;
+
+  const prevBlocks = [...file.suite.blocks];
+  const prevBlockIndex = activeBlockIndex;
+  let newBlockAppended = false;
+
+  if (activeBlockIndex >= 0 && activeBlockIndex < file.suite.blocks.length) {
+    file.suite.blocks[activeBlockIndex] = {
+      ...file.suite.blocks[activeBlockIndex],
+      request: block.request,
+    };
+  } else {
+    file.suite.blocks.push(block);
+    activeBlockIndex = file.suite.blocks.length - 1;
+    newBlockAppended = true;
+  }
+
   file.results = null;
+
   try {
     const content = await invoke('generate_http', {
       suite: buildSuiteWithDisabledFlags(activeFileIndex),
     });
     file.content = content;
+    // Only refresh the file tree when we appended a new block — the badge
+    // only changes in that case, so avoid the cost on every keystroke.
+    if (newBlockAppended) renderFileTree();
   } catch (_err) {
-    // Silent — code mode will show whatever generate_http produces
-    // next time it's invoked.
+    // Rollback suite mutation on generate failure — the user will get an
+    // explicit error on the next Send/Save.
+    file.suite.blocks = prevBlocks;
+    activeBlockIndex = prevBlockIndex;
   }
 }
 function scheduleLiveBuilderFlush() {
@@ -6445,6 +6465,58 @@ GET {{baseUrl}}/health
     showToast(`Error: ${err}`, 'error');
   });
 });
+
+// Start a new blank test in the builder. Appends an empty block to the
+// current file (creating a scratch file if none is loaded) and resets the
+// builder fields so the user can start typing. The live builder->code flush
+// then keeps the scratch file in sync automatically.
+if (newTestBtn) {
+  newTestBtn.addEventListener('click', async () => {
+    await ensureBuilderFile();
+    const file = loadedFiles[activeFileIndex];
+    if (!file) return;
+
+    const blankBlock = {
+      name: '',
+      block_type: 'test',
+      description: '',
+      request: { method: 'GET', url: '', headers: [], body: null },
+      assertions: [],
+      extracts: [],
+      disabled: false,
+      group: null,
+      depends: [],
+      mode: null,
+      dev_auth: null,
+      compare: false,
+      steps: [],
+      diff: null,
+    };
+    file.suite.blocks.push(blankBlock);
+    activeBlockIndex = file.suite.blocks.length - 1;
+
+    // Switch to builder mode if not already there so the new block is visible.
+    if (currentMode !== 'builder') {
+      await switchMode('builder');
+    }
+
+    // Reset the builder fields and focus URL so typing starts immediately.
+    methodSelect.value = 'GET';
+    updateMethodColor();
+    urlInput.value = '';
+    headersContainer.innerHTML = '';
+    headersContainer.appendChild(createHeaderRow());
+    bodyInput.value = '';
+    bodyType.value = 'none';
+    bodyInput.disabled = true;
+    if (typeof renderParamsFromUrl === 'function') renderParamsFromUrl();
+    if (typeof renderBuilderDirectives === 'function') renderBuilderDirectives(activeFileIndex, activeBlockIndex);
+    if (typeof populateMetadata === 'function') populateMetadata(blankBlock);
+
+    renderFileTree();
+    urlInput.focus();
+  });
+}
 
 // --- History Tab ---
 

@@ -312,6 +312,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             app.new_file();
             return;
         }
+        KeyCode::Char('N') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.new_test_block();
+            return;
+        }
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.save_current_file();
             return;
