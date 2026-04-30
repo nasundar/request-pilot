@@ -18,6 +18,7 @@
         <button class="mode-btn active" data-mode="builder" title="Form-based editor">🔧 Builder</button>
         <button class="mode-btn" data-mode="code" title="Raw .http editor">📝 Code</button>
         <button class="mode-btn" data-mode="history" title="Request history &amp; stats">📊 History</button>
+        <button class="mode-btn" data-mode="sessions" title="Persisted test-run sessions">🗂 Sessions</button>
         <button class="mode-btn" data-mode="logs" title="Application logs">📋 Logs</button>
       </div>
       <button class="btn btn-primary btn-sm" id="runAllBtn" title="Run all tests (Ctrl+Shift+Enter)">
@@ -38,6 +39,17 @@
       </div>
     </div>
     <div class="toolbar-right">
+      <div class="env-picker-wrapper" id="envPickerWrapper">
+        <button class="btn-icon-sm env-picker-btn" id="envPickerBtn" title="Active .env file">
+          🌐 <span id="envPickerLabel">no env</span>
+        </button>
+        <div class="env-picker-panel hidden" id="envPickerPanel">
+          <div class="env-picker-title">Environments <span class="env-picker-subtitle">(only one active at a time)</span></div>
+          <div class="env-picker-list" id="envPickerList"></div>
+          <button class="btn btn-ghost btn-xs" id="envPickerLoadBtn">+ Load .env file</button>
+          <div class="env-picker-help">Name the file with <code># @@name staging</code> at the top (optional; falls back to filename).</div>
+        </div>
+      </div>
       <div class="extra-headers-wrapper">
         <button class="btn-icon-sm extra-headers-btn" id="extraHeadersBtn" title="Extra headers injected into all test requests">
           📋 <span class="extra-headers-count" id="extraHeadersCount"></span>
@@ -187,7 +199,7 @@
           <div class="code-editor-line-numbers" id="codeLineNumbers"></div>
           <div class="code-editor-wrapper">
             <pre class="code-editor-highlight" id="codeEditorHighlight"><code id="codeEditorHighlightCode"></code></pre>
-            <textarea id="codeEditor" class="code-editor" spellcheck="false" placeholder="### @variables&#10;@baseUrl = https://api.example.com&#10;&#10;### @test My First Test&#10;GET {{baseUrl}}/api/health&#10;&#10;# @assert response.status == 200"></textarea>
+            <textarea id="codeEditor" class="code-editor" spellcheck="false" placeholder="@baseUrl = https://api.example.com&#10;&#10;### @@test My First Test&#10;GET {{baseUrl}}/api/health&#10;&#10;# @@assert status == 200"></textarea>
             <div id="codeJumpBack" class="code-jump-back hidden" title="Jump to selected block">↑ Selected block</div>
           </div>
         </div>
@@ -295,6 +307,71 @@
           <button class="popout-btn" onclick="popOutPanel('logsPanel', 'Logs')" title="Pop out to window">⧉</button>
         </div>
         <div id="logList" class="log-list"></div>
+      </div>
+
+      <!-- Sessions Panel (hidden by default) -->
+      <div id="sessionsPanel" class="history-panel hidden">
+        <div class="history-header">
+          <div class="history-header-title">
+            <span>🗂 Sessions</span>
+            <span class="history-count-badge" id="sessionsCountBadge">0</span>
+          </div>
+          <div class="history-actions">
+            <label class="meta-field" style="display:flex;align-items:center;gap:6px;margin:0;font-size:12px;color:var(--text-muted)" title="Toggle automatic recording on every test run">
+              <input type="checkbox" id="sessionsAutoRecordChk"> auto-record
+            </label>
+            <button class="btn btn-ghost btn-xs" id="sessionsRefreshBtn" title="Refresh">⟳ Refresh</button>
+            <button class="btn btn-ghost btn-xs" id="sessionsSettingsBtn" title="Configure sessions root and capture policy">⚙ Settings</button>
+          </div>
+        </div>
+        <div id="sessionsSettingsRow" class="history-filters hidden" style="flex-direction:column;gap:10px;align-items:stretch;padding:10px 12px">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:12px;color:var(--text-muted);min-width:80px">Root folder</span>
+            <input type="text" id="sessionsRootInput" class="history-url-search" placeholder="Choose a folder…" style="flex:1;min-width:240px" spellcheck="false" readonly>
+            <button class="btn btn-ghost btn-xs" id="sessionsRootBrowseBtn" title="Browse for sessions folder">📁 Browse…</button>
+            <button class="btn btn-primary btn-xs" id="sessionsRootSaveBtn">Save</button>
+            <button class="btn btn-ghost btn-xs" id="sessionsRootClearBtn" title="Stop using this folder (existing data is not deleted)">Disable</button>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:12px;color:var(--text-muted);min-width:80px">Capture</span>
+            <label class="capture-preset"><input type="radio" name="capturePreset" value="snapshot"> 📸 Snapshot <span class="hint">full bodies, 10 MB cap</span></label>
+            <label class="capture-preset"><input type="radio" name="capturePreset" value="privacy_first"> 🔒 Privacy-first <span class="hint">drop request bodies</span></label>
+            <label class="capture-preset"><input type="radio" name="capturePreset" value="full_debug"> 🐛 Full debug <span class="hint">no redaction</span></label>
+          </div>
+        </div>
+        <div id="sessionsStatus" class="history-stats" style="padding:6px 12px;color:var(--text-muted);font-size:12px"></div>
+        <div class="history-filters" id="sessionsFilters" style="gap:6px;flex-wrap:wrap">
+          <input type="text" id="sessionsSearch" class="history-url-search" placeholder="Search runs…" style="flex:1;min-width:160px" spellcheck="false">
+          <select id="sessionsStatusFilter" class="history-url-search" style="flex:0 0 auto;min-width:110px">
+            <option value="all">All status</option>
+            <option value="passed">✓ Passed</option>
+            <option value="failed">✗ Failed</option>
+            <option value="mixed">⚠ Mixed</option>
+          </select>
+          <select id="sessionsGroupBy" class="history-url-search" style="flex:0 0 auto;min-width:110px" title="How to group sessions">
+            <option value="file">Group by file</option>
+            <option value="date">Group by date</option>
+            <option value="version">Group by version</option>
+          </select>
+        </div>
+        <div class="history-log" id="sessionsTree" style="overflow:auto"></div>
+
+        <div class="history-detail-overlay hidden" id="sessionsDetailOverlay">
+          <div class="history-detail-panel">
+            <div class="history-detail-header">
+              <button class="btn btn-ghost btn-xs" id="sessionsDetailCloseBtn" title="Close (Esc)">← Back</button>
+              <span class="history-detail-title" id="sessionsDetailTitle"></span>
+              <span style="flex:1"></span>
+              <button class="btn btn-ghost btn-xs" id="sessionsDetailReplayBtn" title="Re-run this suite (creates a new session)">▶ Replay</button>
+              <button class="btn btn-primary btn-xs" id="sessionsDetailLoadSnapshotBtn" title="Open snapshot in a new editor tab with all run state restored">📸 Open snapshot</button>
+              <button class="btn btn-ghost btn-xs" id="sessionsDetailOpenSourceBtn" title="Open just the .http source (no run state)">📂 Open source</button>
+            </div>
+            <!-- Tabbed body (Blocks / Redaction / Source / 📊 Stats) is rendered
+                 by app.js renderSessionDetailHtml(); the 📊 Stats tab pulls data
+                 from invoke('sessions_get_stats', { fileId, sha }). -->
+            <div class="history-detail-body" id="sessionsDetailBody"></div>
+          </div>
+        </div>
       </div>
 
       <!-- Split panels: request + response -->

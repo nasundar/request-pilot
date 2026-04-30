@@ -1072,6 +1072,9 @@ bodyInput.addEventListener('scroll', () => {
 function interpolateVariables(str) {
   if (!str) return str;
   const merged = {};
+  if (activeEnvVars && activeEnvVars.length > 0) {
+    activeEnvVars.forEach(([name, value]) => { merged[name] = value; });
+  }
   loadedFiles.forEach(file => {
     if (file.suite.variables) {
       file.suite.variables.forEach(([name, value]) => { merged[name] = value; });
@@ -1090,6 +1093,10 @@ function interpolateVariables(str) {
 
 function collectVariablesArray() {
   const merged = {};
+  // Env profile values (lowest precedence — overwritten by file/env edits)
+  if (activeEnvVars && activeEnvVars.length > 0) {
+    activeEnvVars.forEach(([name, value]) => { merged[name] = value; });
+  }
   loadedFiles.forEach(file => {
     if (file.suite.variables) {
       file.suite.variables.forEach(([name, value]) => { merged[name] = value; });
@@ -1099,6 +1106,254 @@ function collectVariablesArray() {
     if (value !== '') merged[name] = value;
   });
   return Object.entries(merged);
+}
+
+// ── Environment (.env file list) ─────────────────────────────────────────
+// Loaded .env files with exactly one active at a time. The full list + active
+// index live in a persisted env config (managed by Rust; see core/env_config).
+// `activeEnvVars` is the resolved vars of the active entry and is merged into
+// variable resolution at the lowest precedence (below file vars and in-app
+// edits, but can still be overridden at runtime by `@@extract`).
+let envConfig = { entries: [], active_index: null };
+let activeEnvVars = []; // [[name, value], ...]
+
+async function reloadEnvList() {
+  try {
+    const cfg = await invoke('env_list');
+    envConfig = normalizeEnvConfig(cfg);
+    activeEnvVars = await invoke('env_resolve_active');
+    renderEnvPicker();
+  } catch (err) {
+    rpLog('error', 'reloadEnvList failed', { error: String(err) });
+  }
+}
+
+function normalizeEnvConfig(cfg) {
+  return {
+    entries: (cfg && cfg.entries) || [],
+    // serde serializes None as null; ensure we coerce undefined -> null too
+    active_index: (cfg && cfg.active_index != null) ? cfg.active_index : null,
+  };
+}
+
+async function envPickerLoadFile() {
+  try {
+    // Prefer Tauri's native picker; fall back to a simple prompt if missing.
+    let path = null;
+    if (window.__TAURI__ && window.__TAURI__.dialog && window.__TAURI__.dialog.open) {
+      path = await window.__TAURI__.dialog.open({
+        title: 'Load .env file',
+        multiple: false,
+        filters: [{ name: 'Env files', extensions: ['env', '*'] }],
+      });
+    } else {
+      path = prompt('Path to .env file:');
+    }
+    if (!path || typeof path !== 'string') return;
+    const res = await invoke('env_add', { path });
+    envConfig = normalizeEnvConfig(res.config);
+    activeEnvVars = res.active_vars || [];
+    renderEnvPicker();
+    if (typeof renderVariablesPanel === 'function') renderVariablesPanel();
+    const added = envConfig.entries[envConfig.entries.length - 1];
+    if (added) setToast(`Loaded env: ${added.name}`);
+  } catch (err) {
+    rpLog('error', 'env_add failed', { error: String(err) });
+    alert('Failed to load .env: ' + String(err));
+  }
+}
+
+async function activateEnvIndex(index) {
+  try {
+    const res = await invoke('env_set_active', { index });
+    envConfig = normalizeEnvConfig(res.config);
+    activeEnvVars = res.active_vars || [];
+    renderEnvPicker();
+    if (typeof renderVariablesPanel === 'function') renderVariablesPanel();
+  } catch (err) {
+    rpLog('error', 'env_set_active failed', { error: String(err) });
+  }
+}
+
+async function removeEnvIndex(index) {
+  try {
+    const res = await invoke('env_remove', { index });
+    envConfig = normalizeEnvConfig(res.config);
+    activeEnvVars = res.active_vars || [];
+    renderEnvPicker();
+    if (typeof renderVariablesPanel === 'function') renderVariablesPanel();
+  } catch (err) {
+    rpLog('error', 'env_remove failed', { error: String(err) });
+  }
+}
+
+function renderEnvPicker() {
+  const label = document.getElementById('envPickerLabel');
+  const btn = document.getElementById('envPickerBtn');
+  const list = document.getElementById('envPickerList');
+  if (!label || !btn || !list) return;
+
+  const entries = envConfig.entries;
+  const activeIdx = envConfig.active_index;
+  const active = (activeIdx != null) ? entries[activeIdx] : null;
+  label.textContent = active ? active.name : 'no env';
+  btn.classList.toggle('active', !!active);
+
+  list.innerHTML = '';
+
+  // "(none)" row — deactivates current env
+  const noneRow = document.createElement('div');
+  noneRow.className = 'env-picker-item' + (active ? '' : ' active current');
+  const noneMain = document.createElement('button');
+  noneMain.className = 'env-picker-item-main';
+  noneMain.innerHTML = '<span class="env-picker-item-dot"></span><span class="env-picker-item-label">(none)</span>';
+  noneMain.addEventListener('click', () => {
+    activateEnvIndex(null);
+    document.getElementById('envPickerPanel').classList.add('hidden');
+  });
+  noneRow.appendChild(noneMain);
+  list.appendChild(noneRow);
+
+  entries.forEach((e, i) => {
+    const isActive = i === activeIdx;
+    const row = document.createElement('div');
+    row.className = 'env-picker-item' + (isActive ? ' active current' : '');
+    const main = document.createElement('button');
+    main.className = 'env-picker-item-main';
+    main.innerHTML =
+      '<span class="env-picker-item-dot"></span>' +
+      '<span class="env-picker-item-label">' + escapeHtml(e.name) + '</span>' +
+      '<span class="env-picker-item-path" title="' + escapeHtml(e.path) + '">' + escapeHtml(shortenPath(e.path)) + '</span>';
+    main.addEventListener('click', () => {
+      activateEnvIndex(i);
+      document.getElementById('envPickerPanel').classList.add('hidden');
+    });
+    const rm = document.createElement('button');
+    rm.className = 'env-picker-item-remove';
+    rm.innerHTML = '✕';
+    rm.title = 'Remove from list';
+    rm.addEventListener('click', (ev) => { ev.stopPropagation(); removeEnvIndex(i); });
+    row.appendChild(main);
+    row.appendChild(rm);
+    list.appendChild(row);
+  });
+
+  if (entries.length === 0) {
+    const hint = document.createElement('div');
+    hint.style.cssText = 'font-size:11px;color:var(--text-muted);padding:6px 4px;';
+    hint.textContent = 'No .env files loaded yet. Click "+ Load .env file" below.';
+    list.appendChild(hint);
+  }
+}
+
+function shortenPath(p) {
+  if (!p) return '';
+  const norm = p.replace(/\\/g, '/');
+  const parts = norm.split('/');
+  if (parts.length <= 2) return norm;
+  return '…/' + parts.slice(-2).join('/');
+}
+
+function setupEnvPickerUI() {
+  const btn = document.getElementById('envPickerBtn');
+  const panel = document.getElementById('envPickerPanel');
+  const loadBtn = document.getElementById('envPickerLoadBtn');
+  if (!btn || !panel) return;
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    panel.classList.toggle('hidden');
+  });
+  document.addEventListener('click', (e) => {
+    if (!panel.classList.contains('hidden') && !panel.contains(e.target) && e.target !== btn) {
+      panel.classList.add('hidden');
+    }
+  });
+  if (loadBtn) {
+    loadBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      envPickerLoadFile();
+    });
+  }
+  renderEnvPicker();
+  reloadEnvList();
+}
+
+function setToast(msg) {
+  if (typeof showToast === 'function') { showToast(msg); return; }
+  rpLog('info', msg);
+}
+
+// Session-scoped cache of @prompt values: Map<fileName, Map<varName, value>>
+const promptValueCache = new Map();
+
+/// Ask the user for `@prompt VAR` values declared in a suite. Returns an array
+/// of `[name, value]` pairs to merge into extraVariables, or `null` if the
+/// user cancelled. If the suite has no prompts, returns [].
+async function collectPromptVariables(suite, fileName) {
+  const prompts = (suite && suite.prompts) || [];
+  if (prompts.length === 0) return [];
+
+  // Filter out prompts that already have a concrete value in loaded vars
+  // (either from @variables block or env). Still show them as pre-filled.
+  const existing = new Map(collectVariablesArray());
+  const cache = promptValueCache.get(fileName) || new Map();
+
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    const modal = document.createElement('div');
+    modal.style.cssText = 'background:var(--bg-primary,#1e1e1e);color:var(--text-primary,#eee);border:1px solid var(--border,#444);border-radius:6px;padding:20px;min-width:420px;max-width:600px;max-height:80vh;overflow:auto;box-shadow:0 4px 20px rgba(0,0,0,0.5);';
+    modal.innerHTML = `
+      <h3 style="margin:0 0 12px 0;font-size:15px;">Supply runtime values</h3>
+      <p style="margin:0 0 16px 0;opacity:0.8;font-size:12px;">
+        ${fileName} declares <code>@prompt</code> variables. Provide values before the suite runs.
+      </p>
+      <form id="pilot-prompt-form"></form>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button type="button" id="pilot-prompt-cancel" class="btn btn-secondary">Cancel</button>
+        <button type="submit" form="pilot-prompt-form" class="btn btn-primary">Run</button>
+      </div>
+    `;
+    const form = modal.querySelector('#pilot-prompt-form');
+    prompts.forEach(p => {
+      const row = document.createElement('div');
+      row.style.cssText = 'margin-bottom:12px;';
+      const label = document.createElement('label');
+      label.textContent = p.name + (p.description ? ' — ' + p.description : '');
+      label.style.cssText = 'display:block;font-size:12px;margin-bottom:4px;font-weight:500;';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.name = p.name;
+      input.value = cache.get(p.name) || existing.get(p.name) || '';
+      input.style.cssText = 'width:100%;padding:6px 8px;background:var(--bg-secondary,#2a2a2a);color:inherit;border:1px solid var(--border,#444);border-radius:3px;font-family:var(--font-mono,monospace);font-size:12px;box-sizing:border-box;';
+      row.appendChild(label);
+      row.appendChild(input);
+      form.appendChild(row);
+    });
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    setTimeout(() => { const first = form.querySelector('input'); if (first) first.focus(); }, 0);
+
+    const close = (result) => {
+      document.body.removeChild(overlay);
+      resolve(result);
+    };
+    modal.querySelector('#pilot-prompt-cancel').addEventListener('click', () => close(null));
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(null); });
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const values = [];
+      const perFile = new Map();
+      prompts.forEach(p => {
+        const v = form.elements[p.name]?.value ?? '';
+        values.push([p.name, v]);
+        perFile.set(p.name, v);
+      });
+      promptValueCache.set(fileName, perFile);
+      close(values);
+    });
+  });
 }
 
 // Build a suite copy with disabled blocks removed
@@ -4033,6 +4288,10 @@ async function runAllTests() {
       if (!suite || suite.blocks.length === 0) continue;
       try {
         const fileExtraVars = [...collectVariablesArray(), ...azureExtraVars];
+        // Prompt user for @prompt variables, if any
+        const promptVars = await collectPromptVariables(file.suite, file.name);
+        if (promptVars === null) continue;
+        if (promptVars.length > 0) fileExtraVars.push(...promptVars);
         // When telemetry is disabled, strip telemetry endpoint variables so runner skips init
         let suiteCopy = suite;
         if (!telemetryEnabled) {
@@ -4043,6 +4302,7 @@ async function runAllTests() {
         } else {
           fileExtraVars.push(['__telemetry_file', file.name]);
         }
+        const __sessions_started = Date.now();
         const results = await invoke('run_test_suite', {
           suite: suiteCopy,
           extraVariables: fileExtraVars,
@@ -4050,6 +4310,7 @@ async function runAllTests() {
           runMode,
           fileName: file.name,
         });
+        recordSessionRun(file, suiteCopy, file.content, results, fileExtraVars, runMode, __sessions_started).catch(()=>{});
 
         // Remap results to align with original block indices
         file.results = remapResults(fi, results);
@@ -4180,6 +4441,10 @@ async function runSingleBlock(fileIdx, blockIdx) {
       const tokenVars = fetchDevModeToken(file.suite, file.content);
       if (tokenVars.length > 0) extraVars = [...extraVars, ...tokenVars];
     }
+    const promptVars = await collectPromptVariables(file.suite, file.name);
+    if (promptVars === null) return;
+    if (promptVars.length > 0) extraVars = [...extraVars, ...promptVars];
+    const __sessions_started1 = Date.now();
     const results = await invoke('run_test_suite', {
       suite: singleSuite,
       extraVariables: extraVars,
@@ -4187,6 +4452,7 @@ async function runSingleBlock(fileIdx, blockIdx) {
       runMode: azureAuthState === 'authenticated' ? 'dev' : null,
       fileName: file.name,
     });
+    recordSessionRun(file, singleSuite, file.content, results, extraVars, azureAuthState === 'authenticated' ? 'dev' : null, __sessions_started1).catch(()=>{});
 
     // Store result at the correct original block index
     if (!file.results) {
@@ -4274,6 +4540,10 @@ async function runCompareStep(fileIdx, blockIdx, stepIdx) {
       const tokenVars = fetchDevModeToken(file.suite, file.content);
       if (tokenVars.length > 0) extraVars = [...extraVars, ...tokenVars];
     }
+    const promptVars = await collectPromptVariables(file.suite, file.name);
+    if (promptVars === null) return;
+    if (promptVars.length > 0) extraVars = [...extraVars, ...promptVars];
+    const __sessions_started2 = Date.now();
     const results = await invoke('run_test_suite', {
       suite: singleSuite,
       extraVariables: extraVars,
@@ -4281,6 +4551,7 @@ async function runCompareStep(fileIdx, blockIdx, stepIdx) {
       runMode: azureAuthState === 'authenticated' ? 'dev' : null,
       fileName: file.name,
     });
+    recordSessionRun(file, singleSuite, file.content, results, extraVars, azureAuthState === 'authenticated' ? 'dev' : null, __sessions_started2).catch(()=>{});
 
     const br = results.block_results?.[0];
     if (br) {
@@ -5009,7 +5280,12 @@ async function runGroup(fileIdx, groupName) {
       const tokenVars = fetchDevModeToken(file.suite, file.content);
       if (tokenVars.length > 0) extraVars = [...extraVars, ...tokenVars];
     }
+    const promptVars = await collectPromptVariables(file.suite, file.name);
+    if (promptVars === null) return;
+    if (promptVars.length > 0) extraVars = [...extraVars, ...promptVars];
+    const __sessions_started3 = Date.now();
     const results = await invoke('run_test_suite', { suite, extraVariables: extraVars, extraHeaders: getExtraHeaders(), runMode: azureAuthState === 'authenticated' ? 'dev' : null, fileName: file.name });
+    recordSessionRun(file, suite, file.content, results, extraVars, azureAuthState === 'authenticated' ? 'dev' : null, __sessions_started3).catch(()=>{});
 
     // Merge results into existing file results
     if (!file.results) {
@@ -5102,6 +5378,10 @@ async function runSingleFile(fileIdx) {
       const tokenVars = fetchDevModeToken(file.suite, file.content);
       if (tokenVars.length > 0) extraVars = [...extraVars, ...tokenVars];
     }
+    const promptVars = await collectPromptVariables(file.suite, file.name);
+    if (promptVars === null) return;
+    if (promptVars.length > 0) extraVars = [...extraVars, ...promptVars];
+    const __sessions_started4 = Date.now();
     const results = await invoke('run_test_suite', {
       suite,
       extraVariables: extraVars,
@@ -5109,6 +5389,7 @@ async function runSingleFile(fileIdx) {
       runMode: azureAuthState === 'authenticated' ? 'dev' : null,
       fileName: file.name,
     });
+    recordSessionRun(file, suite, file.content, results, extraVars, azureAuthState === 'authenticated' ? 'dev' : null, __sessions_started4).catch(()=>{});
 
     // Remap results to align with original block indices
     file.results = remapResults(fileIdx, results);
@@ -5801,6 +6082,7 @@ async function switchMode(mode) {
   codeEditorPanel.classList.add('hidden');
   historyPanel.classList.add('hidden');
   logsPanel.classList.add('hidden');
+  if (sessionsPanel) sessionsPanel.classList.add('hidden');
 
   // Show the appropriate panels
   if (mode === 'builder') {
@@ -5823,6 +6105,9 @@ async function switchMode(mode) {
   } else if (mode === 'logs') {
     logsPanel.classList.remove('hidden');
     renderAllLogs();
+  } else if (mode === 'sessions') {
+    if (sessionsPanel) sessionsPanel.classList.remove('hidden');
+    if (typeof loadSessionsTree === 'function') loadSessionsTree();
   }
 }
 
@@ -5884,8 +6169,8 @@ function applyDisabledFlags(content, fileIdx) {
       continue;
     }
 
-    // Check if this line is an existing # @disabled marker
-    if (trimmed === '# @disabled') {
+    // Check if this line is an existing disabled marker (new or legacy)
+    if (trimmed === '# @@disabled' || trimmed === '# @disabled' || trimmed === '// @@disabled' || trimmed === '// @disabled') {
       hasDisabledMarker = true;
       if (needsDisabledMarker) {
         result.push(lines[i]); // keep it
@@ -5896,9 +6181,9 @@ function applyDisabledFlags(content, fileIdx) {
 
     // If we're at a non-comment, non-empty line after ### and need a disabled marker, inject it
     if (needsDisabledMarker && !hasDisabledMarker && blockIdx >= 0 &&
-        trimmed !== '' && !trimmed.startsWith('#') && !trimmed.startsWith('@') && !inVariablesBlock) {
-      // Insert # @disabled before the request line
-      result.push('# @disabled');
+        trimmed !== '' && !trimmed.startsWith('#') && !trimmed.startsWith('//') && !trimmed.startsWith('@') && !inVariablesBlock) {
+      // Insert # @@disabled before the request line (new syntax)
+      result.push('# @@disabled');
       hasDisabledMarker = true;
     }
 
@@ -5916,6 +6201,21 @@ function buildSuiteWithDisabledFlags(fileIdx) {
     disabled: !!disabledBlocks[`${fileIdx}-${blockIdx}`]
   }));
   return { variables: file.suite.variables, blocks };
+}
+
+// Preserve prior block_results across a re-parse when the block list is
+// structurally compatible (same count + same names in same order). If the
+// shape changed, indices no longer line up so we must clear to avoid
+// showing stale/misaligned status dots.
+function preserveResultsIfCompatible(prevResults, prevSuite, newSuite) {
+  if (!prevResults || !prevSuite || !newSuite) return null;
+  const prevBlocks = prevSuite.blocks || [];
+  const newBlocks = newSuite.blocks || [];
+  if (prevBlocks.length !== newBlocks.length) return null;
+  for (let i = 0; i < prevBlocks.length; i++) {
+    if ((prevBlocks[i].name || '') !== (newBlocks[i].name || '')) return null;
+  }
+  return prevResults;
 }
 
 async function syncCodeToBuilder() {
@@ -5938,9 +6238,11 @@ async function syncCodeToBuilder() {
     const suite = await invoke('parse_test_file', { content });
 
     if (activeFileIndex >= 0 && loadedFiles[activeFileIndex]) {
-      loadedFiles[activeFileIndex].suite = suite;
-      loadedFiles[activeFileIndex].content = content;
-      loadedFiles[activeFileIndex].results = null;
+      const prev = loadedFiles[activeFileIndex];
+      const preserved = preserveResultsIfCompatible(prev.results, prev.suite, suite);
+      prev.suite = suite;
+      prev.content = content;
+      prev.results = preserved;
     } else {
       const name = codeEditorFilename.textContent || 'untitled.http';
       loadedFiles.push({ name, content, suite, results: null, savedPath: null });
@@ -6016,13 +6318,13 @@ function highlightHttpCode(text) {
   let inVariablesBlock = false;
 
   return lines.map(line => {
-    // Separator lines: ###
-    if (/^###/.test(line)) {
+    // Separator lines: ### or --- (line-anchored, followed by space or EOL)
+    if (/^###(\s|$)/.test(line) || /^---(\s|$)/.test(line)) {
       inJsonBody = false;
       inVariablesBlock = false;
       const escaped = escapeHtml(line);
-      // Check for block types
-      const btMatch = escaped.match(/(@(?:setup|test|teardown|variables))\b/);
+      // Check for block types — accept both new (@@setup) and legacy (@setup)
+      const btMatch = escaped.match(/(@@?(?:setup|test|teardown|variables))\b/);
       if (btMatch) {
         const highlighted = escaped.replace(btMatch[1], `<span class="hl-block-type">${btMatch[1]}</span>`);
         return `<span class="hl-separator">${highlightVariables(highlighted)}</span>`;
@@ -6030,7 +6332,7 @@ function highlightHttpCode(text) {
       return `<span class="hl-separator">${highlightVariables(escaped)}</span>`;
     }
 
-    // @variables at start of line
+    // @variables at start of line (legacy block header)
     if (/^@variables\b/.test(line)) {
       inJsonBody = false;
       inVariablesBlock = true;
@@ -6038,30 +6340,43 @@ function highlightHttpCode(text) {
       return escaped.replace(/^(@variables)/, '<span class="hl-block-type">$1</span>');
     }
 
-    // Variable assignment lines (both "@name = value" and "name = value" inside variables block)
+    // Variable assignment lines inside legacy @variables block: "name = value"
     if (inVariablesBlock && /^\w+\s*=/.test(line)) {
       const escaped = escapeHtml(line);
       return highlightVariables(escaped.replace(/^(\w+)(\s*=\s*)(.*)$/, '<span class="hl-header-name">$1</span><span class="hl-operator">$2</span><span class="hl-header-value">$3</span>'));
     }
 
-    // Directive lines: # @assert, # @extract, # @name, # @description, # @group, # @depends
-    if (/^#\s*@(assert|extract|name|description|group|depends)\b/.test(line)) {
+    // Pilot directive comment lines: # @x, # @@x, // @x, // @@x
+    //   for any known Pilot directive. Accept both legacy and new @@ syntax.
+    const directiveRe = /^(?:#|\/\/)\s*@@?(assert|extract|name|description|note|group|depends|mode|dev_auth|disabled|type|compare|step|diff|auto_run|telemetry|telemetry_token|telemetry_service|prompt)\b/;
+    if (directiveRe.test(line)) {
       inJsonBody = false;
       const escaped = escapeHtml(line);
+      // @@disabled gets a distinct style
+      if (/^(?:#|\/\/)\s*@@?disabled\s*$/.test(line)) {
+        return `<span class="hl-disabled">${escaped}</span>`;
+      }
       const withOps = escaped.replace(/(==|!=|&gt;=|&lt;=|&gt;|&lt;|contains|matches|exists|isType)/g, '<span class="hl-operator">$1</span>');
       return highlightVariables(`<span class="hl-directive">${withOps}</span>`);
     }
 
-    // Disabled directive: # @disabled
-    if (/^#\s*@disabled\s*$/.test(line)) {
-      inJsonBody = false;
-      return `<span class="hl-disabled">${escapeHtml(line)}</span>`;
-    }
-
-    // Comment lines: # (but not directives)
-    if (/^#/.test(line)) {
+    // Comment lines: # or // (non-directive)
+    if (/^#/.test(line) || /^\/\//.test(line)) {
       inJsonBody = false;
       return `<span class="hl-comment">${highlightVariables(escapeHtml(line))}</span>`;
+    }
+
+    // Top-level variable assignment: @name = value  (REST Client native)
+    if (/^@\w+\s*=/.test(line)) {
+      inJsonBody = false;
+      const escaped = escapeHtml(line);
+      return highlightVariables(escaped.replace(/^(@\w+)(\s*=\s*)(.*)$/, '<span class="hl-header-name">$1</span><span class="hl-operator">$2</span><span class="hl-header-value">$3</span>'));
+    }
+
+    // Bare REST Client directive: @name foo, @description ..., @note ..., @prompt VAR description (no '=')
+    if (/^@(name|description|note|prompt)\b/.test(line)) {
+      inJsonBody = false;
+      return `<span class="hl-directive">${highlightVariables(escapeHtml(line))}</span>`;
     }
 
     // HTTP method lines: METHOD URL
@@ -6088,12 +6403,6 @@ function highlightHttpCode(text) {
     // JSON body or blank lines
     if (inJsonBody) {
       return highlightJsonLine(line);
-    }
-
-    // Variable assignment lines like @baseUrl = ...
-    if (/^@\w+/.test(line)) {
-      const escaped = escapeHtml(line);
-      return highlightVariables(escaped.replace(/^(@\w+)(\s*=\s*)(.*)$/, '<span class="hl-header-name">$1</span><span class="hl-operator">$2</span><span class="hl-header-value">$3</span>'));
     }
 
     // Blank or unrecognized lines
@@ -6288,6 +6597,10 @@ function scheduleLiveCodeParse() {
       if (rev !== liveCodeParseRev) return;
       const file = loadedFiles[activeFileIndex];
       if (!file) return;
+      // If block shape changed, drop stale results so dots don't misalign.
+      if (file.results && !preserveResultsIfCompatible(file.results, file.suite, suite)) {
+        file.results = null;
+      }
       file.suite = suite;
       syncDisabledFromSuite(activeFileIndex);
       renderFileTree();
@@ -6429,13 +6742,12 @@ if (codeRunBtn) {
 
 // --- New File ---
 newFileBtn.addEventListener('click', () => {
-  const template = `### @variables
-@baseUrl = https://api.example.com
+  const template = `@baseUrl = https://api.example.com
 
-### @test Health Check
+### @@test Health Check
 GET {{baseUrl}}/health
 
-# @assert response.status == 200
+# @@assert status == 200
 `;
 
   const name = 'untitled.http';
@@ -8876,16 +9188,16 @@ function fetchDevModeToken(suite, fileContent) {
     }
   }
   
-  // Fallback: parse raw content to match @dev_auth scopes with @extract variables
+  // Fallback: parse raw content to match @@dev_auth (or legacy @dev_auth) scopes with @@extract variables
   if (tokens.length === 0 && fileContent) {
     const blocks = fileContent.split(/^###/m);
     for (const rawBlock of blocks) {
-      const devAuthMatch = rawBlock.match(/^#\s*@dev_auth\s+(.+)$/m);
+      const devAuthMatch = rawBlock.match(/^(?:#|\/\/)\s*@@?dev_auth\s+(.+)$/m);
       if (!devAuthMatch) continue;
       const scope = devAuthMatch[1].trim();
       const cached = azureTokenCache.get(scope);
       if (!cached || Date.now() >= cached.expiresAt - 60000) continue;
-      const extractMatches = rawBlock.matchAll(/^#\s*@extract\s+(\w+)\s*=\s*.+$/gm);
+      const extractMatches = rawBlock.matchAll(/^(?:#|\/\/)\s*@@?extract\s+(\w+)\s*=\s*.+$/gm);
       for (const em of extractMatches) {
         tokens.push([em[1], cached.token]);
       }
@@ -9412,6 +9724,7 @@ function escHtml(s) {
 // --- Initialize ---
 renderEnvVars();
 initAzureAuth();
+setupEnvPickerUI();
 
 // Telemetry tooltip: stay open when hovering from button into tooltip
 {
@@ -9645,7 +9958,7 @@ function appendToLiveCaptureFile(req) {
   }
 
   let block = `###\n`;
-  block += `# @name ${label}\n`;
+  block += `@name ${label}\n`;
   block += `${req.method} ${req.url}\n`;
 
   // Only include meaningful headers, skip browser-internal and sensitive ones
@@ -10152,3 +10465,862 @@ function renderVirtualHistoryList(container, entries) {
   vs.setData(entries);
   return vs;
 }
+
+// ============================================================================
+// Sessions tab — persisted test-run sessions (Phase 1.5)
+// ============================================================================
+//
+// Design notes (incorporating UX review):
+//  - Default grouping is by file (not 3-level tree). Version is a chip.
+//  - Row click opens snapshot (primary action). Replay requires a confirm
+//    dialog showing env/mode/host before firing requests.
+//  - Snapshot mode adds a left-edge accent stripe to the editor so users
+//    don't lose context when scrolling past the top banner.
+//  - Detach has a confirm dialog (clears snapshot marker, allows editing).
+//  - Empty/error states have explicit, friendly copy.
+
+const sessionsPanel        = document.getElementById('sessionsPanel');
+const sessionsTree         = document.getElementById('sessionsTree');
+const sessionsStatusEl     = document.getElementById('sessionsStatus');
+const sessionsCountBadge   = document.getElementById('sessionsCountBadge');
+const sessionsRefreshBtn   = document.getElementById('sessionsRefreshBtn');
+const sessionsSettingsBtn  = document.getElementById('sessionsSettingsBtn');
+const sessionsSettingsRow  = document.getElementById('sessionsSettingsRow');
+const sessionsRootInput    = document.getElementById('sessionsRootInput');
+const sessionsRootSaveBtn  = document.getElementById('sessionsRootSaveBtn');
+const sessionsRootClearBtn = document.getElementById('sessionsRootClearBtn');
+const sessionsRootBrowseBtn= document.getElementById('sessionsRootBrowseBtn');
+const sessionsAutoChk      = document.getElementById('sessionsAutoRecordChk');
+const sessionsSearch       = document.getElementById('sessionsSearch');
+const sessionsStatusFilter = document.getElementById('sessionsStatusFilter');
+const sessionsGroupBy      = document.getElementById('sessionsGroupBy');
+const sessionsDetailOverlay= document.getElementById('sessionsDetailOverlay');
+const sessionsDetailTitle  = document.getElementById('sessionsDetailTitle');
+const sessionsDetailBody   = document.getElementById('sessionsDetailBody');
+const sessionsDetailClose  = document.getElementById('sessionsDetailCloseBtn');
+const sessionsDetailOpenSourceBtn   = document.getElementById('sessionsDetailOpenSourceBtn');
+const sessionsDetailLoadSnapshotBtn = document.getElementById('sessionsDetailLoadSnapshotBtn');
+const sessionsDetailReplayBtn       = document.getElementById('sessionsDetailReplayBtn');
+const capturePresetRadios  = document.querySelectorAll('input[name="capturePreset"]');
+
+let sessionsStatusCache = { root: null, auto_record: true, active: false };
+let sessionsCapturePolicy = { preset: 'snapshot', policy: null };
+// In-memory cache of all sessions across files: [{file, version, session}, ...]
+let sessionsAllRows = [];
+let sessionsCurrentLoaded = null; // { fileId, sha, runId, source, suite, record }
+
+// ─── Status / config ──────────────────────────────────────────────────────
+
+async function refreshSessionsStatus() {
+  try {
+    sessionsStatusCache = await invoke('sessions_get_status');
+  } catch (e) {
+    sessionsStatusCache = { root: null, auto_record: true, active: false };
+  }
+  try {
+    sessionsCapturePolicy = await invoke('sessions_get_capture_policy');
+  } catch (_) { /* command may be missing in older builds */ }
+  if (sessionsRootInput) sessionsRootInput.value = sessionsStatusCache.root || '';
+  if (sessionsAutoChk)   sessionsAutoChk.checked = !!sessionsStatusCache.auto_record;
+  capturePresetRadios.forEach(r => { r.checked = (r.value === sessionsCapturePolicy.preset); });
+  renderSessionsStatusLine();
+}
+
+function renderSessionsStatusLine() {
+  if (!sessionsStatusEl) return;
+  if (!sessionsStatusCache.active) {
+    sessionsStatusEl.innerHTML = `<span style="color:var(--text-muted)">No sessions folder configured. Click <strong>⚙ Settings</strong> to choose one.</span>`;
+    return;
+  }
+  const auto = sessionsStatusCache.auto_record ? '✓ auto-record on' : '⏸ auto-record off';
+  const preset = sessionsCapturePolicy.preset || 'snapshot';
+  sessionsStatusEl.innerHTML = `Root: <code>${escapeHtml(sessionsStatusCache.root)}</code> · ${auto} · capture: <strong>${escapeHtml(preset)}</strong>`;
+}
+
+// ─── Tree loader (flat list grouped by file) ──────────────────────────────
+
+async function loadSessionsTree() {
+  if (!sessionsTree) return;
+  invalidateSessionsStatsCache();
+  await refreshSessionsStatus();
+  if (!sessionsStatusCache.active) {
+    sessionsTree.innerHTML = renderSessionsEmptyNoRoot();
+    sessionsCountBadge.textContent = '0';
+    sessionsAllRows = [];
+    return;
+  }
+  let files = [];
+  try {
+    files = await invoke('sessions_list_files');
+  } catch (e) {
+    sessionsTree.innerHTML = `<div class="sessions-error">Failed to list files: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+  // Eagerly fetch versions+sessions so we can render a flat, filterable list.
+  // Most stores are small (≤ 1000 sessions); this is fine for v1.
+  const rows = [];
+  for (const f of files) {
+    let versions = [];
+    try { versions = await invoke('sessions_list_versions', { fileId: f.file_id }); } catch (_) {}
+    for (const v of versions) {
+      let sessions = [];
+      try { sessions = await invoke('sessions_list_sessions', { fileId: f.file_id, sha256: v.sha256 }); } catch (_) {}
+      for (const s of sessions) {
+        rows.push({ file: f, version: v, session: s });
+      }
+    }
+  }
+  // Newest first
+  rows.sort((a, b) => (b.session.started_at || '').localeCompare(a.session.started_at || ''));
+  sessionsAllRows = rows;
+  sessionsCountBadge.textContent = String(rows.length);
+  renderSessionsList();
+}
+
+function renderSessionsEmptyNoRoot() {
+  return `
+    <div class="sessions-empty">
+      <div class="sessions-empty-icon">🗂</div>
+      <h3>No sessions folder yet</h3>
+      <p>Pick a folder and Request Pilot will record every test run there. You can browse, replay, and load runs back as snapshots.</p>
+      <button class="btn btn-primary" id="sessionsEmptyBrowseBtn">📁 Choose folder…</button>
+    </div>`;
+}
+
+function renderSessionsList() {
+  const q = (sessionsSearch?.value || '').toLowerCase().trim();
+  const statusFilter = sessionsStatusFilter?.value || 'all';
+  const groupBy = sessionsGroupBy?.value || 'file';
+
+  let rows = sessionsAllRows.filter(r => {
+    if (q) {
+      const hay = `${r.file.display_name} ${r.session.run_id} ${r.version.sha256}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    if (statusFilter !== 'all') {
+      const passed = r.session.passed || 0;
+      const failed = r.session.failed || 0;
+      if (statusFilter === 'passed' && failed > 0) return false;
+      if (statusFilter === 'failed' && failed === 0) return false;
+      if (statusFilter === 'mixed' && (failed === 0 || passed === 0)) return false;
+    }
+    return true;
+  });
+
+  if (rows.length === 0) {
+    if (sessionsAllRows.length === 0) {
+      sessionsTree.innerHTML = `
+        <div class="sessions-empty">
+          <div class="sessions-empty-icon">📭</div>
+          <h3>No sessions recorded yet</h3>
+          <p>Run any <code>.http</code> file with auto-record on and your first session will appear here.</p>
+        </div>`;
+    } else {
+      sessionsTree.innerHTML = `<div class="sessions-empty-small">No sessions match your filters.</div>`;
+    }
+    return;
+  }
+
+  // Group rows
+  const groups = new Map(); // groupKey -> { label, sublabel, rows[] }
+  for (const r of rows) {
+    let key, label, sublabel;
+    if (groupBy === 'file') {
+      key = r.file.file_id;
+      label = r.file.display_name;
+      sublabel = `last seen ${formatRelative(r.file.last_seen)}`;
+    } else if (groupBy === 'date') {
+      key = (r.session.started_at || '').slice(0, 10) || 'unknown';
+      label = formatDateBucket(key);
+      sublabel = '';
+    } else { // version
+      key = `${r.file.file_id}::${r.version.sha256}`;
+      label = `${r.file.display_name}`;
+      sublabel = `⌬ ${r.version.sha256.slice(0,12)} · ${r.version.session_count} run${r.version.session_count===1?'':'s'}`;
+    }
+    if (!groups.has(key)) groups.set(key, { label, sublabel, rows: [] });
+    groups.get(key).rows.push(r);
+  }
+
+  const html = [];
+  const stripTargets = []; // {key, fileId, sha|null}
+  for (const [key, g] of groups.entries()) {
+    let stripFileId = null, stripSha = null, includeStrip = false;
+    if (groupBy === 'version') {
+      stripFileId = g.rows[0].file.file_id;
+      stripSha = g.rows[0].version.sha256;
+      includeStrip = true;
+    } else if (groupBy === 'file') {
+      stripFileId = g.rows[0].file.file_id;
+      stripSha = null;
+      includeStrip = true;
+    }
+    const stripHtml = includeStrip
+      ? `<div class="sessions-stats-strip" data-strip-key="${escapeHtml(key)}" data-loading="1"><span class="sessions-stats-strip-placeholder">📊 Loading stats…</span></div>`
+      : '';
+    if (includeStrip) stripTargets.push({ key, fileId: stripFileId, sha: stripSha });
+    html.push(`<div class="sessions-group">
+      <div class="sessions-group-header">
+        <span class="sessions-group-label">${escapeHtml(g.label)}</span>
+        <span class="sessions-group-sub">${escapeHtml(g.sublabel)}</span>
+        <span class="sessions-group-count">${g.rows.length}</span>
+      </div>
+      ${stripHtml}
+      <div class="sessions-group-body">
+        ${g.rows.map(renderSessionRow).join('')}
+      </div>
+    </div>`);
+  }
+  sessionsTree.innerHTML = html.join('');
+
+  // Lazily fetch + fill stats strips (one per group). Failures are silent.
+  for (const t of stripTargets) {
+    getSessionStats(t.fileId, t.sha)
+      .then((stats) => {
+        const el = sessionsTree.querySelector(`[data-strip-key="${cssEscape(t.key)}"]`);
+        if (!el) return;
+        el.removeAttribute('data-loading');
+        el.innerHTML = renderStatsStrip(stats);
+      })
+      .catch(() => {
+        const el = sessionsTree.querySelector(`[data-strip-key="${cssEscape(t.key)}"]`);
+        if (el) { el.removeAttribute('data-loading'); el.innerHTML = ''; }
+      });
+  }
+
+  // Bind row clicks (primary action: open snapshot)
+  sessionsTree.querySelectorAll('[data-session-row]').forEach(el => {
+    el.addEventListener('click', (ev) => {
+      const fileId = el.getAttribute('data-file-id');
+      const sha = el.getAttribute('data-sha');
+      const runId = el.getAttribute('data-run-id');
+      // If a button inside the row was clicked, let it handle.
+      if (ev.target.closest('button')) return;
+      openSessionDetail(fileId, sha, runId);
+    });
+  });
+  sessionsTree.querySelectorAll('[data-action="load-snapshot"]').forEach(b => {
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const r = b.closest('[data-session-row]');
+      loadAsSnapshotFlow(r.getAttribute('data-file-id'), r.getAttribute('data-sha'), r.getAttribute('data-run-id'));
+    });
+  });
+  sessionsTree.querySelectorAll('[data-action="open-detail"]').forEach(b => {
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const r = b.closest('[data-session-row]');
+      openSessionDetail(r.getAttribute('data-file-id'), r.getAttribute('data-sha'), r.getAttribute('data-run-id'));
+    });
+  });
+}
+
+function renderSessionRow(r) {
+  const passed = r.session.passed || 0;
+  const failed = r.session.failed || 0;
+  const skipped = r.session.skipped || 0;
+  const totalMs = r.session.total_time_ms || 0;
+  const when = formatRelative(r.session.started_at);
+  const pillClass = failed > 0 ? 'fail' : (passed > 0 ? 'pass' : 'skip');
+  const pillIcon  = failed > 0 ? '✗' : (passed > 0 ? '✓' : '⊘');
+  const pillLabel = failed > 0 ? 'Failed' : (passed > 0 ? 'Passed' : 'Skipped');
+  const versionChip = `<span class="sessions-chip" title="Source SHA ${r.version.sha256}">⌬ ${r.version.sha256.slice(0,8)}</span>`;
+  const latencyClass = totalMs > 3000 ? 'slow' : (totalMs > 1000 ? 'warn' : '');
+  return `
+    <div class="sessions-row" data-session-row data-file-id="${escapeHtml(r.file.file_id)}" data-sha="${escapeHtml(r.version.sha256)}" data-run-id="${escapeHtml(r.session.run_id)}" tabindex="0" role="button" aria-label="Session ${r.session.run_id} — ${pillLabel}">
+      <span class="sessions-status-pill ${pillClass}" aria-label="${pillLabel}">${pillIcon} ${pillLabel}</span>
+      <span class="sessions-counts">✓${passed} ✗${failed} ⊘${skipped}</span>
+      ${versionChip}
+      <span class="sessions-runid" title="run-id ${r.session.run_id}">${escapeHtml(r.session.run_id.slice(0,8))}</span>
+      <span class="sessions-when">${escapeHtml(when)}</span>
+      <span class="sessions-latency ${latencyClass}">${totalMs}ms</span>
+      <span class="sessions-row-actions">
+        <button class="btn btn-ghost btn-xs" data-action="open-detail" title="View details">👁</button>
+        <button class="btn btn-primary btn-xs" data-action="load-snapshot" title="Open snapshot in editor">📸 Open</button>
+      </span>
+    </div>`;
+}
+
+function formatRelative(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return `${Math.round(diff)}s ago`;
+  if (diff < 3600) return `${Math.round(diff/60)}m ago`;
+  if (diff < 86400) return `${Math.round(diff/3600)}h ago`;
+  if (diff < 86400*7) return `${Math.round(diff/86400)}d ago`;
+  return d.toLocaleDateString();
+}
+
+function formatDateBucket(yyyymmdd) {
+  if (!yyyymmdd || yyyymmdd === 'unknown') return 'Unknown date';
+  const today = new Date().toISOString().slice(0,10);
+  if (yyyymmdd === today) return 'Today';
+  const y = new Date(); y.setDate(y.getDate()-1);
+  if (yyyymmdd === y.toISOString().slice(0,10)) return 'Yesterday';
+  return yyyymmdd;
+}
+
+// ─── Stats (sparklines, strips, tab content) ──────────────────────────────
+
+// Cache stats per (fileId, sha|''). One entry per key holds the in-flight
+// promise (or resolved value) so concurrent callers share a single fetch.
+const sessionsStatsCache = new Map();
+
+function statsCacheKey(fileId, sha) { return `${fileId}:${sha || ''}`; }
+
+function getSessionStats(fileId, sha) {
+  const key = statsCacheKey(fileId, sha);
+  if (sessionsStatsCache.has(key)) return sessionsStatsCache.get(key);
+  const p = invoke('sessions_get_stats', { fileId, sha: sha || null })
+    .catch((e) => { console.warn('[sessions] get_stats failed', e); return null; });
+  sessionsStatsCache.set(key, p);
+  return p;
+}
+
+function invalidateSessionsStatsCache() { sessionsStatsCache.clear(); }
+
+// Unicode block sparkline. Maps numeric values into 8 levels.
+function sparkline(values, min, max) {
+  const chars = '▁▂▃▄▅▆▇█';
+  if (!Array.isArray(values) || values.length === 0) return '';
+  if (min == null || max == null) {
+    const nums = values.filter(v => v != null && !isNaN(v));
+    if (nums.length === 0) return '';
+    min = Math.min(...nums);
+    max = Math.max(...nums);
+  }
+  const range = (max - min) || 1;
+  return values.map(v => {
+    if (v == null || isNaN(v)) return ' ';
+    const idx = Math.min(7, Math.max(0, Math.floor(((v - min) / range) * 7)));
+    return chars[idx];
+  }).join('');
+}
+
+function safeCssIdent(s) { return String(s).replace(/[^a-zA-Z0-9_-]/g, '_'); }
+function cssEscape(s) {
+  if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(s);
+  return String(s).replace(/[^a-zA-Z0-9_-]/g, ch => '\\' + ch);
+}
+
+function renderStatsStrip(stats) {
+  if (!stats) {
+    return `<span class="sessions-stats-strip-empty">📊 No stats yet</span>`;
+  }
+  const totals = stats.totals || {};
+  const passed = totals.passed || 0;
+  const failed = totals.failed || 0;
+  const sessions = stats.session_count || 0;
+  const denom = passed + failed;
+  const passRate = denom > 0 ? Math.round((passed / denom) * 100) : null;
+  const buckets = (stats.buckets || []).slice(-24);
+  const passRates = buckets.map(b => {
+    const d = (b.passed || 0) + (b.failed || 0);
+    return d > 0 ? (b.passed / d) * 100 : null;
+  });
+  const sparkPass = sparkline(passRates, 0, 100);
+  const lat = stats.latency || {};
+  const p50 = lat.p50_ms || 0;
+  const p95 = lat.p95_ms || 0;
+  const tooltip = buckets.length
+    ? `Recent buckets:\n` + buckets.map(b => `${b.start} (${b.window}) ${b.passed||0}/${(b.passed||0)+(b.failed||0)} pass · p95 ${b.p95_ms||0}ms`).join('\n')
+    : 'No bucketed runs yet.';
+  const passLabel = passRate == null ? '—' : `${passRate}%`;
+  return `
+    <span class="sessions-stats-strip-label">📊 Pass-rate</span>
+    <span class="sessions-stats-spark" title="${escapeHtml(tooltip)}">${escapeHtml(sparkPass) || '—'}</span>
+    <span class="sessions-stats-strip-num">${passLabel}</span>
+    <span class="sessions-stats-strip-sep">·</span>
+    <span class="sessions-stats-strip-num">p50 ${p50}ms</span>
+    <span class="sessions-stats-strip-num">p95 ${p95}ms</span>
+    <span class="sessions-stats-strip-sep">·</span>
+    <span class="sessions-stats-strip-num">${sessions} session${sessions === 1 ? '' : 's'}</span>
+  `;
+}
+
+function renderStatsTab(stats, fileId, sha) {
+  if (!stats) {
+    return `<div class="sessions-stats-empty">📊 No stats yet — run this file to populate stats.</div>`;
+  }
+  const totals = stats.totals || {};
+  const lat = stats.latency || {};
+  const passed = totals.passed || 0;
+  const failed = totals.failed || 0;
+  const mixed = totals.mixed || 0;
+  const skipped = totals.skipped_blocks || 0;
+  const sessions = stats.session_count || 0;
+  const denom = passed + failed;
+  const passRate = denom > 0 ? Math.round((passed / denom) * 100) : null;
+
+  const buckets = (stats.buckets || []).slice();
+  const bucketsRecent = buckets.slice(-30);
+  const passRates = bucketsRecent.map(b => {
+    const d = (b.passed || 0) + (b.failed || 0);
+    return d > 0 ? (b.passed / d) * 100 : null;
+  });
+  const p95Series = bucketsRecent.map(b => b.p95_ms || 0);
+  const sparkPass = sparkline(passRates, 0, 100);
+  const sparkP95 = sparkline(p95Series);
+
+  // Top-5 flakiest blocks: rank by failure rate × (passed+failed) and require both >0.
+  const byBlock = stats.by_block || {};
+  const flaky = Object.keys(byBlock).map(name => {
+    const b = byBlock[name] || {};
+    const total = (b.passed || 0) + (b.failed || 0);
+    const failRate = total > 0 ? (b.failed || 0) / total : 0;
+    return { name, runs: b.runs || 0, passed: b.passed || 0, failed: b.failed || 0, p50: b.p50_ms || 0, p95: b.p95_ms || 0, failRate };
+  }).filter(x => x.failed > 0)
+    .sort((a, b) => (b.failRate - a.failRate) || (b.failed - a.failed))
+    .slice(0, 5);
+
+  const flakyRows = flaky.length === 0
+    ? `<tr><td colspan="6" style="color:var(--text-muted);text-align:center">No flaky blocks 🎉</td></tr>`
+    : flaky.map(x => `<tr>
+        <td>${escapeHtml(x.name)}</td>
+        <td>${x.runs}</td>
+        <td><span class="sessions-stats-pass">${x.passed}</span> / <span class="sessions-stats-fail">${x.failed}</span></td>
+        <td>${Math.round(x.failRate * 100)}%</td>
+        <td>${x.p50}ms</td>
+        <td>${x.p95}ms</td>
+      </tr>`).join('');
+
+  const versionsHtml = (stats.versions && stats.versions.length)
+    ? `<div class="sessions-stats-section">
+        <h4>Versions (${stats.versions.length})</h4>
+        <table class="sessions-stats-table">
+          <thead><tr><th>SHA</th><th>Sessions</th><th>First seen</th><th>Last seen</th></tr></thead>
+          <tbody>${stats.versions.map(v => `<tr>
+            <td><code>${escapeHtml(v.sha256.slice(0,12))}</code></td>
+            <td>${v.session_count}</td>
+            <td>${escapeHtml(formatRelative(v.first_seen))}</td>
+            <td>${escapeHtml(formatRelative(v.last_seen))}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>`
+    : '';
+
+  const scope = sha ? `version <code>${escapeHtml(sha.slice(0,12))}</code>` : 'all versions (file rollup)';
+  const passRateLabel = passRate == null ? '—' : `${passRate}%`;
+  const minP95 = p95Series.length ? Math.min(...p95Series) : 0;
+  const maxP95 = p95Series.length ? Math.max(...p95Series) : 0;
+
+  return `
+    <div class="sessions-stats-tab-content">
+      <div class="sessions-stats-scope">Scope: ${scope} · first seen ${escapeHtml(formatRelative(stats.first_seen))} · last seen ${escapeHtml(formatRelative(stats.last_seen))}</div>
+
+      <div class="sessions-stats-totals">
+        <div class="sessions-stats-card">
+          <div class="sessions-stats-card-label">Sessions</div>
+          <div class="sessions-stats-card-value">${sessions}</div>
+        </div>
+        <div class="sessions-stats-card">
+          <div class="sessions-stats-card-label">Pass rate</div>
+          <div class="sessions-stats-card-value">${passRateLabel}</div>
+          <div class="sessions-stats-card-sub"><span class="sessions-stats-pass">✓ ${passed}</span> · <span class="sessions-stats-fail">✗ ${failed}</span> · ⚠ ${mixed} · ⊘ ${skipped}</div>
+        </div>
+        <div class="sessions-stats-card">
+          <div class="sessions-stats-card-label">Latency p50 / p95 / p99</div>
+          <div class="sessions-stats-card-value">${lat.p50_ms||0} / ${lat.p95_ms||0} / ${lat.p99_ms||0} <span class="sessions-stats-card-unit">ms</span></div>
+          <div class="sessions-stats-card-sub">max ${lat.max_ms||0}ms · ${(lat.samples||[]).length} samples</div>
+        </div>
+      </div>
+
+      <div class="sessions-stats-section">
+        <h4>Pass-rate trend (last ${bucketsRecent.length} buckets)</h4>
+        <div class="sessions-stats-spark sessions-stats-spark-large" title="0–100% pass-rate per bucket">${escapeHtml(sparkPass) || '<span style="color:var(--text-muted)">no bucketed runs yet</span>'}</div>
+      </div>
+
+      <div class="sessions-stats-section">
+        <h4>Latency p95 trend</h4>
+        <div class="sessions-stats-spark sessions-stats-spark-large" title="${minP95}ms – ${maxP95}ms per bucket">${escapeHtml(sparkP95) || '<span style="color:var(--text-muted)">no bucketed runs yet</span>'}</div>
+        <div class="sessions-stats-card-sub">range ${minP95}ms – ${maxP95}ms</div>
+      </div>
+
+      <div class="sessions-stats-section">
+        <h4>Top-5 flakiest blocks</h4>
+        <table class="sessions-stats-table">
+          <thead><tr><th>Block</th><th>Runs</th><th>Pass / Fail</th><th>Fail rate</th><th>p50</th><th>p95</th></tr></thead>
+          <tbody>${flakyRows}</tbody>
+        </table>
+      </div>
+
+      ${versionsHtml}
+    </div>
+  `;
+}
+
+// ─── Detail overlay ───────────────────────────────────────────────────────
+
+async function openSessionDetail(fileId, sha, runId) {
+  try {
+    const loaded = await invoke('sessions_load_session', { fileId, sha256: sha, runId });
+    sessionsCurrentLoaded = { fileId, sha, runId, ...loaded };
+    sessionsDetailTitle.textContent = `${loaded.record.run_id.slice(0,12)} · ${new Date(loaded.record.started_at).toLocaleString()}`;
+    sessionsDetailBody.innerHTML = renderSessionDetailHtml(loaded);
+    sessionsDetailOverlay.classList.remove('hidden');
+    bindSessionDetailTabs(fileId, sha);
+  } catch (e) {
+    showToast('Failed to load session: ' + e, 'error');
+  }
+}
+
+function bindSessionDetailTabs(fileId, sha) {
+  const root = sessionsDetailBody;
+  if (!root) return;
+  const tabs = root.querySelectorAll('[data-sd-tab]');
+  const panels = root.querySelectorAll('[data-sd-panel]');
+  tabs.forEach(t => {
+    t.addEventListener('click', () => {
+      const id = t.getAttribute('data-sd-tab');
+      tabs.forEach(x => x.classList.toggle('active', x === t));
+      panels.forEach(p => p.classList.toggle('active', p.getAttribute('data-sd-panel') === id));
+      if (id === 'stats') ensureStatsPanelLoaded(fileId, sha);
+    });
+  });
+}
+
+async function ensureStatsPanelLoaded(fileId, sha) {
+  const panel = sessionsDetailBody?.querySelector('[data-sd-panel="stats"]');
+  if (!panel || panel.dataset.loaded === '1') return;
+  const stats = await getSessionStats(fileId, sha);
+  panel.dataset.loaded = '1';
+  panel.innerHTML = renderStatsTab(stats, fileId, sha);
+}
+
+function renderSessionDetailHtml(loaded) {
+  const r = loaded.record;
+  const blocks = (r.block_summaries || []).map(b => {
+    const cls = b.status === 'passed' ? 'success' : (b.status === 'failed' ? 'error' : 'muted');
+    return `<tr>
+      <td><span style="color:var(--accent-${cls})">${escapeHtml(b.status)}</span></td>
+      <td>${escapeHtml(b.name)}</td>
+      <td>${escapeHtml(b.block_type)}</td>
+      <td>${b.assertion_passed}/${b.assertion_total}</td>
+      <td>${b.extract_ok}/${b.extract_total}</td>
+      <td>${b.time_ms}ms</td>
+    </tr>`;
+  }).join('');
+  const rr = r.redaction_report || {};
+  return `
+    <div class="sessions-detail-tabs" role="tablist">
+      <button class="sessions-detail-tab active" data-sd-tab="blocks" role="tab">Blocks</button>
+      <button class="sessions-detail-tab" data-sd-tab="redaction" role="tab">Redaction</button>
+      <button class="sessions-detail-tab" data-sd-tab="source" role="tab">Source</button>
+      <button class="sessions-detail-tab sessions-stats-tab" data-sd-tab="stats" role="tab">📊 Stats</button>
+    </div>
+
+    <div class="sessions-detail-panel active" data-sd-panel="blocks">
+      <div style="padding:14px;font-size:13px">
+        <div class="session-detail-meta">
+          <div><strong>Trigger</strong> ${escapeHtml(JSON.stringify(r.trigger))}</div>
+          <div><strong>Component</strong> ${escapeHtml(JSON.stringify(r.component))}</div>
+          <div><strong>Host</strong> ${escapeHtml(r.host)} <span style="color:var(--text-muted)">(${escapeHtml(r.os)})</span></div>
+          <div><strong>Duration</strong> ${r.results?.total_time_ms || 0}ms</div>
+          <div><strong>Mode</strong> ${escapeHtml(r.mode || '—')}</div>
+          <div><strong>Env</strong> ${escapeHtml(r.env_file || '—')}</div>
+          <div style="grid-column:1/-1"><strong>Source SHA</strong> <code>${escapeHtml(r.source_sha256.slice(0,16))}…</code></div>
+        </div>
+        <div style="margin-top:10px"><strong>Results:</strong> ✓ ${r.results?.passed||0} · ✗ ${r.results?.failed||0} · ⊘ ${r.results?.skipped||0}</div>
+        <table class="sessions-block-table">
+          <thead><tr><th>Status</th><th>Name</th><th>Type</th><th>Assert</th><th>Extract</th><th>Time</th></tr></thead>
+          <tbody>${blocks}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="sessions-detail-panel" data-sd-panel="redaction">
+      <div style="padding:14px;font-size:13px">
+        <h4 style="margin-top:0">Redaction report</h4>
+        <table class="sessions-stats-table">
+          <thead><tr><th>Field</th><th>Count</th></tr></thead>
+          <tbody>
+            <tr><td>Headers redacted</td><td>${rr.headers_redacted||0}</td></tr>
+            <tr><td>Query params redacted</td><td>${rr.query_params_redacted||0}</td></tr>
+            <tr><td>Variables dropped</td><td>${rr.variables_dropped||0}</td></tr>
+            <tr><td>Bodies dropped</td><td>${rr.bodies_dropped||0}</td></tr>
+            <tr><td>Bodies truncated</td><td>${rr.bodies_truncated||0}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="sessions-detail-panel" data-sd-panel="source">
+      <div style="padding:14px;font-size:13px">
+        <div style="color:var(--text-muted);margin-bottom:6px">${loaded.source.length} bytes</div>
+        <pre style="max-height:60vh;overflow:auto;font-size:11px;background:var(--bg-secondary);padding:8px;border-radius:4px">${escapeHtml(loaded.source)}</pre>
+      </div>
+    </div>
+
+    <div class="sessions-detail-panel" data-sd-panel="stats">
+      <div class="sessions-stats-loading">📊 Loading stats…</div>
+    </div>`;
+}
+
+// ─── Snapshot loading (reconstitute test state) ───────────────────────────
+
+async function loadAsSnapshotFlow(fileId, sha, runId) {
+  let loaded;
+  try {
+    loaded = await invoke('sessions_load_as_snapshot', { fileId, sha256: sha, runId });
+  } catch (e) {
+    showToast('Failed to load snapshot: ' + e, 'error');
+    return;
+  }
+  const r = loaded.record;
+  const runShort = r.run_id.slice(0, 8);
+  const startedShort = new Date(r.started_at).toLocaleString();
+  const fileEntry = {
+    name: `📸 snapshot ${runShort}`,
+    content: loaded.source,
+    suite: loaded.suite,
+    results: r.results || null,
+    savedPath: null,
+    snapshot: {
+      runId: r.run_id,
+      fileId,
+      sha256: sha,
+      startedAt: r.started_at,
+      mode: r.mode,
+      envFile: r.env_file,
+      capturePolicy: r.capture_policy,
+      redactionReport: r.redaction_report,
+      sourceSha256: r.source_sha256,
+      locked: true,
+    },
+  };
+  loadedFiles.push(fileEntry);
+  activeFileIndex = loadedFiles.length - 1;
+  activeBlockIndex = -1;
+  sessionsDetailOverlay.classList.add('hidden');
+  if (typeof renderFileTree === 'function') renderFileTree();
+  // Roll the per-block statuses up to group dots so users see at-a-glance
+  // pass/fail summaries on group nodes immediately after loading.
+  if (typeof updateBlockStatuses === 'function') updateBlockStatuses();
+  // Re-scan loaded files for dev_auth blocks so the Azure auth state
+  // reflects what the snapshot needs to replay (it may have been recorded
+  // in `dev` mode against scopes the user is not currently authenticated for).
+  if (typeof detectAzureAuthNeeded === 'function') detectAzureAuthNeeded();
+  // Switch to builder mode so block statuses render immediately.
+  if (typeof switchMode === 'function') switchMode('builder');
+  applySnapshotLockUI();
+  // Surface the recorded mode in the toast so users know whether replay
+  // will need Azure auth (mode='dev') or run as app (mode='app'/null).
+  const modeLabel = r.mode ? ` · mode: ${r.mode}` : '';
+  showToast(`Snapshot loaded · ${runShort} · ${startedShort}${modeLabel}`, 'success');
+}
+
+function activeSnapshot() {
+  const f = loadedFiles[activeFileIndex];
+  return (f && f.snapshot) ? f.snapshot : null;
+}
+
+/// Apply / refresh the snapshot lock visuals — left-edge stripe on editor,
+/// banner above the builder, code-editor readonly.
+function applySnapshotLockUI() {
+  const snap = activeSnapshot();
+  const editorPanel = codeEditorPanel;
+  if (snap && snap.locked) {
+    if (editorPanel) editorPanel.classList.add('snapshot-locked');
+    if (codeEditor) codeEditor.setAttribute('readonly', 'true');
+    renderSnapshotBanner(snap);
+  } else {
+    if (editorPanel) editorPanel.classList.remove('snapshot-locked');
+    if (codeEditor) codeEditor.removeAttribute('readonly');
+    removeSnapshotBanner();
+  }
+}
+
+function renderSnapshotBanner(snap) {
+  removeSnapshotBanner();
+  const banner = document.createElement('div');
+  banner.id = 'snapshotBanner';
+  banner.className = 'snapshot-banner';
+  banner.setAttribute('role', 'status');
+  banner.innerHTML = `
+    <span class="snap-icon">📸</span>
+    <span class="snap-text">
+      <strong>Snapshot</strong> · run <code>${escapeHtml(snap.runId.slice(0,12))}</code>
+      · ${escapeHtml(new Date(snap.startedAt).toLocaleString())}
+      · mode: <strong>${escapeHtml(snap.mode || '—')}</strong>
+      · env: <strong>${escapeHtml(snap.envFile || '—')}</strong>
+    </span>
+    <span class="snap-spacer"></span>
+    <button class="btn btn-ghost btn-xs" id="snapDetachBtn" title="Make this file editable">🔓 Detach to edit</button>
+    <button class="btn btn-primary btn-xs" id="snapReplayBtn" title="Re-run all blocks (creates a new session)">▶ Replay all</button>`;
+  // Insert at top of the main content area.
+  const host = document.querySelector('.main-content') || document.body;
+  host.insertBefore(banner, host.firstChild);
+  document.getElementById('snapDetachBtn')?.addEventListener('click', detachSnapshotFlow);
+  document.getElementById('snapReplayBtn')?.addEventListener('click', replaySnapshotFlow);
+}
+
+function removeSnapshotBanner() {
+  const b = document.getElementById('snapshotBanner');
+  if (b) b.remove();
+}
+
+function detachSnapshotFlow() {
+  const f = loadedFiles[activeFileIndex];
+  if (!f || !f.snapshot) return;
+  const ok = window.confirm(
+    'Detach snapshot?\n\nThis will unlock the editor so you can edit. ' +
+    'The original snapshot stays in Sessions and is unaffected. Continue?'
+  );
+  if (!ok) return;
+  delete f.snapshot;
+  applySnapshotLockUI();
+  showToast('Snapshot detached — file is now editable', 'info');
+}
+
+async function replaySnapshotFlow() {
+  const f = loadedFiles[activeFileIndex];
+  if (!f || !f.snapshot) return;
+  // Best-effort host extraction for confirmation
+  const firstBlock = f.suite?.blocks?.[0];
+  const targetHost = firstBlock?.url?.match(/^https?:\/\/([^\/]+)/)?.[1] || '(varies by block)';
+  const ok = window.confirm(
+    `Replay all ${f.suite?.blocks?.length || '?'} blocks?\n\n` +
+    `Mode: ${f.snapshot.mode || '—'}\n` +
+    `Env file: ${f.snapshot.envFile || '— (current env will be used)'}\n` +
+    `First target host: ${targetHost}\n\n` +
+    `This will fire real network requests using the current environment ` +
+    `and create a new session. The snapshot you're viewing is not modified.`
+  );
+  if (!ok) return;
+  // Trigger the standard run flow — code path differs slightly between modes.
+  // Use the existing "Run all" affordance when present.
+  const runAllBtn = document.getElementById('runAllBtn') || document.getElementById('codeRunBtn');
+  if (runAllBtn) {
+    runAllBtn.click();
+    showToast('Replay started…', 'info');
+  } else {
+    showToast('Use the Run button in the toolbar to replay.', 'info');
+  }
+}
+
+// ─── Settings handlers ────────────────────────────────────────────────────
+
+if (sessionsRefreshBtn)  sessionsRefreshBtn.addEventListener('click', loadSessionsTree);
+if (sessionsSettingsBtn) sessionsSettingsBtn.addEventListener('click', () => sessionsSettingsRow.classList.toggle('hidden'));
+
+async function browseForRoot() {
+  try {
+    const picked = await invoke('sessions_pick_root_dir', { startDir: sessionsRootInput?.value || null });
+    if (picked) sessionsRootInput.value = picked;
+  } catch (e) {
+    showToast('Folder picker failed: ' + e, 'error');
+  }
+}
+if (sessionsRootBrowseBtn) sessionsRootBrowseBtn.addEventListener('click', browseForRoot);
+
+document.addEventListener('click', (ev) => {
+  if (ev.target?.id === 'sessionsEmptyBrowseBtn') {
+    sessionsSettingsRow?.classList.remove('hidden');
+    browseForRoot();
+  }
+});
+
+if (sessionsRootSaveBtn) sessionsRootSaveBtn.addEventListener('click', async () => {
+  const v = sessionsRootInput.value.trim();
+  try {
+    sessionsStatusCache = await invoke('sessions_set_root', { root: v || null });
+    showToast('Sessions folder updated', 'success');
+    await loadSessionsTree();
+  } catch (e) { showToast('Failed: ' + e, 'error'); }
+});
+
+if (sessionsRootClearBtn) sessionsRootClearBtn.addEventListener('click', async () => {
+  try {
+    sessionsStatusCache = await invoke('sessions_set_root', { root: null });
+    sessionsRootInput.value = '';
+    showToast('Sessions disabled', 'info');
+    await loadSessionsTree();
+  } catch (e) { showToast('Failed: ' + e, 'error'); }
+});
+
+if (sessionsAutoChk) sessionsAutoChk.addEventListener('change', async () => {
+  try {
+    sessionsStatusCache = await invoke('sessions_set_auto_record', { enabled: sessionsAutoChk.checked });
+    renderSessionsStatusLine();
+  } catch (e) { showToast('Failed: ' + e, 'error'); }
+});
+
+capturePresetRadios.forEach(r => r.addEventListener('change', async () => {
+  if (!r.checked) return;
+  try {
+    sessionsCapturePolicy = await invoke('sessions_set_capture_preset', { preset: r.value, policy: null });
+    renderSessionsStatusLine();
+    showToast(`Capture preset: ${r.value}`, 'success');
+  } catch (e) { showToast('Failed: ' + e, 'error'); }
+}));
+
+if (sessionsSearch)       sessionsSearch.addEventListener('input', renderSessionsList);
+if (sessionsStatusFilter) sessionsStatusFilter.addEventListener('change', renderSessionsList);
+if (sessionsGroupBy)      sessionsGroupBy.addEventListener('change', renderSessionsList);
+
+if (sessionsDetailClose) sessionsDetailClose.addEventListener('click', () => sessionsDetailOverlay.classList.add('hidden'));
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !sessionsDetailOverlay.classList.contains('hidden')) {
+    sessionsDetailOverlay.classList.add('hidden');
+  }
+});
+
+if (sessionsDetailLoadSnapshotBtn) sessionsDetailLoadSnapshotBtn.addEventListener('click', () => {
+  if (!sessionsCurrentLoaded) return;
+  loadAsSnapshotFlow(sessionsCurrentLoaded.fileId, sessionsCurrentLoaded.sha, sessionsCurrentLoaded.runId);
+});
+
+if (sessionsDetailReplayBtn) sessionsDetailReplayBtn.addEventListener('click', () => {
+  // Replay = load snapshot then immediately replay, with the same confirm guard.
+  if (!sessionsCurrentLoaded) return;
+  loadAsSnapshotFlow(sessionsCurrentLoaded.fileId, sessionsCurrentLoaded.sha, sessionsCurrentLoaded.runId)
+    .then(() => setTimeout(replaySnapshotFlow, 80));
+});
+
+if (sessionsDetailOpenSourceBtn) sessionsDetailOpenSourceBtn.addEventListener('click', () => {
+  if (!sessionsCurrentLoaded) return;
+  const src = sessionsCurrentLoaded.source;
+  const name = `session-${sessionsCurrentLoaded.runId.slice(0,8)}.http`;
+  try {
+    loadedFiles.push({ name, content: src, suite: { variables: [], blocks: [] }, results: null, savedPath: null });
+    activeFileIndex = loadedFiles.length - 1;
+    activeBlockIndex = -1;
+    sessionsDetailOverlay.classList.add('hidden');
+    if (typeof renderFileTree === 'function') renderFileTree();
+    if (typeof switchMode === 'function') switchMode('code');
+    showToast('Source loaded as new buffer', 'success');
+  } catch (e) {
+    showToast('Failed to open source: ' + e, 'error');
+  }
+});
+
+// Whenever the active file changes, re-evaluate snapshot lock UI.
+const __origSwitchMode = window.switchMode;
+// Hook into renderFileTree's invocations of switchMode by polling on the
+// active-file index changing. Safe because applySnapshotLockUI is idempotent.
+setInterval(() => { try { applySnapshotLockUI(); } catch (_) {} }, 400);
+
+// Best-effort recorder. Never throws into the run path.
+async function recordSessionRun(file, suite, sourceContent, results, extraVars, mode, startedAtMs) {
+  if (!sessionsStatusCache || !sessionsStatusCache.active || !sessionsStatusCache.auto_record) return;
+  try {
+    await invoke('sessions_record_run', {
+      suite,
+      filePath: file?.savedPath || null,
+      alias: null,
+      sourceContent: sourceContent || file?.content || '',
+      results,
+      variables: extraVars || [],
+      mode: mode || null,
+      envFile: (typeof activeEnvPath !== 'undefined') ? activeEnvPath : null,
+      startedAtMs: startedAtMs || Date.now(),
+    });
+  } catch (e) {
+    console.warn('[sessions] record_run failed', e);
+  }
+}
+
+// Refresh status on startup
+refreshSessionsStatus().catch(() => {});

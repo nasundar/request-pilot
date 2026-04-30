@@ -138,7 +138,7 @@ function buildDetailedSteps() {
     {
       target: '[data-mode="code"]',
       title: '📝 Code Mode',
-      body: 'Click the <b>Code</b> tab to see and edit the raw .http file. You can edit requests, add assertions (<code># @assert</code>), extractions (<code># @extract</code>), and dependencies (<code># @depends</code>) directly.',
+      body: 'Click the <b>Code</b> tab to see and edit the raw .http file. You can edit requests, add assertions (<code># @@assert</code>), extractions (<code># @@extract</code>), and dependencies (<code># @@depends</code>) directly.',
       position: 'bottom',
       action: () => {
         const codeBtn = document.querySelector('[data-mode="code"]');

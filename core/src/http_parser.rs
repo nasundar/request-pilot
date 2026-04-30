@@ -17,6 +17,41 @@ pub struct TestSuite {
     /// File-level auto-run interval (e.g. "15m", "1h"). Parsed from `# @auto_run`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_run: Option<String>,
+    /// Variables marked with `@prompt VAR description` — the runtime UI asks
+    /// the user to supply values for each before executing the suite. Values
+    /// supplied by the user take precedence over any existing `@variables`
+    /// entry of the same name. Order of declaration is preserved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompts: Vec<PromptVariable>,
+    /// File-level `# @@request-id [header-name]` directive. When set, every
+    /// block inherits an auto-injected request-id header (a fresh UUIDv4 per
+    /// request, unless the user already sets that header manually). Blocks
+    /// can override or disable via their own `# @@request-id` directive.
+    /// Default header name when the directive has no argument: `X-Request-Id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id_header: Option<String>,
+    /// File-level body redaction rules from `# @@redact body ...` directives.
+    /// Applied to request and response bodies before recording. Block-level
+    /// rules are appended to these at recording time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redact_body_rules: Vec<BodyRedactRule>,
+}
+
+/// A single body-redaction rule parsed from a `# @@redact body ...` directive.
+/// `JsonPath` matches a JSONPath expression (e.g. `$.password`); `Regex` matches
+/// a regular expression delimited by slashes in the source (e.g. `/Bearer\s+\S+/`).
+/// Application of these rules is handled at recording time, not in the parser.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum BodyRedactRule {
+    JsonPath(String),
+    Regex(String),
+}
+
+/// A `@prompt` runtime-input variable declared at the top of the file.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PromptVariable {
+    pub name: String,
+    pub description: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -44,6 +79,20 @@ pub struct TestBlock {
     /// Validation errors detected during parsing (duplicate step names, invalid diff refs, etc.)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: ParseErrors,
+    /// Block-level override for the file-level `# @@request-id` directive.
+    /// `Some(name)` uses `name` as the injected header name for this block.
+    /// Combined with `request_id_disabled` below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id_header: Option<String>,
+    /// When true, this block opts out of auto request-id injection even if a
+    /// file-level directive is active. Set via `# @@request-id off`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub request_id_disabled: bool,
+    /// Block-level body redaction rules from `# @@redact body ...` directives.
+    /// Appended to the file-level `TestSuite.redact_body_rules` at recording
+    /// time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redact_body_rules: Vec<BodyRedactRule>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -95,12 +144,184 @@ pub fn parse(content: &str) -> Vec<ParsedRequest> {
         .collect()
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Syntax helpers
+//
+// Pilot's `.http` syntax is a strict superset of VS Code REST Client's:
+//
+//   * Variable definitions  : `@name = value`             (REST Client native)
+//   * Variable references   : `{{name}}` and `{{$builtin}}` (REST Client native)
+//   * Request separators    : `###` or `---`              (REST Client native)
+//   * Comments              : lines starting with `#` or `//`
+//   * Bare directives       : `@name foo`, `@description foo`,
+//                             `@note foo`, `@prompt VAR description`
+//                             (REST Client native — disambiguated from
+//                              variable defs by absence of `=`)
+//   * Pilot extensions      : `# @@assert ...`, `# @@extract ...`,
+//                             `# @@group ...`, `# @@depends ...`,
+//                             `# @@disabled`, `# @@mode app|dev`,
+//                             `# @@dev_auth <scope>`, `# @@auto_run <duration>`,
+//                             `# @@compare`, `# @@step <name>`,
+//                             `# @@diff <a> <b>`, `### @@setup|@@test|@@teardown Title`
+//   * Legacy (still accepted): `# @assert ...`, `### @setup Title`,
+//                              `@variables` block with bare `name = value`
+//
+// All directive matching goes through these helpers so legacy and new forms
+// are equivalent at the AST level.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Strip a leading line comment marker (`#` or `//`) and surrounding whitespace,
+/// returning the inner content. Returns `None` if `line` is not a comment line.
+fn strip_comment_prefix(line: &str) -> Option<&str> {
+    let t = line.trim_start();
+    if let Some(rest) = t.strip_prefix("//") {
+        Some(rest.trim_start())
+    } else {
+        t.strip_prefix('#').map(|r| r.trim_start())
+    }
+}
+
+/// Match a Pilot directive on a comment line (e.g. `# @@assert ...` or the
+/// legacy `# @assert ...`). Accepts both `#` and `//` comment markers and both
+/// `@@name` (new) and `@name` (legacy) prefixes.
+///
+/// Returns the trimmed value following the directive keyword (or `Some("")`
+/// for valueless directives like `@@disabled`). Returns `None` if the line
+/// is not a directive matching `name`.
+fn match_directive<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let after_comment = strip_comment_prefix(line)?;
+    // Accept @@name (new) or @name (legacy)
+    let after_at = after_comment
+        .strip_prefix("@@")
+        .or_else(|| after_comment.strip_prefix('@'))?;
+    let rest = after_at.strip_prefix(name)?;
+    if rest.is_empty() {
+        Some("")
+    } else if rest.starts_with(|c: char| c.is_whitespace()) {
+        Some(rest.trim())
+    } else {
+        // e.g. "extract" should not match "ext"
+        None
+    }
+}
+
+/// Match a bare REST Client directive like `@name foo` or `@description foo`
+/// (no leading comment marker, no `=` sign). Returns the trimmed value, or
+/// `None` if the line is not a bare directive matching `name`.
+///
+/// IMPORTANT: a line of form `@x = value` is a variable assignment, NOT a
+/// directive — disambiguated by the presence of `=`.
+fn match_bare_directive<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let trimmed = line.trim();
+    let after_at = trimmed.strip_prefix('@')?;
+    // `@@foo` is a Pilot directive form, not a bare REST Client directive
+    if after_at.starts_with('@') {
+        return None;
+    }
+    let rest = after_at.strip_prefix(name)?;
+    if rest.is_empty() {
+        Some("")
+    } else if rest.starts_with(|c: char| c.is_whitespace()) {
+        let value = rest.trim();
+        // Reject if it's actually a var def like `@name = value`
+        if value.starts_with('=') {
+            return None;
+        }
+        Some(value)
+    } else {
+        None
+    }
+}
+
+/// Try to parse a line as a REST Client–style top-level variable definition:
+/// `@name = value`. Returns `Some((name, value))` on match.
+///
+/// The variable name must consist of `[A-Za-z0-9_.-]+`. Lines starting with
+/// `@@` are Pilot directives, not variable defs.
+fn parse_var_def(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim();
+    let after_at = trimmed.strip_prefix('@')?;
+    if after_at.starts_with('@') {
+        return None;
+    }
+    let (name, value) = after_at.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        return None;
+    }
+    Some((name.to_string(), value.trim().to_string()))
+}
+
+/// Returns true if the line is a request separator (`###` or `---`) at the
+/// start of the line. The separator must be `###`/`---` followed by either
+/// end-of-line or whitespace — `###Subheading` (no space) is body text, not
+/// a separator.
+fn is_separator_line(line: &str) -> bool {
+    let t = line.trim_start();
+    if let Some(rest) = t.strip_prefix("###") {
+        return rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace());
+    }
+    if let Some(rest) = t.strip_prefix("---") {
+        return rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace());
+    }
+    false
+}
+
+/// Strip the leading separator marker (`###` or `---`) from a line, returning
+/// the remaining text (which may include the block-type directive and title).
+fn strip_separator_prefix(line: &str) -> &str {
+    let t = line.trim_start();
+    if let Some(rest) = t.strip_prefix("###") {
+        rest
+    } else if let Some(rest) = t.strip_prefix("---") {
+        rest
+    } else {
+        line
+    }
+}
+
+/// Split a `.http` file into raw blocks using line-anchored separators.
+/// Unlike `content.split("###")`, this only splits on lines whose trimmed
+/// content starts with `###` (or equals `---`), so separators inside comments
+/// or bodies are not treated as block boundaries.
+///
+/// Each returned string includes the post-separator content of the FIRST line
+/// (so `### @@setup Title` becomes ` @@setup Title\n...`), matching the
+/// existing parser's expectation.
+fn split_into_raw_blocks(content: &str) -> Vec<String> {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in content.split('\n') {
+        if is_separator_line(line) {
+            if !current.is_empty() {
+                blocks.push(std::mem::take(&mut current));
+            }
+            current.push_str(strip_separator_prefix(line));
+            current.push('\n');
+        } else {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+    blocks
+}
+
 /// Parse enhanced .http content into a TestSuite.
 pub fn parse_test_suite(content: &str) -> TestSuite {
     let mut variables = Vec::new();
     let mut blocks = Vec::new();
     let mut auto_run: Option<String> = None;
-    let raw_blocks: Vec<&str> = content.split("###").collect();
+    let mut request_id_header: Option<String> = None;
+    let mut prompts: Vec<PromptVariable> = Vec::new();
+    let mut redact_body_rules: Vec<BodyRedactRule> = Vec::new();
+    let raw_blocks = split_into_raw_blocks(content);
 
     for raw_block in raw_blocks.iter() {
         let block = raw_block.trim();
@@ -108,51 +329,69 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
             continue;
         }
 
-        // Check if block contains @variables anywhere (not just first line)
-        // This handles files with comment headers before the @variables block
-        let has_variables = block
-            .lines()
-            .any(|l| l.trim().starts_with("@variables"));
+        // Legacy `@variables` block: a block whose first non-empty,
+        // non-comment line is `@variables` (with no `=`). Inside the block,
+        // `name = value` lines (with or without leading `@`) define variables.
+        let has_legacy_variables_block = block.lines().any(|l| {
+            let t = l.trim();
+            t == "@variables" || t.starts_with("@variables ")
+        });
 
-        if has_variables {
-            // Scan for file-level directives in this block (before/around @variables)
+        if has_legacy_variables_block {
+            // Scan for file-level directives (e.g. `# @@auto_run`) within this block
             for line in block.lines() {
-                let trimmed = line.trim();
-                if let Some(rest) = trimmed.strip_prefix("# @auto_run ") {
-                    let interval = rest.trim();
-                    if crate::duration::parse_duration_secs(interval).is_some() {
-                        auto_run = Some(interval.to_string());
-                    }
-                }
+                pick_file_directives(line, &mut auto_run, &mut request_id_header, &mut redact_body_rules, true);
+                pick_prompt_directive(line, &mut prompts);
             }
             parse_variables_block(block, &mut variables);
             continue;
         }
 
-        // Also check pure-comment header blocks (no @variables, no HTTP method)
-        // for file-level directives like # @auto_run
-        let is_header_block = auto_run.is_none()
-            && blocks.is_empty()
+        // A "header-only" block has no request line — only comments,
+        // top-level variable definitions, REST Client directives like
+        // `@name foo`, and file-level directives like `# @@auto_run`.
+        // We treat the block as header-only and harvest variables/directives
+        // without producing a TestBlock.
+        let is_true = blocks.is_empty()
             && block.lines().all(|l| {
                 let t = l.trim();
-                t.is_empty() || t.starts_with('#')
+                t.is_empty()
+                    || strip_comment_prefix(t).is_some()
+                    || parse_var_def(t).is_some()
+                    || match_bare_directive(t, "name").is_some()
+                    || match_bare_directive(t, "description").is_some()
+                    || match_bare_directive(t, "note").is_some()
+                    || match_bare_directive(t, "prompt").is_some()
             });
 
-        if is_header_block {
+        if is_true {
             for line in block.lines() {
-                let trimmed = line.trim();
-                if let Some(rest) = trimmed.strip_prefix("# @auto_run ") {
-                    let interval = rest.trim();
-                    if crate::duration::parse_duration_secs(interval).is_some() {
-                        auto_run = Some(interval.to_string());
-                    }
+                pick_file_directives(line, &mut auto_run, &mut request_id_header, &mut redact_body_rules, true);
+                pick_prompt_directive(line, &mut prompts);
+                if let Some((name, value)) = parse_var_def(line) {
+                    variables.push((name, value));
                 }
             }
-            // Don't skip — there may be no test blocks in this header
             continue;
         }
 
-        if let Some(test_block) = parse_test_block(block) {
+        // Real test block. Peel off any leading top-level `@var = value`
+        // lines (REST Client style) before handing off to parse_test_block.
+        let (peeled_vars, remainder) = peel_leading_var_defs(block);
+        for (name, value) in peeled_vars {
+            variables.push((name, value));
+        }
+
+        // Also scan for file-level directives anywhere in the block
+        // (e.g. `# @@auto_run` placed in a header comment block alongside a
+        // request — uncommon, but supported). Pass `false` so block-scoped
+        // directives (like `# @@request-id`) don't leak to file level.
+        for line in remainder.lines() {
+            pick_file_directives(line, &mut auto_run, &mut request_id_header, &mut redact_body_rules, false);
+            pick_prompt_directive(line, &mut prompts);
+        }
+
+        if let Some(test_block) = parse_test_block(&remainder) {
             blocks.push(test_block);
         }
     }
@@ -161,7 +400,196 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
         variables,
         blocks,
         auto_run,
+        prompts,
+        request_id_header,
+        redact_body_rules,
     }
+}
+
+/// Peel REST Client–style `@var = value` lines from the top of a block,
+/// returning the harvested vars and the remainder of the block (with those
+/// leading lines removed). Comment lines and blank lines are preserved in
+/// the remainder.
+fn peel_leading_var_defs(block: &str) -> (Vec<(String, String)>, String) {
+    let mut vars = Vec::new();
+    let mut remainder = String::new();
+    let mut still_peeling = true;
+
+    for line in block.lines() {
+        if still_peeling {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                // Blank lines are kept in the remainder so request body
+                // boundaries are preserved.
+                remainder.push_str(line);
+                remainder.push('\n');
+                continue;
+            }
+            if let Some((name, value)) = parse_var_def(line) {
+                vars.push((name, value));
+                continue;
+            }
+            still_peeling = false;
+        }
+        remainder.push_str(line);
+        remainder.push('\n');
+    }
+
+    (vars, remainder)
+}
+
+/// Default header name used when `# @@request-id` has no argument.
+pub const DEFAULT_REQUEST_ID_HEADER: &str = "X-Request-Id";
+
+/// Classify the value of a `# @@request-id` directive. Returns `Some(Disabled)`
+/// for off/none/false, `Some(Header(name))` for a header name (defaults to
+/// [`DEFAULT_REQUEST_ID_HEADER`] when the value is empty), or `None` if the
+/// value is something invalid we should skip silently.
+pub enum RequestIdDirective {
+    Header(String),
+    Disabled,
+}
+
+pub fn parse_request_id_value(raw: &str) -> RequestIdDirective {
+    let t = raw.trim();
+    if t.is_empty() {
+        return RequestIdDirective::Header(DEFAULT_REQUEST_ID_HEADER.to_string());
+    }
+    let low = t.to_ascii_lowercase();
+    if matches!(low.as_str(), "off" | "none" | "false" | "no" | "disabled") {
+        return RequestIdDirective::Disabled;
+    }
+    // Take first whitespace-separated token as header name; ignore trailing.
+    let header = t.split_whitespace().next().unwrap_or(DEFAULT_REQUEST_ID_HEADER);
+    RequestIdDirective::Header(header.to_string())
+}
+
+/// Resolve the effective request-id header name for `block` given `suite`'s
+/// file-level default. Returns `None` when auto-injection should be skipped.
+pub fn effective_request_id_header(suite: &TestSuite, block: &TestBlock) -> Option<String> {
+    if block.request_id_disabled {
+        return None;
+    }
+    if let Some(h) = &block.request_id_header {
+        return Some(h.clone());
+    }
+    suite.request_id_header.clone()
+}
+
+/// Parse the value following `@@redact body` into a list of redaction rules.
+///
+/// Accepts two forms:
+///   * `body $.path1,$.path2` — comma-separated JSONPath expressions
+///   * `body /regex-pattern/` — a single slash-delimited regex
+///
+/// Returns an empty `Vec` if the value does not start with the `body` keyword
+/// or yields no rules. The leading `body` keyword is required (a future
+/// extension may add other targets such as `headers`).
+pub fn parse_redact_body_directive(value: &str) -> Vec<BodyRedactRule> {
+    let v = value.trim();
+    let rest = match v.strip_prefix("body") {
+        Some(r) if r.is_empty() => "",
+        Some(r) if r.starts_with(|c: char| c.is_whitespace()) => r.trim(),
+        _ => return Vec::new(),
+    };
+    if rest.is_empty() {
+        return Vec::new();
+    }
+    if let Some(inner) = rest.strip_prefix('/') {
+        if let Some(pat) = inner.strip_suffix('/') {
+            if !pat.is_empty() {
+                return vec![BodyRedactRule::Regex(pat.to_string())];
+            }
+            return Vec::new();
+        }
+    }
+    rest.split(',')
+        .filter_map(parse_body_redact_pattern)
+        .collect()
+}
+
+/// Parse a single body-redaction pattern string (one entry from a comma-
+/// separated directive list, or one entry from the global
+/// `SessionsConfig.body_redaction_paths` config). Recognized forms:
+///   * `$.json.path`  → `BodyRedactRule::JsonPath`
+///   * `/regex/`      → `BodyRedactRule::Regex`
+///
+/// Whitespace around the pattern is trimmed. Empty / unrecognized inputs
+/// return `None`.
+pub fn parse_body_redact_pattern(s: &str) -> Option<BodyRedactRule> {
+    let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(inner) = t.strip_prefix('/') {
+        if let Some(pat) = inner.strip_suffix('/') {
+            if pat.is_empty() {
+                return None;
+            }
+            return Some(BodyRedactRule::Regex(pat.to_string()));
+        }
+        return None;
+    }
+    Some(BodyRedactRule::JsonPath(t.to_string()))
+}
+
+/// Recognize file-level directives like `# @@auto_run 15m` (also legacy
+/// `# @auto_run`). Updates the provided slots.
+///
+/// `in_true` should be `true` when scanning a header-only block (pure
+/// comments / variable defs / REST Client bare directives at the top of the
+/// file). When `false`, we're scanning inside/alongside a real request block
+/// and we do NOT pick up directives that have block-scoped semantics
+/// (e.g. `request-id`) — those are handled by `parse_test_block`.
+fn pick_file_directives(
+    line: &str,
+    auto_run: &mut Option<String>,
+    request_id_header: &mut Option<String>,
+    redact_body_rules: &mut Vec<BodyRedactRule>,
+    in_true: bool,
+) {
+    if let Some(rest) = match_directive(line, "auto_run") {
+        let interval = rest.trim();
+        if crate::duration::parse_duration_secs(interval).is_some() {
+            *auto_run = Some(interval.to_string());
+        }
+    }
+    if in_true {
+        if let Some(rest) = match_directive(line, "redact") {
+            redact_body_rules.extend(parse_redact_body_directive(rest));
+        }
+        if let Some(rest) = match_directive(line, "request-id")
+            .or_else(|| match_directive(line, "request_id"))
+        {
+            match parse_request_id_value(rest) {
+                RequestIdDirective::Header(name) => *request_id_header = Some(name),
+                // File-level "off" means "do not enable". Leave as None.
+                RequestIdDirective::Disabled => *request_id_header = None,
+            }
+        }
+    }
+}
+
+/// Recognize a `@prompt VAR description` REST Client–style directive and
+/// append it to `prompts`. Duplicates (same name) are de-duplicated; the
+/// first-seen description wins. Skips blank var names.
+fn pick_prompt_directive(line: &str, prompts: &mut Vec<PromptVariable>) {
+    let Some(rest) = match_bare_directive(line, "prompt") else {
+        return;
+    };
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let name = match parts.next() {
+        Some(n) => n.trim().to_string(),
+        None => return,
+    };
+    if name.is_empty() {
+        return;
+    }
+    if prompts.iter().any(|p| p.name == name) {
+        return;
+    }
+    let description = parts.next().unwrap_or("").trim().to_string();
+    prompts.push(PromptVariable { name, description });
 }
 
 /// Returns the 0-based starting line number of each runnable block in the same
@@ -169,15 +597,12 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
 /// skips (@variables block, file-level comment-only headers) are excluded, so
 /// the returned indices map 1:1 to `TestSuite.blocks`.
 ///
-/// A block "starts" on the line where its `###` separator sits (or line 0 if
-/// the file begins with a block without a leading `###`).
+/// A block "starts" on the line where its `###`/`---` separator sits (or line 0
+/// if the file begins with a block without a leading separator).
 pub fn block_start_lines(content: &str) -> Vec<usize> {
     let mut starts = Vec::new();
     let mut seen_any_runnable = false;
 
-    // Walk lines, splitting at lines that start with "###" (possibly with
-    // trailing text — matching the split("###") behavior of parse_test_suite).
-    // We buffer each raw block along with the line number where it started.
     let mut current_start: usize = 0;
     let mut current_lines: Vec<&str> = Vec::new();
     let lines: Vec<&str> = content.split('\n').collect();
@@ -191,32 +616,38 @@ pub fn block_start_lines(content: &str) -> Vec<usize> {
         if block.is_empty() {
             return;
         }
-        let has_variables = block
-            .lines()
-            .any(|l| l.trim().starts_with("@variables"));
+        let has_variables = block.lines().any(|l| {
+            let t = l.trim();
+            t == "@variables" || t.starts_with("@variables ")
+        });
         if has_variables {
             return;
         }
+        // Header-only block: comments + bare directives + var defs only
         let is_header_block = !*seen_any_runnable
             && block.lines().all(|l| {
                 let t = l.trim();
-                t.is_empty() || t.starts_with('#')
+                t.is_empty()
+                    || strip_comment_prefix(t).is_some()
+                    || parse_var_def(t).is_some()
+                    || match_bare_directive(t, "name").is_some()
+                    || match_bare_directive(t, "description").is_some()
+                    || match_bare_directive(t, "note").is_some()
+                    || match_bare_directive(t, "prompt").is_some()
             });
         if is_header_block {
             return;
         }
         // Only record if parse_test_block would actually produce a block.
-        if parse_test_block(block).is_some() {
+        let (_, remainder) = peel_leading_var_defs(block);
+        if parse_test_block(&remainder).is_some() {
             starts.push(current_start);
             *seen_any_runnable = true;
         }
     };
 
     for (idx, line) in lines.iter().enumerate() {
-        // `split("###")` in parse_test_suite splits on ANY occurrence of "###",
-        // including mid-line. In practice block separators are always on their
-        // own line, so we split on lines whose trimmed content starts with "###".
-        if line.trim_start().starts_with("###") {
+        if is_separator_line(line) {
             flush(
                 current_start,
                 &current_lines,
@@ -225,11 +656,9 @@ pub fn block_start_lines(content: &str) -> Vec<usize> {
             );
             current_lines.clear();
             current_start = idx;
-            // Include everything after the "###" marker on this line as part of
-            // the new block's first line (mirrors split("###") behavior).
-            let trimmed_start = line.trim_start();
-            let after = trimmed_start.trim_start_matches('#');
-            current_lines.push(after);
+            // Include everything after the separator on this line as the
+            // first line of the new block.
+            current_lines.push(strip_separator_prefix(line));
         } else {
             current_lines.push(line);
         }
@@ -249,16 +678,25 @@ fn parse_variables_block(block: &str, variables: &mut Vec<(String, String)>) {
     for line in block.lines() {
         let trimmed = line.trim();
         if !past_header {
-            if trimmed.starts_with("@variables") {
+            if trimmed == "@variables" || trimmed.starts_with("@variables ") {
                 past_header = true;
             }
             continue;
         }
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        if trimmed.is_empty() || strip_comment_prefix(trimmed).is_some() {
             continue;
         }
-        // Support both "@name = value" and "name = value" formats
-        let var_line = trimmed.strip_prefix('@').unwrap_or(trimmed);
+        // Support both "@name = value" and "name = value" formats. Also accept
+        // arbitrary whitespace; do NOT match `@@name = value` (Pilot directive).
+        let var_line = if let Some(rest) = trimmed.strip_prefix("@@") {
+            // `@@x = ...` is not a variable
+            let _ = rest;
+            continue;
+        } else if let Some(rest) = trimmed.strip_prefix('@') {
+            rest
+        } else {
+            trimmed
+        };
         if let Some((name, value)) = var_line.split_once('=') {
             let name = name.trim();
             let value = value.trim();
@@ -278,6 +716,9 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
     let mut dev_auth: Option<String> = None;
     let mut group: Option<String> = None;
     let mut depends = Vec::new();
+    let mut block_request_id_header: Option<String> = None;
+    let mut block_request_id_disabled = false;
+    let mut block_redact_body_rules: Vec<BodyRedactRule> = Vec::new();
     let mut is_compare = false;
     let mut diff_directive: Option<DiffDirective> = None;
     // Block-level assertions (used for $diff.* in compare blocks, or normal assertions)
@@ -300,70 +741,108 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
     for line in block.lines() {
         let trimmed = line.trim();
 
-        // First non-empty line: check for block type annotation
+        // First non-empty line: check for block type annotation.
+        // Accept both `@@setup`/`@@test`/`@@teardown` (new) and `@setup`/etc.
+        // (legacy). The line may have a title after the type keyword.
         if first_meaningful && !trimmed.is_empty() {
             first_meaningful = false;
 
-            if let Some(rest) = trimmed.strip_prefix("@setup") {
-                block_type = "setup".to_string();
-                block_name = rest.trim().to_string();
-                continue;
-            }
-            if let Some(rest) = trimmed.strip_prefix("@test") {
-                block_type = "test".to_string();
-                block_name = rest.trim().to_string();
-                continue;
-            }
-            if let Some(rest) = trimmed.strip_prefix("@teardown") {
-                block_type = "teardown".to_string();
-                block_name = rest.trim().to_string();
-                continue;
+            // Strip leading `@@` (new) or `@` (legacy) before matching keyword.
+            let after_at = trimmed
+                .strip_prefix("@@")
+                .or_else(|| trimmed.strip_prefix('@'));
+            if let Some(rest) = after_at {
+                let (kw, title) = match rest.find(|c: char| c.is_whitespace()) {
+                    Some(idx) => (&rest[..idx], rest[idx..].trim()),
+                    None => (rest, ""),
+                };
+                let matched = match kw {
+                    "setup" => {
+                        block_type = "setup".to_string();
+                        true
+                    }
+                    "test" => {
+                        block_type = "test".to_string();
+                        true
+                    }
+                    "teardown" => {
+                        block_type = "teardown".to_string();
+                        true
+                    }
+                    _ => false,
+                };
+                if matched {
+                    block_name = title.to_string();
+                    continue;
+                }
             }
         }
 
-        // Directive comments
-        if let Some(rest) = trimmed.strip_prefix("# @description ") {
-            description = rest.trim().to_string();
+        // ── Pilot directives (accept both `# @@x` and legacy `# @x`) ──
+        if let Some(rest) = match_directive(line, "description") {
+            description = rest.to_string();
             continue;
         }
-        if trimmed == "# @disabled" {
+        if let Some(rest) = match_directive(line, "disabled") {
+            // `@@disabled` is valueless — accept any (or empty) value
+            let _ = rest;
             disabled = true;
             continue;
         }
-        if trimmed == "# @compare" {
+        if let Some(rest) = match_directive(line, "compare") {
+            let _ = rest;
             is_compare = true;
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("# @mode ") {
-            let m = rest.trim().to_lowercase();
+        if let Some(rest) = match_directive(line, "mode") {
+            let m = rest.to_lowercase();
             if m == "app" || m == "dev" {
                 mode = Some(m);
             }
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("# @dev_auth ") {
-            let scope = rest.trim().to_string();
+        if let Some(rest) = match_directive(line, "dev_auth") {
+            let scope = rest.to_string();
             if !scope.is_empty() {
                 dev_auth = Some(scope);
             }
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("# @group ") {
-            let g = rest.trim().to_string();
+        if let Some(rest) = match_directive(line, "group") {
+            let g = rest.to_string();
             if !g.is_empty() {
                 group = Some(g);
             }
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("# @depends ") {
-            let dep = rest.trim().to_string();
+        if let Some(rest) = match_directive(line, "depends") {
+            let dep = rest.to_string();
             if !dep.is_empty() {
                 depends.push(dep);
             }
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("# @diff ") {
-            let parts: Vec<&str> = rest.trim().split_whitespace().collect();
+        if let Some(rest) = match_directive(line, "request-id")
+            .or_else(|| match_directive(line, "request_id"))
+        {
+            match parse_request_id_value(rest) {
+                RequestIdDirective::Header(name) => {
+                    block_request_id_header = Some(name);
+                    block_request_id_disabled = false;
+                }
+                RequestIdDirective::Disabled => {
+                    block_request_id_header = None;
+                    block_request_id_disabled = true;
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = match_directive(line, "redact") {
+            block_redact_body_rules.extend(parse_redact_body_directive(rest));
+            continue;
+        }
+        if let Some(rest) = match_directive(line, "diff") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
             if parts.len() >= 2 {
                 diff_directive = Some(DiffDirective {
                     step_a: parts[0].to_string(),
@@ -372,8 +851,8 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
             }
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("# @step ") {
-            let step_name = rest.trim().to_string();
+        if let Some(rest) = match_directive(line, "step") {
+            let step_name = rest.to_string();
             if !step_name.is_empty() {
                 if !seen_step_names.insert(step_name.clone()) {
                     errors.push(format!("duplicate step name: '{}'", step_name));
@@ -396,8 +875,8 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
             }
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("# @assert ") {
-            if let Some(assertion) = parse_assertion_directive(rest.trim()) {
+        if let Some(rest) = match_directive(line, "assert") {
+            if let Some(assertion) = parse_assertion_directive(rest) {
                 if current_step_name.is_some() && !assertion.left.starts_with("$diff.") {
                     step_assertions.push(assertion);
                 } else {
@@ -406,8 +885,8 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
             }
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("# @extract ") {
-            if let Some(extract) = parse_extract_directive(rest.trim()) {
+        if let Some(rest) = match_directive(line, "extract") {
+            if let Some(extract) = parse_extract_directive(rest) {
                 if current_step_name.is_some() {
                     step_extracts.push(extract);
                 } else {
@@ -416,12 +895,43 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
             }
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("# @name ") {
+        if let Some(rest) = match_directive(line, "name") {
             if current_step_name.is_some() {
-                step_request_name = Some(rest.trim().to_string());
+                step_request_name = Some(rest.to_string());
             } else {
-                request_name = Some(rest.trim().to_string());
+                request_name = Some(rest.to_string());
             }
+            continue;
+        }
+
+        // ── REST Client–style bare directives ──
+        // `@name foo`, `@description foo`, `@note foo`, `@prompt VAR description`
+        if let Some(rest) = match_bare_directive(line, "name") {
+            if !rest.is_empty() {
+                if current_step_name.is_some() {
+                    step_request_name = Some(rest.to_string());
+                } else {
+                    request_name = Some(rest.to_string());
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = match_bare_directive(line, "description") {
+            if !rest.is_empty() && description.is_empty() {
+                description = rest.to_string();
+            }
+            continue;
+        }
+        if let Some(rest) = match_bare_directive(line, "note") {
+            if !rest.is_empty() && description.is_empty() {
+                description = rest.to_string();
+            }
+            continue;
+        }
+        if let Some(_rest) = match_bare_directive(line, "prompt") {
+            // `@prompt` is parsed and accepted (REST Client compat).
+            // Runtime UI handling lives in the desktop/TUI layer (Phase B).
+            // For now we silently consume it so it does not appear in body.
             continue;
         }
 
@@ -501,6 +1011,9 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
         steps,
         diff: diff_directive,
         errors,
+        request_id_header: block_request_id_header,
+        request_id_disabled: block_request_id_disabled,
+        redact_body_rules: block_redact_body_rules,
     })
 }
 
@@ -537,22 +1050,38 @@ fn parse_extract_directive(text: &str) -> Option<Extract> {
 }
 
 /// Generate .http file content from a TestSuite.
+///
+/// Writes the canonical NEW syntax:
+///   * Top-level `@name = value` for variables (REST Client native)
+///   * `### @@type Title` for block separators
+///   * `# @@directive value` for Pilot extensions
+///
+/// Legacy syntax (`@variables` block, `# @directive`, `### @type Title`)
+/// is still accepted by the parser but is never emitted by the generator.
 pub fn generate_http_content(suite: &TestSuite) -> String {
     let mut output = String::new();
 
     // File-level auto_run directive
     if let Some(ref interval) = suite.auto_run {
-        output.push_str(&format!("# @auto_run {}\n", interval));
+        output.push_str(&format!("# @@auto_run {}\n", interval));
     }
 
-    // Variables block
+    // File-level request-id directive
+    if let Some(ref header) = suite.request_id_header {
+        if header == DEFAULT_REQUEST_ID_HEADER {
+            output.push_str("# @@request-id\n");
+        } else {
+            output.push_str(&format!("# @@request-id {}\n", header));
+        }
+    }
+
+    // Variables — REST Client style: top-level `@name = value`, no @variables block
     if !suite.variables.is_empty() {
         if !output.is_empty() {
             output.push('\n');
         }
-        output.push_str("@variables\n");
         for (name, value) in &suite.variables {
-            output.push_str(&format!("{} = {}\n", name, value));
+            output.push_str(&format!("@{} = {}\n", name, value));
         }
     }
 
@@ -566,53 +1095,64 @@ pub fn generate_http_content(suite: &TestSuite) -> String {
         if block.block_type == "request" {
             output.push_str("###\n");
             if !block.name.is_empty() {
-                output.push_str(&format!("# @name {}\n", block.name));
+                output.push_str(&format!("# @@name {}\n", block.name));
             }
         } else if block.name.is_empty() {
-            output.push_str(&format!("### @{}\n", block.block_type));
+            output.push_str(&format!("### @@{}\n", block.block_type));
         } else {
-            output.push_str(&format!("### @{} {}\n", block.block_type, block.name));
+            output.push_str(&format!("### @@{} {}\n", block.block_type, block.name));
         }
 
         // Description directive
         if !block.description.is_empty() {
-            output.push_str(&format!("# @description {}\n", block.description));
+            output.push_str(&format!("# @@description {}\n", block.description));
         }
 
         // Disabled directive
         if block.disabled {
-            output.push_str("# @disabled\n");
+            output.push_str("# @@disabled\n");
         }
 
         // Mode directive
         if let Some(ref m) = block.mode {
-            output.push_str(&format!("# @mode {}\n", m));
+            output.push_str(&format!("# @@mode {}\n", m));
         }
 
         // Dev auth scope directive
         if let Some(ref scope) = block.dev_auth {
-            output.push_str(&format!("# @dev_auth {}\n", scope));
+            output.push_str(&format!("# @@dev_auth {}\n", scope));
         }
 
         // Group directive
         if let Some(ref g) = block.group {
-            output.push_str(&format!("# @group {}\n", g));
+            output.push_str(&format!("# @@group {}\n", g));
         }
 
         // Depends directives
         for dep in &block.depends {
-            output.push_str(&format!("# @depends {}\n", dep));
+            output.push_str(&format!("# @@depends {}\n", dep));
+        }
+
+        // Block-level request-id override
+        if block.request_id_disabled {
+            output.push_str("# @@request-id off\n");
+        } else if let Some(ref h) = block.request_id_header {
+            if h == DEFAULT_REQUEST_ID_HEADER {
+                output.push_str("# @@request-id\n");
+            } else {
+                output.push_str(&format!("# @@request-id {}\n", h));
+            }
         }
 
         // Compare directive
         if block.compare {
-            output.push_str("# @compare\n");
+            output.push_str("# @@compare\n");
         }
 
         if block.compare && !block.steps.is_empty() {
             // Render each step
             for step in &block.steps {
-                output.push_str(&format!("# @step {}\n", step.name));
+                output.push_str(&format!("# @@step {}\n", step.name));
                 output.push_str(&format!("{} {}\n", step.request.method, step.request.url));
                 for (key, value) in &step.request.headers {
                     output.push_str(&format!("{}: {}\n", key, value));
@@ -627,13 +1167,13 @@ pub fn generate_http_content(suite: &TestSuite) -> String {
                 }
                 for extract in &step.extracts {
                     output.push_str(&format!(
-                        "# @extract {} = {}\n",
+                        "# @@extract {} = {}\n",
                         extract.variable_name, extract.source_path
                     ));
                 }
                 for assertion in &step.assertions {
                     output.push_str(&format!(
-                        "# @assert {} {} {}\n",
+                        "# @@assert {} {} {}\n",
                         assertion.left, assertion.operator, assertion.right
                     ));
                 }
@@ -641,13 +1181,13 @@ pub fn generate_http_content(suite: &TestSuite) -> String {
 
             // Diff directive
             if let Some(ref diff) = block.diff {
-                output.push_str(&format!("# @diff {} {}\n", diff.step_a, diff.step_b));
+                output.push_str(&format!("# @@diff {} {}\n", diff.step_a, diff.step_b));
             }
 
             // Block-level assertions (comparison assertions)
             for assertion in &block.assertions {
                 output.push_str(&format!(
-                    "# @assert {} {} {}\n",
+                    "# @@assert {} {} {}\n",
                     assertion.left, assertion.operator, assertion.right
                 ));
             }
@@ -676,7 +1216,7 @@ pub fn generate_http_content(suite: &TestSuite) -> String {
             // Extract directives
             for extract in &block.extracts {
                 output.push_str(&format!(
-                    "# @extract {} = {}\n",
+                    "# @@extract {} = {}\n",
                     extract.variable_name, extract.source_path
                 ));
             }
@@ -684,7 +1224,7 @@ pub fn generate_http_content(suite: &TestSuite) -> String {
             // Assertion directives
             for assertion in &block.assertions {
                 output.push_str(&format!(
-                    "# @assert {} {} {}\n",
+                    "# @@assert {} {} {}\n",
                     assertion.left, assertion.operator, assertion.right
                 ));
             }
@@ -1061,6 +1601,64 @@ POST https://example.com/login";
         assert_eq!(suite.blocks[0].name, "Login");
     }
 
+    // ── @prompt directive parsing ───────────────────────────────────
+    #[test]
+    fn test_prompt_directive_basic() {
+        let input = "\
+@prompt api_key Your API key
+@prompt region Azure region
+
+### @@test List
+GET https://example.com/\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.prompts.len(), 2);
+        assert_eq!(suite.prompts[0].name, "api_key");
+        assert_eq!(suite.prompts[0].description, "Your API key");
+        assert_eq!(suite.prompts[1].name, "region");
+        assert_eq!(suite.prompts[1].description, "Azure region");
+    }
+
+    #[test]
+    fn test_prompt_directive_no_description() {
+        let input = "\
+@prompt token
+
+### @@test X
+GET https://example.com/\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.prompts.len(), 1);
+        assert_eq!(suite.prompts[0].name, "token");
+        assert_eq!(suite.prompts[0].description, "");
+    }
+
+    #[test]
+    fn test_prompt_directive_dedup() {
+        let input = "\
+@prompt token first
+@prompt token second
+
+### @@test X
+GET https://example.com/\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.prompts.len(), 1);
+        assert_eq!(suite.prompts[0].description, "first");
+    }
+
+    #[test]
+    fn test_prompt_in_legacy_variables_block() {
+        let input = "\
+@variables
+base_url = https://example.com
+@prompt token Auth token
+
+### @@test X
+GET {{base_url}}\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.prompts.len(), 1);
+        assert_eq!(suite.prompts[0].name, "token");
+        assert_eq!(suite.variables, vec![("base_url".to_string(), "https://example.com".to_string())]);
+    }
+
     // ── generate_http_content: empty suite ──────────────────────────
     #[test]
     fn test_generate_empty_suite() {
@@ -1085,9 +1683,8 @@ POST https://example.com/login";
             ..Default::default()
         };
         let output = generate_http_content(&suite);
-        assert!(output.contains("@variables"));
-        assert!(output.contains("baseUrl = https://api.example.com"));
-        assert!(output.contains("token = abc123"));
+        assert!(output.contains("@baseUrl = https://api.example.com"));
+        assert!(output.contains("@token = abc123"));
     }
 
     // ── generate_http_content: simple GET ───────────────────────────
@@ -1117,13 +1714,16 @@ POST https://example.com/login";
                 steps: Vec::new(),
                 diff: None,
             errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
             }],
             ..Default::default()
         };
         let output = generate_http_content(&suite);
         assert!(output.contains("###"));
         assert!(output.contains("GET https://example.com/api"));
-        assert!(!output.contains("# @name"));
+        assert!(!output.contains("# @@name"));
     }
 
     // ── generate_http_content: POST with headers and body ───────────
@@ -1153,11 +1753,14 @@ POST https://example.com/login";
                 steps: Vec::new(),
                 diff: None,
             errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
             }],
             ..Default::default()
         };
         let output = generate_http_content(&suite);
-        assert!(output.contains("# @name Create User"));
+        assert!(output.contains("# @@name Create User"));
         assert!(output.contains("POST https://example.com/users"));
         assert!(output.contains("Content-Type: application/json"));
         assert!(output.contains("{\"name\":\"test\"}"));
@@ -1204,14 +1807,17 @@ POST https://example.com/login";
                 steps: Vec::new(),
                 diff: None,
             errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
             }],
             ..Default::default()
         };
         let output = generate_http_content(&suite);
-        assert!(output.contains("### @test Check Users"));
-        assert!(output.contains("# @extract userId = response.body.0.id"));
-        assert!(output.contains("# @assert response.status == 200"));
-        assert!(output.contains("# @assert response.body.length > 0"));
+        assert!(output.contains("### @@test Check Users"));
+        assert!(output.contains("# @@extract userId = response.body.0.id"));
+        assert!(output.contains("# @@assert response.status == 200"));
+        assert!(output.contains("# @@assert response.body.length > 0"));
     }
 
     // ── generate_http_content: full suite ───────────────────────────
@@ -1252,6 +1858,9 @@ POST https://example.com/login";
                     steps: Vec::new(),
                     diff: None,
                 errors: Vec::new(),
+                request_id_header: None,
+                request_id_disabled: false,
+                redact_body_rules: Vec::new(),
                 },
                 TestBlock {
                     block_type: "test".into(),
@@ -1286,6 +1895,9 @@ POST https://example.com/login";
                     steps: Vec::new(),
                     diff: None,
                 errors: Vec::new(),
+                request_id_header: None,
+                request_id_disabled: false,
+                redact_body_rules: Vec::new(),
                 },
                 TestBlock {
                     block_type: "teardown".into(),
@@ -1309,17 +1921,19 @@ POST https://example.com/login";
                     steps: Vec::new(),
                     diff: None,
                     errors: Vec::new(),
+                    request_id_header: None,
+                    request_id_disabled: false,
+                    redact_body_rules: Vec::new(),
                 },
             ],
             ..Default::default()
         };
         let output = generate_http_content(&suite);
-        assert!(output.contains("@variables"));
-        assert!(output.contains("### @setup Login"));
-        assert!(output.contains("### @test List Users"));
-        assert!(output.contains("### @teardown Cleanup"));
-        assert!(output.contains("# @extract token = response.body.token"));
-        assert!(output.contains("# @assert response.status == 200"));
+        assert!(output.contains("### @@setup Login"));
+        assert!(output.contains("### @@test List Users"));
+        assert!(output.contains("### @@teardown Cleanup"));
+        assert!(output.contains("# @@extract token = response.body.token"));
+        assert!(output.contains("# @@assert response.status == 200"));
         assert!(output.contains("DELETE {{baseUrl}}/cleanup"));
     }
 
@@ -1361,6 +1975,9 @@ POST https://example.com/login";
                     steps: Vec::new(),
                     diff: None,
                 errors: Vec::new(),
+                request_id_header: None,
+                request_id_disabled: false,
+                redact_body_rules: Vec::new(),
                 },
                 TestBlock {
                     block_type: "test".into(),
@@ -1388,6 +2005,9 @@ POST https://example.com/login";
                     steps: Vec::new(),
                     diff: None,
                 errors: Vec::new(),
+                request_id_header: None,
+                request_id_disabled: false,
+                redact_body_rules: Vec::new(),
                 },
                 TestBlock {
                     block_type: "teardown".into(),
@@ -1411,6 +2031,9 @@ POST https://example.com/login";
                     steps: Vec::new(),
                     diff: None,
                     errors: Vec::new(),
+                    request_id_header: None,
+                    request_id_disabled: false,
+                    redact_body_rules: Vec::new(),
                 },
             ],
             ..Default::default()
@@ -1522,12 +2145,15 @@ POST https://example.com/login";
                 steps: Vec::new(),
                 diff: None,
             errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
             }],
             ..Default::default()
         };
         let content = generate_http_content(&suite);
-        assert!(content.contains("# @description Tests something"));
-        assert!(content.contains("# @disabled"));
+        assert!(content.contains("# @@description Tests something"));
+        assert!(content.contains("# @@disabled"));
     }
 
     #[test]
@@ -1537,8 +2163,8 @@ POST https://example.com/login";
         assert_eq!(suite.blocks[0].description, "Fetches the auth token");
         assert!(suite.blocks[0].disabled);
         let regenerated = generate_http_content(&suite);
-        assert!(regenerated.contains("# @description Fetches the auth token"));
-        assert!(regenerated.contains("# @disabled"));
+        assert!(regenerated.contains("# @@description Fetches the auth token"));
+        assert!(regenerated.contains("# @@disabled"));
     }
 
     #[test]
@@ -1596,13 +2222,16 @@ grant_type=client_credentials
                 steps: Vec::new(),
                 diff: None,
             errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
             }],
             ..Default::default()
         };
         let content = generate_http_content(&suite);
-        assert!(content.starts_with("@variables\n"), "Generated content should start with @variables");
-        assert!(content.contains("base_url = https://api.example.com"));
-        assert!(content.contains("api_key = sk-12345"));
+        assert!(content.starts_with("@base_url = https://api.example.com\n"), "Generated content should start with @var = value");
+        assert!(content.contains("@base_url = https://api.example.com"));
+        assert!(content.contains("@api_key = sk-12345"));
     }
 
     #[test]
@@ -1645,11 +2274,14 @@ grant_type=client_credentials
                 steps: Vec::new(),
                 diff: None,
             errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
             }],
             ..Default::default()
         };
         let content = generate_http_content(&suite);
-        assert!(content.contains("# @depends Update User"));
+        assert!(content.contains("# @@depends Update User"));
     }
 
     #[test]
@@ -1658,8 +2290,8 @@ grant_type=client_credentials
         let suite = parse_test_suite(input);
         assert_eq!(suite.blocks[0].depends.len(), 2);
         let regenerated = generate_http_content(&suite);
-        assert!(regenerated.contains("# @depends Update User"));
-        assert!(regenerated.contains("# @depends Create User"));
+        assert!(regenerated.contains("# @@depends Update User"));
+        assert!(regenerated.contains("# @@depends Create User"));
     }
 
     #[test]
@@ -1703,12 +2335,15 @@ grant_type=client_credentials
                 steps: Vec::new(),
                 diff: None,
             errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
             }],
             ..Default::default()
         };
         let content = generate_http_content(&suite);
-        assert!(content.contains("# @group validation"));
-        assert!(content.contains("# @depends setup-data"));
+        assert!(content.contains("# @@group validation"));
+        assert!(content.contains("# @@depends setup-data"));
     }
 
     #[test]
@@ -1748,11 +2383,11 @@ GET https://api.example.com/report
         assert_eq!(suite.blocks[2].depends, vec!["validate"]);
 
         let regenerated = generate_http_content(&suite);
-        assert!(regenerated.contains("# @group create"));
-        assert!(regenerated.contains("# @group validate"));
-        assert!(regenerated.contains("# @group report"));
-        assert!(regenerated.contains("# @depends create"));
-        assert!(regenerated.contains("# @depends validate"));
+        assert!(regenerated.contains("# @@group create"));
+        assert!(regenerated.contains("# @@group validate"));
+        assert!(regenerated.contains("# @@group report"));
+        assert!(regenerated.contains("# @@depends create"));
+        assert!(regenerated.contains("# @@depends validate"));
     }
 
     #[test]
@@ -1952,11 +2587,14 @@ Authorization: Bearer {{token}}
                 steps: Vec::new(),
                 diff: None,
             errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
             }],
             ..Default::default()
         };
         let content = generate_http_content(&suite);
-        assert!(content.contains("# @mode app"));
+        assert!(content.contains("# @@mode app"));
     }
 
     #[test]
@@ -1965,7 +2603,7 @@ Authorization: Bearer {{token}}
         let suite = parse_test_suite(original);
         assert_eq!(suite.blocks[0].mode, Some("app".to_string()));
         let regenerated = generate_http_content(&suite);
-        assert!(regenerated.contains("# @mode app"));
+        assert!(regenerated.contains("# @@mode app"));
         let reparsed = parse_test_suite(&regenerated);
         assert_eq!(reparsed.blocks[0].mode, Some("app".to_string()));
     }
@@ -1984,7 +2622,7 @@ Authorization: Bearer {{token}}
         let suite = parse_test_suite(content);
         assert_eq!(suite.blocks[0].dev_auth, Some("https://prometheus.monitor.azure.com/.default".to_string()));
         let regenerated = generate_http_content(&suite);
-        assert!(regenerated.contains("# @dev_auth https://prometheus.monitor.azure.com/.default"));
+        assert!(regenerated.contains("# @@dev_auth https://prometheus.monitor.azure.com/.default"));
         let reparsed = parse_test_suite(&regenerated);
         assert_eq!(reparsed.blocks[0].dev_auth, Some("https://prometheus.monitor.azure.com/.default".to_string()));
     }
@@ -2132,12 +2770,12 @@ Authorization: Bearer {{token}}
         let suite = parse_test_suite(input);
         let generated = generate_http_content(&suite);
         // Verify key directives survive roundtrip
-        assert!(generated.contains("# @compare"));
-        assert!(generated.contains("# @step baseline"));
-        assert!(generated.contains("# @step candidate"));
-        assert!(generated.contains("# @diff baseline candidate"));
-        assert!(generated.contains("# @assert $diff.match == true"));
-        assert!(generated.contains("# @extract v1_id = $.id"));
+        assert!(generated.contains("# @@compare"));
+        assert!(generated.contains("# @@step baseline"));
+        assert!(generated.contains("# @@step candidate"));
+        assert!(generated.contains("# @@diff baseline candidate"));
+        assert!(generated.contains("# @@assert $diff.match == true"));
+        assert!(generated.contains("# @@extract v1_id = $.id"));
     }
 
     // ── Duplicate step names produce parse error ────────────────────
@@ -2493,7 +3131,7 @@ GET {{base_url}}/health
         assert_eq!(suite.auto_run, Some("15m".to_string()));
 
         let output = generate_http_content(&suite);
-        assert!(output.starts_with("# @auto_run 15m\n"));
+        assert!(output.starts_with("# @@auto_run 15m\n"));
 
         // Round-trip: re-parse should preserve auto_run
         let suite2 = parse_test_suite(&output);
@@ -2512,4 +3150,455 @@ GET http://x";
         let output = generate_http_content(&suite);
         assert!(!output.contains("@auto_run"));
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // `# @@request-id` directive
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_request_id_file_default_header() {
+        let input = "\
+# @@request-id
+
+### @test T
+GET http://x";
+        let suite = parse_test_suite(input);
+        assert_eq!(
+            suite.request_id_header.as_deref(),
+            Some(DEFAULT_REQUEST_ID_HEADER)
+        );
+    }
+
+    #[test]
+    fn parse_request_id_file_custom_header() {
+        let input = "\
+# @@request-id X-Correlation-ID
+
+### @test T
+GET http://x";
+        let suite = parse_test_suite(input);
+        assert_eq!(
+            suite.request_id_header.as_deref(),
+            Some("X-Correlation-ID")
+        );
+    }
+
+    #[test]
+    fn parse_request_id_legacy_single_at_and_underscore_alias() {
+        // legacy single-`@` + underscore-separated name alias
+        let input = "\
+# @request_id X-My-Id
+
+### @test T
+GET http://x";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.request_id_header.as_deref(), Some("X-My-Id"));
+    }
+
+    #[test]
+    fn parse_request_id_block_override() {
+        let input = "\
+# @@request-id X-Global
+
+### @test A
+GET http://x
+
+### @test B
+# @@request-id X-Local
+GET http://x
+
+### @test C
+# @@request-id off
+GET http://x";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.request_id_header.as_deref(), Some("X-Global"));
+        assert_eq!(suite.blocks[0].request_id_header, None);
+        assert!(!suite.blocks[0].request_id_disabled);
+        assert_eq!(
+            suite.blocks[1].request_id_header.as_deref(),
+            Some("X-Local")
+        );
+        assert!(suite.blocks[2].request_id_disabled);
+    }
+
+    #[test]
+    fn generate_request_id_round_trip() {
+        let input = "\
+# @@request-id X-Correlation-ID
+
+### @test A
+GET http://x
+
+### @test B
+# @@request-id off
+GET http://x";
+        let suite = parse_test_suite(input);
+        let output = generate_http_content(&suite);
+        assert!(output.contains("# @@request-id X-Correlation-ID\n"));
+        assert!(output.contains("# @@request-id off\n"));
+
+        let suite2 = parse_test_suite(&output);
+        assert_eq!(
+            suite2.request_id_header.as_deref(),
+            Some("X-Correlation-ID")
+        );
+        assert!(suite2.blocks[1].request_id_disabled);
+    }
+
+    #[test]
+    fn effective_request_id_header_resolution() {
+        let input = "\
+# @@request-id X-Global
+
+### @test A
+GET http://x
+
+### @test B
+# @@request-id X-Local
+GET http://x
+
+### @test C
+# @@request-id off
+GET http://x";
+        let suite = parse_test_suite(input);
+        assert_eq!(
+            effective_request_id_header(&suite, &suite.blocks[0]).as_deref(),
+            Some("X-Global")
+        );
+        assert_eq!(
+            effective_request_id_header(&suite, &suite.blocks[1]).as_deref(),
+            Some("X-Local")
+        );
+        assert_eq!(
+            effective_request_id_header(&suite, &suite.blocks[2]),
+            None
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // NEW SYNTAX (`# @@directive`, top-level `@var`, `### @@type`)
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_top_level_var_defs() {
+        let input = "\
+@base_url = https://api.example.com
+@token = abc123
+
+### @@test Get Users
+GET {{base_url}}/users
+";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.variables.len(), 2);
+        assert_eq!(suite.variables[0], ("base_url".into(), "https://api.example.com".into()));
+        assert_eq!(suite.variables[1], ("token".into(), "abc123".into()));
+        assert_eq!(suite.blocks.len(), 1);
+        assert_eq!(suite.blocks[0].block_type, "test");
+        assert_eq!(suite.blocks[0].name, "Get Users");
+    }
+
+    #[test]
+    fn parse_double_at_directives() {
+        let input = "\
+### @@test Get Users
+# @@description Fetch all users
+# @@group users
+# @@depends setup-token
+GET https://api.example.com/users
+
+# @@assert status == 200
+# @@extract user_count = $.length
+";
+        let suite = parse_test_suite(input);
+        let block = &suite.blocks[0];
+        assert_eq!(block.description, "Fetch all users");
+        assert_eq!(block.group.as_deref(), Some("users"));
+        assert_eq!(block.depends, vec!["setup-token"]);
+        assert_eq!(block.assertions.len(), 1);
+        assert_eq!(block.extracts[0].variable_name, "user_count");
+    }
+
+    #[test]
+    fn parse_mixed_legacy_and_new_directives() {
+        // A file mixing `# @x` and `# @@x` should parse cleanly.
+        let input = "\
+@host = https://api.example.com
+
+### @setup Login
+# @description Old-style legacy
+POST {{host}}/login
+
+# @assert status == 200
+
+### @@test Verify
+# @@description New-style
+GET {{host}}/me
+
+# @@assert status == 200
+";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.variables[0].0, "host");
+        assert_eq!(suite.blocks.len(), 2);
+        assert_eq!(suite.blocks[0].description, "Old-style legacy");
+        assert_eq!(suite.blocks[1].description, "New-style");
+    }
+
+    #[test]
+    fn parse_bare_rest_client_directives() {
+        // REST Client native: `@name`, `@description`, `@note` (bare, no `#`).
+        let input = "\
+### Get Users
+@name fetchUsers
+@description List all users from API
+GET https://api.example.com/users
+";
+        let suite = parse_test_suite(input);
+        let req = &suite.blocks[0].request;
+        assert_eq!(req.name.as_deref(), Some("fetchUsers"));
+        assert_eq!(suite.blocks[0].description, "List all users from API");
+    }
+
+    #[test]
+    fn bare_directive_disambiguates_from_var_def() {
+        // `@name = value` is a variable; `@name value` is a directive.
+        let input = "\
+@name = my-api-host
+
+### @@test First
+@name actuallyADirective
+GET https://api.example.com/x
+";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.variables[0], ("name".into(), "my-api-host".into()));
+        assert_eq!(
+            suite.blocks[0].request.name.as_deref(),
+            Some("actuallyADirective")
+        );
+    }
+
+    #[test]
+    fn parse_dash_separator() {
+        // REST Client also accepts `---` as a request separator.
+        let input = "\
+GET https://api.example.com/a
+---
+GET https://api.example.com/b
+";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.blocks.len(), 2);
+        assert_eq!(suite.blocks[0].request.url, "https://api.example.com/a");
+        assert_eq!(suite.blocks[1].request.url, "https://api.example.com/b");
+    }
+
+    #[test]
+    fn parse_double_slash_comments_for_directives() {
+        let input = "\
+### @@test x
+// @@description Slash-style comment directive
+// @@assert status == 200
+GET https://api.example.com/x
+";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.blocks[0].description, "Slash-style comment directive");
+        assert_eq!(suite.blocks[0].assertions.len(), 1);
+    }
+
+    #[test]
+    fn line_anchored_separator_does_not_split_inside_body() {
+        // A `###` inside a request body should NOT split the block.
+        let input = "\
+### @@test Posts a body containing hashes
+POST https://api.example.com/notes
+Content-Type: text/plain
+
+# Title
+###Subheading
+Body text
+";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.blocks.len(), 1);
+        let body = suite.blocks[0].request.body.as_deref().unwrap_or("");
+        assert!(body.contains("###Subheading"), "body should retain '###Subheading', got: {:?}", body);
+    }
+
+    #[test]
+    fn generator_writes_new_syntax() {
+        let input = "\
+@host = https://api.example.com
+
+### @setup Get Token
+# @description Legacy directive
+POST {{host}}/auth
+
+# @extract token = $.access_token
+# @assert status == 200
+";
+        let suite = parse_test_suite(input);
+        let regenerated = generate_http_content(&suite);
+        // New syntax: top-level @var, ### @@setup, # @@description, etc.
+        assert!(regenerated.contains("@host = https://api.example.com"));
+        assert!(regenerated.contains("### @@setup Get Token"));
+        assert!(regenerated.contains("# @@description Legacy directive"));
+        assert!(regenerated.contains("# @@extract token = $.access_token"));
+        assert!(regenerated.contains("# @@assert status == 200"));
+        // No legacy `@variables` block, no single-@ directives in output.
+        assert!(!regenerated.contains("@variables\n"));
+        assert!(!regenerated.contains("# @description"));
+        assert!(!regenerated.contains("# @assert"));
+    }
+
+    #[test]
+    fn full_roundtrip_new_syntax() {
+        let input = "\
+@host = https://api.example.com
+@token =
+
+### @@setup Get Token
+# @@description Fetch OAuth token
+POST {{host}}/auth
+Content-Type: application/json
+
+{\"client\":\"test\"}
+
+# @@extract token = $.access_token
+# @@assert status == 200
+
+### @@test Authenticated Get
+# @@group reads
+GET {{host}}/me
+Authorization: Bearer {{token}}
+
+# @@assert status == 200
+# @@assert $.id != null
+";
+        let s1 = parse_test_suite(input);
+        let regen = generate_http_content(&s1);
+        let s2 = parse_test_suite(&regen);
+        // Idempotent: round-trip the regenerated content.
+        assert_eq!(generate_http_content(&s2), regen);
+        assert_eq!(s1.blocks.len(), 2);
+        assert_eq!(s1.variables.len(), 2);
+    }
+
+    // ── @@redact body directive parsing ─────────────────────────────
+
+    #[test]
+    fn parses_file_level_redact_jsonpath_directive() {
+        let input = "\
+@host = https://api.example.com
+# @@redact body $.password,$.token
+
+### @@test Get
+GET {{host}}/me
+";
+        let suite = parse_test_suite(input);
+        assert_eq!(
+            suite.redact_body_rules,
+            vec![
+                BodyRedactRule::JsonPath("$.password".to_string()),
+                BodyRedactRule::JsonPath("$.token".to_string()),
+            ]
+        );
+        // Block-level rules unaffected
+        assert!(suite.blocks[0].redact_body_rules.is_empty());
+    }
+
+    #[test]
+    fn parses_block_level_redact_directive() {
+        let input = "\
+### @@test Login
+# @@redact body $.user.ssn,$.user.dob
+POST https://api.example.com/login
+";
+        let suite = parse_test_suite(input);
+        assert!(suite.redact_body_rules.is_empty());
+        assert_eq!(
+            suite.blocks[0].redact_body_rules,
+            vec![
+                BodyRedactRule::JsonPath("$.user.ssn".to_string()),
+                BodyRedactRule::JsonPath("$.user.dob".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_redact_regex_directive() {
+        let input = "\
+# @@redact body /Bearer\\s+[A-Za-z0-9._-]+/
+
+### @@test Call
+GET https://api.example.com/x
+# @@redact body /sk-[A-Za-z0-9]+/
+";
+        let suite = parse_test_suite(input);
+        assert_eq!(
+            suite.redact_body_rules,
+            vec![BodyRedactRule::Regex("Bearer\\s+[A-Za-z0-9._-]+".to_string())]
+        );
+        assert_eq!(
+            suite.blocks[0].redact_body_rules,
+            vec![BodyRedactRule::Regex("sk-[A-Za-z0-9]+".to_string())]
+        );
+    }
+
+    #[test]
+    fn multiple_redact_directives_accumulate() {
+        let input = "\
+# @@redact body $.password
+# @@redact body $.token,$.refresh_token
+# @@redact body /api_key=\\S+/
+
+### @@test Multi
+GET https://api.example.com/x
+# @@redact body $.local_secret
+# @@redact body /Bearer\\s+\\S+/
+";
+        let suite = parse_test_suite(input);
+        assert_eq!(
+            suite.redact_body_rules,
+            vec![
+                BodyRedactRule::JsonPath("$.password".to_string()),
+                BodyRedactRule::JsonPath("$.token".to_string()),
+                BodyRedactRule::JsonPath("$.refresh_token".to_string()),
+                BodyRedactRule::Regex("api_key=\\S+".to_string()),
+            ]
+        );
+        assert_eq!(
+            suite.blocks[0].redact_body_rules,
+            vec![
+                BodyRedactRule::JsonPath("$.local_secret".to_string()),
+                BodyRedactRule::Regex("Bearer\\s+\\S+".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn non_redact_at_directives_unchanged() {
+        let input = "\
+@host = https://api.example.com
+# @@auto_run 15m
+# @@request-id X-Correlation-ID
+
+### @@test Things
+# @@description Test description
+# @@group reads
+# @@depends seed-data
+GET {{host}}/items
+# @@assert status == 200
+# @@extract first_id = $.items[0].id
+";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.auto_run.as_deref(), Some("15m"));
+        assert_eq!(suite.request_id_header.as_deref(), Some("X-Correlation-ID"));
+        assert!(suite.redact_body_rules.is_empty());
+        let b = &suite.blocks[0];
+        assert_eq!(b.description, "Test description");
+        assert_eq!(b.group.as_deref(), Some("reads"));
+        assert_eq!(b.depends, vec!["seed-data".to_string()]);
+        assert_eq!(b.assertions.len(), 1);
+        assert_eq!(b.extracts.len(), 1);
+        assert!(b.redact_body_rules.is_empty());
+    }
 }
+
+

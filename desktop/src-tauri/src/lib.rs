@@ -1,8 +1,10 @@
 mod live_capture;
 pub mod perf;
+mod sessions_cmds;
 
 use request_pilot_core::{
-    azure_auth, env_file, history, http_client, http_parser, test_runner, url_trie, variables,
+    azure_auth, env_config, env_file, history, http_client, http_parser, test_runner, url_trie,
+    variables,
 };
 
 use history::HistoryStore;
@@ -284,6 +286,98 @@ fn read_env_file(path: String) -> Result<std::collections::HashMap<String, Strin
     env_file::read_env_from_path(&path)
 }
 
+// ─── Multi-env (.env file list) commands ──────────────────────────────────
+
+/// Returns the persisted env config (list of `.env` entries + active index).
+#[tauri::command]
+fn env_list() -> Result<env_config::EnvConfig, String> {
+    env_config::load()
+}
+
+/// Load the `.env` at `path`, derive a name (from `# @@name` directive or
+/// filename stem), add to the persisted list (dedupes), activate if first,
+/// and return the new config plus the resolved vars of the now-active entry.
+#[tauri::command]
+fn env_add(path: String) -> Result<EnvAddResult, String> {
+    let (directive_name, vars) = env_file::read_env_named_from_path(&path)?;
+    let name = directive_name
+        .or_else(|| filename_stem(&path))
+        .unwrap_or_else(|| "env".to_string());
+    let mut cfg = env_config::load()?;
+    cfg.add(env_config::EnvEntry {
+        path: path.clone(),
+        name,
+    });
+    env_config::save(&cfg)?;
+    let active_vars = resolve_active_vars(&cfg)?;
+    Ok(EnvAddResult {
+        config: cfg,
+        active_vars,
+        loaded_vars: vars.into_iter().collect(),
+    })
+}
+
+/// Remove the entry at `index` and return the updated config + resolved vars
+/// for whatever is active afterwards.
+#[tauri::command]
+fn env_remove(index: usize) -> Result<EnvListResult, String> {
+    let mut cfg = env_config::load()?;
+    cfg.remove(index);
+    env_config::save(&cfg)?;
+    let active_vars = resolve_active_vars(&cfg)?;
+    Ok(EnvListResult { config: cfg, active_vars })
+}
+
+/// Set (or clear with `null`) the active entry and return the resolved vars.
+#[tauri::command]
+fn env_set_active(index: Option<usize>) -> Result<EnvListResult, String> {
+    let mut cfg = env_config::load()?;
+    cfg.set_active(index);
+    env_config::save(&cfg)?;
+    let active_vars = resolve_active_vars(&cfg)?;
+    Ok(EnvListResult { config: cfg, active_vars })
+}
+
+/// Return the `(name, value)` pairs from the currently-active `.env` file, or
+/// an empty vec if none is active.
+#[tauri::command]
+fn env_resolve_active() -> Result<Vec<(String, String)>, String> {
+    let cfg = env_config::load()?;
+    resolve_active_vars(&cfg)
+}
+
+#[derive(serde::Serialize)]
+struct EnvListResult {
+    config: env_config::EnvConfig,
+    active_vars: Vec<(String, String)>,
+}
+
+#[derive(serde::Serialize)]
+struct EnvAddResult {
+    config: env_config::EnvConfig,
+    active_vars: Vec<(String, String)>,
+    /// Raw vars parsed from the file we just added (handy for surface-level
+    /// UI previews even when the added file isn't the active one).
+    loaded_vars: Vec<(String, String)>,
+}
+
+fn resolve_active_vars(cfg: &env_config::EnvConfig) -> Result<Vec<(String, String)>, String> {
+    let Some(entry) = cfg.active_entry() else {
+        return Ok(Vec::new());
+    };
+    let (_name, map) = env_file::read_env_named_from_path(&entry.path)?;
+    let mut v: Vec<(String, String)> = map.into_iter().collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(v)
+}
+
+fn filename_stem(path: &str) -> Option<String> {
+    std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+}
+
 /// Atomically open a native save-file dialog and write content to the chosen path.
 /// Returns the chosen path (or null if cancelled). The frontend never receives a raw
 /// writable path — preventing arbitrary file write attacks.
@@ -483,9 +577,43 @@ pub fn run() {
         default_hook(info);
     }));
 
+    let sessions_state = sessions_cmds::SessionsState::from_disk();
+
+    // Best-effort startup prune: if a retention policy is configured with at least
+    // one cap, run `SessionStore::prune` once in the background. Failures are
+    // logged but never block startup.
+    if let (Some(store), Some(policy)) = (
+        sessions_state.store.as_ref(),
+        sessions_state.config.retention.as_ref(),
+    ) {
+        if policy.max_age_days.is_some()
+            || policy.max_sessions_per_version.is_some()
+            || policy.max_total_size_gb.is_some()
+        {
+            let store_clone = store.clone();
+            let policy_clone = policy.clone();
+            tauri::async_runtime::spawn(async move {
+                match tauri::async_runtime::spawn_blocking(move || {
+                    store_clone.prune(&policy_clone, false)
+                })
+                .await
+                {
+                    Ok(Ok(report)) => log::info!(
+                        "startup prune removed {} sessions, freed {} bytes",
+                        report.removed_count,
+                        report.bytes_freed
+                    ),
+                    Ok(Err(e)) => log::warn!("startup prune failed: {}", e),
+                    Err(e) => log::warn!("startup prune task panicked: {}", e),
+                }
+            });
+        }
+    }
+
     tauri::Builder::default()
         .manage(Mutex::new(HistoryStore::new()))
         .manage(Arc::new(live_capture::LiveCaptureState::new()))
+        .manage(Mutex::new(sessions_state))
         .invoke_handler(tauri::generate_handler![
             send_request,
             parse_http_file,
@@ -505,6 +633,11 @@ pub fn run() {
             suggest_urls,
             suggest_domain_paths,
             read_env_file,
+            env_list,
+            env_add,
+            env_remove,
+            env_set_active,
+            env_resolve_active,
             fetch_azure_token,
             check_azure_cli,
             start_device_code,
@@ -523,6 +656,19 @@ pub fn run() {
             perf::expand_json_node,
             perf::compute_diff,
             perf::sort_and_normalize,
+            sessions_cmds::sessions_get_status,
+            sessions_cmds::sessions_set_root,
+            sessions_cmds::sessions_set_auto_record,
+            sessions_cmds::sessions_list_files,
+            sessions_cmds::sessions_list_versions,
+            sessions_cmds::sessions_list_sessions,
+            sessions_cmds::sessions_load_session,
+            sessions_cmds::sessions_load_as_snapshot,
+            sessions_cmds::sessions_get_capture_policy,
+            sessions_cmds::sessions_set_capture_preset,
+            sessions_cmds::sessions_pick_root_dir,
+            sessions_cmds::sessions_record_run,
+            sessions_cmds::sessions_get_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

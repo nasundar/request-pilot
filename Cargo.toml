@@ -2,6 +2,7 @@
 members = [
     "core",
     "tui",
+    "cli",
 ]
 # Desktop Tauri app has its own build system, not part of workspace
 exclude = [

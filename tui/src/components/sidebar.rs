@@ -220,6 +220,25 @@ pub fn handle_file_tree_keys(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('r') => {
             let node = app.tree_nodes[app.tree_cursor].clone();
+            // Snapshot replay (lowercase `r`): if the focused tree node is a
+            // Block whose owning file was loaded as a snapshot, intercept
+            // the keypress and pop a confirmation modal instead of running
+            // a regular suite. Other node kinds (Group, File) on a snapshot
+            // are owned by the `p2-tui-replay-all` agent — we leave them to
+            // the normal run path so behavior is unchanged until that lands.
+            if let TreeNode::Block { file_idx, block_idx } = &node {
+                let is_snapshot = app
+                    .loaded_files
+                    .get(*file_idx)
+                    .map_or(false, |f| f.snapshot.is_some());
+                if is_snapshot {
+                    app.select_block(*file_idx, *block_idx);
+                    if let Some(confirm) = app.build_block_replay_confirm(*file_idx, *block_idx) {
+                        app.pending_replay = Some(confirm);
+                    }
+                    return;
+                }
+            }
             match node {
                 TreeNode::Block { file_idx, block_idx } => {
                     app.select_block(file_idx, block_idx);

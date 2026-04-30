@@ -4,7 +4,7 @@ mod tests {
         app::{
             App, BuilderFocus, ConfirmPurpose, Focus, HistoryGroupBy, HistoryPopup, InputMode,
             InputPurpose, LoadedFile, LogEntry, LogFilter, LogLevel, Mode, ResponseTab,
-            SidebarTab, TreeNode,
+            SidebarTab, SnapshotMeta, TreeNode,
         },
         code_editor,
         components::{
@@ -104,6 +104,8 @@ GET https://example.com/third
             results: None,
             expanded: true,
             group_expanded: HashMap::new(),
+            snapshot: None,
+            locked: false,
         });
         app.rebuild_tree();
         if app.active_file_idx.is_none() {
@@ -465,9 +467,15 @@ GET https://example.com/third
         builder::handle_builder_keys(&mut app, key(KeyCode::Tab));
         assert_eq!(app.builder_focus, BuilderFocus::Url);
         builder::handle_builder_keys(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.builder_focus, BuilderFocus::Params);
+        builder::handle_builder_keys(&mut app, key(KeyCode::Tab));
         assert_eq!(app.builder_focus, BuilderFocus::Headers);
         builder::handle_builder_keys(&mut app, key(KeyCode::Tab));
         assert_eq!(app.builder_focus, BuilderFocus::Body);
+        builder::handle_builder_keys(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.builder_focus, BuilderFocus::Assertions);
+        builder::handle_builder_keys(&mut app, key(KeyCode::Tab));
+        assert_eq!(app.builder_focus, BuilderFocus::Extracts);
         builder::handle_builder_keys(&mut app, key(KeyCode::Tab));
         assert_eq!(app.builder_focus, BuilderFocus::Method);
     }
@@ -478,9 +486,15 @@ GET https://example.com/third
         app.builder_focus = BuilderFocus::Method;
 
         builder::handle_builder_keys(&mut app, key(KeyCode::BackTab));
+        assert_eq!(app.builder_focus, BuilderFocus::Extracts);
+        builder::handle_builder_keys(&mut app, key(KeyCode::BackTab));
+        assert_eq!(app.builder_focus, BuilderFocus::Assertions);
+        builder::handle_builder_keys(&mut app, key(KeyCode::BackTab));
         assert_eq!(app.builder_focus, BuilderFocus::Body);
         builder::handle_builder_keys(&mut app, key(KeyCode::BackTab));
         assert_eq!(app.builder_focus, BuilderFocus::Headers);
+        builder::handle_builder_keys(&mut app, key(KeyCode::BackTab));
+        assert_eq!(app.builder_focus, BuilderFocus::Params);
         builder::handle_builder_keys(&mut app, key(KeyCode::BackTab));
         assert_eq!(app.builder_focus, BuilderFocus::Url);
     }
@@ -997,7 +1011,7 @@ GET https://example.com/third
         attach_result(&mut app, r#"{"ok":true}"#, &[("content-type", "application/json")]);
         app.response_scroll = 8;
 
-        response::handle_response_keys(&mut app, key_char('H'));
+        response::handle_response_keys(&mut app, key_char('h'));
         assert_eq!(app.response_tab, ResponseTab::Headers);
         assert_eq!(app.response_scroll, 0);
 
@@ -1238,6 +1252,7 @@ GET https://example.com/third
     #[test]
     fn code_editor_enter_inserts_newline() {
         let mut app = App::new();
+        app.code_editor_editing = true;
         app.code_editor_content = "abc".to_string();
         app.code_editor_cursor_col = 1;
 
@@ -1252,6 +1267,7 @@ GET https://example.com/third
     #[test]
     fn code_editor_backspace_deletes_previous_char() {
         let mut app = App::new();
+        app.code_editor_editing = true;
         app.code_editor_content = "abc".to_string();
         app.code_editor_cursor_col = 2;
 
@@ -1264,6 +1280,7 @@ GET https://example.com/third
     #[test]
     fn code_editor_backspace_merges_lines() {
         let mut app = App::new();
+        app.code_editor_editing = true;
         app.code_editor_content = "abc\ndef".to_string();
         app.code_editor_cursor_line = 1;
         app.code_editor_cursor_col = 0;
@@ -1278,6 +1295,7 @@ GET https://example.com/third
     #[test]
     fn code_editor_delete_removes_current_char() {
         let mut app = App::new();
+        app.code_editor_editing = true;
         app.code_editor_content = "abc".to_string();
         app.code_editor_cursor_col = 1;
 
@@ -1289,6 +1307,7 @@ GET https://example.com/third
     #[test]
     fn code_editor_tab_inserts_two_spaces() {
         let mut app = App::new();
+        app.code_editor_editing = true;
         app.code_editor_content = "abc".to_string();
         app.code_editor_cursor_col = 1;
 
@@ -1301,6 +1320,7 @@ GET https://example.com/third
     #[test]
     fn code_editor_unicode_insert_is_char_safe() {
         let mut app = App::new();
+        app.code_editor_editing = true;
         app.code_editor_content = "éx".to_string();
         app.code_editor_cursor_col = 1;
 
@@ -1313,6 +1333,7 @@ GET https://example.com/third
     #[test]
     fn code_editor_unicode_backspace_removes_full_char() {
         let mut app = App::new();
+        app.code_editor_editing = true;
         app.code_editor_content = "éx".to_string();
         app.code_editor_cursor_col = 1;
 
@@ -1453,6 +1474,7 @@ GET https://example.com/third
         let mut app = App::new();
         app.mode = Mode::Code;
         app.focus = Focus::CodeView;
+        app.code_editor_editing = true;
         app.code_editor_content = String::new();
 
         handle_key(&mut app, key_char('q'));
@@ -1550,5 +1572,458 @@ GET https://example.com/third
         app.input_mode = InputMode::Normal;
         sidebar::handle_variables_keys(&mut app, key_char('d'));
         assert!(matches!(app.input_mode, InputMode::Confirm { purpose: ConfirmPurpose::DeleteVar { .. }, .. }));
+    }
+
+    fn snapshot_meta_for_test() -> SnapshotMeta {
+        use request_pilot_core::chrono::{TimeZone, Utc};
+        SnapshotMeta {
+            file_id: "fid-abc".to_string(),
+            sha256: "deadbeefcafef00d".to_string(),
+            run_id: "run-12345678".to_string(),
+            recorded_at: Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap(),
+        }
+    }
+
+    fn push_locked_snapshot_file(app: &mut App, content: &str) {
+        push_file(app, "snap.http", content);
+        let last = app.loaded_files.last_mut().unwrap();
+        last.snapshot = Some(snapshot_meta_for_test());
+        last.locked = true;
+    }
+
+    #[test]
+    fn snapshot_locked_blocks_char_input() {
+        let mut app = App::new();
+        push_locked_snapshot_file(&mut app, sample_suite_content());
+        app.mode = Mode::Code;
+        app.code_editor_content = "abc".to_string();
+        app.code_editor_cursor_line = 0;
+        app.code_editor_cursor_col = 1;
+        // Even if some prior path enabled edit mode, the lock guard must
+        // demote it back to view and reject the keystroke.
+        app.code_editor_editing = true;
+        let original_loaded = app.loaded_files.last().unwrap().content.clone();
+
+        code_editor::handle_editor_keys(&mut app, key_char('x'));
+
+        assert_eq!(app.code_editor_content, "abc", "char must not be inserted");
+        assert!(!app.code_editor_editing, "lock must force view mode");
+        assert_eq!(
+            app.loaded_files.last().unwrap().content,
+            original_loaded,
+            "loaded file content must not change",
+        );
+        assert!(
+            app.status_message
+                .as_ref()
+                .map(|(m, _)| m.contains("read-only"))
+                .unwrap_or(false),
+            "status should announce read-only snapshot",
+        );
+    }
+
+    #[test]
+    fn snapshot_locked_allows_navigation() {
+        let mut app = App::new();
+        push_locked_snapshot_file(&mut app, sample_suite_content());
+        app.mode = Mode::Code;
+        app.code_editor_content = "alpha\nbeta\ngamma".to_string();
+        app.code_editor_cursor_line = 0;
+        app.code_editor_cursor_col = 0;
+
+        code_editor::handle_editor_keys(&mut app, key(KeyCode::Down));
+        assert_eq!(app.code_editor_cursor_line, 1, "down arrow must move cursor while locked");
+
+        code_editor::handle_editor_keys(&mut app, key(KeyCode::End));
+        assert_eq!(app.code_editor_cursor_col, 4, "End must move to line end while locked");
+    }
+
+    #[test]
+    fn snapshot_unlocked_allows_edit() {
+        let mut app = App::new();
+        push_file(&mut app, "edit.http", sample_suite_content());
+        // Sanity: regular file is not locked.
+        assert!(!app.loaded_files.last().unwrap().locked);
+        app.mode = Mode::Code;
+        app.code_editor_editing = true;
+        app.code_editor_content = "abc".to_string();
+        app.code_editor_cursor_line = 0;
+        app.code_editor_cursor_col = 1;
+
+        code_editor::handle_editor_keys(&mut app, key_char('x'));
+
+        assert_eq!(app.code_editor_content, "axbc");
+        assert_eq!(app.code_editor_cursor_col, 2);
+        assert!(app.code_editor_modified);
+    }
+
+    fn replay_results_for_test() -> TestRunResults {
+        TestRunResults {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            total_time_ms: 7,
+            block_results: vec![BlockResult {
+                seq: Some(1),
+                name: "ping".to_string(),
+                block_type: "test".to_string(),
+                group: None,
+                request_method: "GET".to_string(),
+                request_url: "https://example.com/ping".to_string(),
+                request_headers: vec![],
+                request_body: None,
+                status: "passed".to_string(),
+                response: Some(HttpResponse {
+                    status: 200,
+                    status_text: "OK".to_string(),
+                    headers: vec![],
+                    body: "{\"ok\":true}".to_string(),
+                    time_ms: 7,
+                    size_bytes: 11,
+                }),
+                assertion_results: vec![AssertionResult {
+                    assertion: "status == 200".to_string(),
+                    expected: Some("200".to_string()),
+                    actual: Some("200".to_string()),
+                    passed: true,
+                }],
+                extract_results: vec![],
+                error: None,
+                time_ms: 7,
+                step_results: vec![],
+                diff_result: None,
+            }],
+            final_variables: HashMap::new(),
+            telemetry: None,
+        }
+    }
+
+    #[test]
+    fn replay_all_confirm_records_under_same_file_id() {
+        use request_pilot_core::chrono::Utc;
+        use request_pilot_core::sessions::CapturePolicy;
+        use request_pilot_core::sessions_config::SessionsConfig;
+
+        // Tmp sessions root.
+        let mut root = PathBuf::from(r"C:\Booshi\Repos\request-pilot\tui\target\test-artifacts");
+        fs::create_dir_all(&root).unwrap();
+        let id = NEXT_ARTIFACT_ID.fetch_add(1, Ordering::Relaxed);
+        root.push(format!("replay-all-{}-{}", std::process::id(), id));
+        fs::create_dir_all(&root).unwrap();
+
+        let cfg = SessionsConfig {
+            root: Some(root.to_string_lossy().to_string()),
+            auto_record: true,
+            capture_policy: CapturePolicy::default(),
+            capture_preset: "snapshot".to_string(),
+            retention: None,
+            body_redaction_paths: Vec::new(),
+        };
+
+        // Synthetic snapshot meta — same `file_id` we expect the new run to
+        // land under.
+        let snap = snapshot_meta_for_test();
+        let now = Utc::now();
+        let source = "GET https://example.com/ping\n";
+
+        let recorded = crate::app::auto_record_run(
+            &cfg,
+            None,
+            source,
+            &replay_results_for_test(),
+            now,
+            now,
+            None,
+            None,
+            vec![],
+            Some(snap.file_id.as_str()),
+        )
+        .expect("auto_record_run should succeed")
+        .expect("expected a recorded session");
+
+        // The recorded session must live under the snapshot's file_id, not
+        // a freshly-derived one.
+        assert_eq!(recorded.file_id, snap.file_id);
+        let file_dir = root.join("files").join(&snap.file_id);
+        assert!(file_dir.is_dir(), "expected files/<snapshot_file_id> dir");
+
+        // Find a run.json under <root>/files/<file_id>/versions/<sha>/sessions/run-*
+        let versions = file_dir.join("versions");
+        let mut found_run_json = false;
+        for v_entry in fs::read_dir(&versions).unwrap().flatten() {
+            let sessions = v_entry.path().join("sessions");
+            if !sessions.is_dir() { continue; }
+            for s_entry in fs::read_dir(&sessions).unwrap().flatten() {
+                if s_entry.path().join("run.json").is_file() {
+                    found_run_json = true;
+                }
+            }
+        }
+        assert!(found_run_json, "expected a run.json under the snapshot's file_id");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn render_app(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        use ratatui::{backend::TestBackend, Terminal};
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("create test terminal");
+        terminal
+            .draw(|f| crate::ui::draw(f, app))
+            .expect("draw must not panic");
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
+        let area = buf.area();
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn sessions_tab_renders_with_no_root() {
+        let mut app = App::new();
+        // Force the empty-state regardless of any sessions_config.json that
+        // may exist on the developer's machine: detaching the store yields
+        // exactly the "no root configured" path.
+        app.sessions_tab.store = None;
+        app.sessions_tab.rows.clear();
+        app.sessions_tab.last_error = None;
+        app.mode = Mode::Sessions;
+
+        let buf = render_app(&mut app, 120, 40);
+        let text = buffer_to_string(&buf);
+        assert!(
+            text.contains("No sessions folder configured"),
+            "expected empty-state message, got:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn sessions_tab_renders_with_records() {
+        use request_pilot_core::sessions::{
+            CapturePolicy, Component, FileIdentity, RecordInput, SessionStore, SessionTrigger,
+        };
+        use request_pilot_core::chrono::Utc;
+        use std::sync::Arc;
+
+        // Set up a sessions store with one recorded run.
+        let mut root = PathBuf::from(r"C:\Booshi\Repos\request-pilot\tui\target\test-artifacts");
+        fs::create_dir_all(&root).unwrap();
+        let id = NEXT_ARTIFACT_ID.fetch_add(1, Ordering::Relaxed);
+        root.push(format!("sessions-render-{}-{}", std::process::id(), id));
+        fs::create_dir_all(&root).unwrap();
+
+        let store = SessionStore::open(&root).unwrap();
+        let now = Utc::now();
+        store
+            .record_run(RecordInput {
+                identity: FileIdentity::Alias("checkout".into()),
+                source_path: None,
+                source_content: "GET https://example.com/health\n",
+                policy: CapturePolicy::default(),
+                trigger: SessionTrigger::Manual,
+                component: Component::Cli,
+                started_at: now,
+                finished_at: now,
+                mode: None,
+                env_file: None,
+                env_identity: None,
+                variables: vec![],
+                results: replay_results_for_test(),
+                file_id_override: None,
+                redact_body_rules: Vec::new(),
+                block_redact_body_rules: std::collections::HashMap::new(),
+            })
+            .expect("record_run");
+
+        let mut app = App::new();
+        app.sessions_tab.store = Some(Arc::new(store));
+        app.sessions_tab.refresh();
+        assert!(
+            !app.sessions_tab.rows.is_empty(),
+            "precondition: expected at least one session row after refresh"
+        );
+        app.mode = Mode::Sessions;
+
+        // Should render without panicking and display the Sessions chrome.
+        let buf = render_app(&mut app, 120, 40);
+        let text = buffer_to_string(&buf);
+        assert!(
+            text.contains("Sessions"),
+            "expected 'Sessions' header to render, got:\n{}",
+            text
+        );
+        assert!(
+            !text.contains("No sessions folder configured"),
+            "should NOT show empty-state when rows are present"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // NOTE: `detach_unlocks_editor` is owned by the `p2-tui-detach` agent,
+    // which adds the `apply_detach` API. See sql todo `p2-tui-detach`.
+
+    #[test]
+    fn detach_unlocks_editor() {
+        let mut app = App::new();
+        push_locked_snapshot_file(&mut app, sample_suite_content());
+        let fi = app.loaded_files.len() - 1;
+        app.active_file_idx = Some(fi);
+
+        // Precondition: file is locked and has a snapshot.
+        assert!(app.loaded_files[fi].locked);
+        assert!(app.loaded_files[fi].snapshot.is_some());
+
+        // Stage the modal then apply.
+        let confirm = app.confirm_detach(fi).expect("confirm_detach for locked snapshot");
+        app.pending_detach = Some(confirm);
+        app.apply_detach();
+
+        assert!(!app.loaded_files[fi].locked, "file must be unlocked after detach");
+        assert!(app.loaded_files[fi].snapshot.is_none(), "snapshot meta must be cleared");
+        assert!(app.pending_detach.is_none(), "modal must be dismissed");
+
+        // After detach the snapshot read-only guard should no longer fire,
+        // so an edit key in the code editor mutates the buffer.
+        app.mode = Mode::Code;
+        app.code_editor_editing = true;
+        app.code_editor_content = "abc".to_string();
+        app.code_editor_cursor_line = 0;
+        app.code_editor_cursor_col = 1;
+        code_editor::handle_editor_keys(&mut app, key_char('x'));
+        assert_eq!(
+            app.code_editor_content, "axbc",
+            "edit key must mutate the buffer after detach",
+        );
+    }
+
+    #[test]
+    fn detach_keeps_session_on_disk() {
+        use request_pilot_core::sessions::{
+            CapturePolicy, Component, FileIdentity, RecordInput, SessionStore, SessionTrigger,
+        };
+        use request_pilot_core::chrono::Utc;
+        use std::sync::Arc;
+
+        // Tmp sessions root under the per-process artifacts dir.
+        let mut root = PathBuf::from(r"C:\Booshi\Repos\request-pilot\tui\target\test-artifacts");
+        fs::create_dir_all(&root).unwrap();
+        let id = NEXT_ARTIFACT_ID.fetch_add(1, Ordering::Relaxed);
+        root.push(format!("detach-session-{}-{}", std::process::id(), id));
+        fs::create_dir_all(&root).unwrap();
+
+        let store = SessionStore::open(&root).unwrap();
+        let now = Utc::now();
+        let recorded = store
+            .record_run(RecordInput {
+                identity: FileIdentity::Alias("checkout".into()),
+                source_path: None,
+                source_content: "GET https://example.com/ping\n",
+                policy: CapturePolicy::default(),
+                trigger: SessionTrigger::Manual,
+                component: Component::Cli,
+                started_at: now,
+                finished_at: now,
+                mode: None,
+                env_file: None,
+                env_identity: None,
+                variables: vec![],
+                results: replay_results_for_test(),
+                file_id_override: None,
+                redact_body_rules: Vec::new(),
+                block_redact_body_rules: std::collections::HashMap::new(),
+            })
+            .expect("record_run");
+
+        // Locate the run.json on disk before detaching.
+        let mut found_run_json: Option<PathBuf> = None;
+        let versions = root.join("files").join(&recorded.file_id).join("versions");
+        for v_entry in fs::read_dir(&versions).unwrap().flatten() {
+            let sessions = v_entry.path().join("sessions");
+            if !sessions.is_dir() { continue; }
+            for s_entry in fs::read_dir(&sessions).unwrap().flatten() {
+                let p = s_entry.path().join("run.json");
+                if p.is_file() {
+                    found_run_json = Some(p);
+                }
+            }
+        }
+        let run_json_path = found_run_json.expect("expected run.json on disk before detach");
+
+        // Load as snapshot, then detach.
+        let mut app = App::new();
+        app.sessions_tab.store = Some(Arc::new(store));
+        app.load_snapshot_from_session(
+            &recorded.file_id,
+            &recorded.sha256,
+            &recorded.run_id,
+            "checkout",
+        )
+        .expect("load_snapshot_from_session");
+        let fi = app.active_file_idx.expect("active file after snapshot load");
+
+        let confirm = app.confirm_detach(fi).expect("confirm_detach for snapshot");
+        app.pending_detach = Some(confirm);
+        app.apply_detach();
+
+        assert!(!app.loaded_files[fi].locked);
+        assert!(app.loaded_files[fi].snapshot.is_none());
+
+        // The original recorded session must still be on disk.
+        assert!(
+            run_json_path.is_file(),
+            "expected run.json to still exist after detach: {}",
+            run_json_path.display()
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn d_without_locked_file_does_nothing() {
+        let mut app = app_with_file();
+        // Precondition: active file is regular, not a locked snapshot.
+        let fi = app.active_file_idx.expect("active file");
+        assert!(!app.loaded_files[fi].locked);
+        assert!(app.loaded_files[fi].snapshot.is_none());
+
+        let shift_d = KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT);
+        handle_key(&mut app, shift_d);
+
+        assert!(
+            app.pending_detach.is_none(),
+            "no detach modal should appear when active file isn't a locked snapshot",
+        );
+    }
+
+    #[test]
+    fn shift_r_without_snapshot_does_nothing() {
+        let mut app = app_with_file();
+        // Sanity: the active file has no snapshot.
+        assert!(app.active_file_idx.is_some());
+        assert!(app
+            .loaded_files
+            .get(app.active_file_idx.unwrap())
+            .and_then(|f| f.snapshot.as_ref())
+            .is_none());
+
+        // Pressing Shift-R must not open the replay confirm modal.
+        let shift_r = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT);
+        handle_key(&mut app, shift_r);
+
+        assert!(
+            app.pending_replay.is_none(),
+            "no replay modal should appear without a snapshot",
+        );
+        assert!(!app.is_running, "no replay run should have started");
     }
 }

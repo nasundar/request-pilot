@@ -359,6 +359,50 @@ grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_sec
 
 In dev mode, this block is skipped entirely — instead, Request Pilot performs interactive user authentication for the `https://prometheus.monitor.azure.com/.default` scope and stores the resulting token in `{{access_token}}`.
 
+### `# @@request-id`
+
+File-level directive that auto-injects a unique request id (UUIDv4) into every request's headers. Useful for correlating test calls in downstream server logs. Place it in the file header (before `@variables` or any `###` block).
+
+**Syntax:** `# @@request-id [header-name]`
+
+- No argument → header name defaults to `X-Request-Id`
+- Custom name → any valid HTTP header name (e.g. `X-Correlation-ID`, `traceparent`)
+
+```http
+# @@request-id X-Correlation-ID
+
+@base_url = https://api.example.com
+
+### @@test Health Check
+GET {{base_url}}/health
+# @@assert status == 200
+```
+
+Every request dispatched by Pilot receives a fresh `X-Correlation-ID: <uuid>` header.
+
+**Block-level override / opt-out:**
+
+```http
+# @@request-id X-Global
+
+### @@test Inherits global
+GET http://x
+
+### @@test Override header name
+# @@request-id X-Local
+GET http://x
+
+### @@test Skip auto-injection
+# @@request-id off
+GET http://x
+```
+
+**Behavior:**
+- A fresh UUIDv4 is generated per request (not per suite run) — retries and auto-runs each get unique ids
+- If the user explicitly sets the same header (case-insensitive) in the block, the directive is a no-op for that block
+- Coexists with the built-in variable `{{$uuid}}` — you can still reference uuids in URLs or bodies
+- Accepts legacy `# @request_id` and `# @@request_id` (underscore) aliases
+
 ### `# @auto_run`
 
 File-level directive that configures automatic test re-execution at a fixed interval. Place it in the file header (before `@variables` or any `###` block).

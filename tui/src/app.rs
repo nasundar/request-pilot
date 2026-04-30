@@ -4,6 +4,11 @@ use std::sync::Arc;
 use request_pilot_core::http_parser::{TestSuite, TestBlock, ParsedRequest, parse_test_suite, generate_http_content};
 use request_pilot_core::test_runner::{BlockProgress, ProgressHandler, TestRunResults, BlockResult};
 use request_pilot_core::history::{HistoryStore, HistoryEntry};
+use request_pilot_core::sessions::{
+    Component, FileIdentity, RecordInput, RecordedSession, SessionStore, SessionTrigger,
+};
+use request_pilot_core::sessions_config::{self, default_config_path, SessionsConfig};
+use request_pilot_core::chrono::{DateTime, Utc};
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
@@ -71,6 +76,7 @@ pub enum Mode {
     History,
     Code,
     Logs,
+    Sessions,
 }
 
 /// Which pane has keyboard focus.
@@ -191,6 +197,85 @@ pub enum HeaderEditMode {
     Editing { index: usize, field: HeaderEditField, key_buf: String, val_buf: String },
 }
 
+/// Context captured at run-spawn time for best-effort auto-record into the
+/// Sessions store. Carries everything that can't be recovered later from
+/// `App` state alone (e.g. the exact start timestamp and the variables that
+/// were merged into the run).
+#[derive(Debug, Clone)]
+pub struct AutoRecordContext {
+    pub started_at: DateTime<Utc>,
+    pub run_mode: Option<String>,
+    pub env_file: Option<String>,
+    pub variables: Vec<(String, String)>,
+    /// When `Some`, overrides the `file_id` derived from the active file's
+    /// path. Set by snapshot-replay flows so the new run is recorded under
+    /// the original session's `file_id` (grouping with the original in the
+    /// Sessions tab) rather than a new id derived from the buffer.
+    pub file_id_override: Option<String>,
+}
+
+/// Best-effort auto-record helper. Returns `Ok(Some(_))` when a session was
+/// written, `Ok(None)` when auto-record is disabled or no root is configured,
+/// and `Err(_)` only on actual store errors. Callers should treat any error
+/// as non-fatal — the run has already produced its results.
+///
+/// Reused by every TUI run-completion path so a `run.json` lands under the
+/// configured `sessions.root` whenever the user has opted in.
+pub fn auto_record_run(
+    config: &SessionsConfig,
+    file_path: Option<&Path>,
+    source_content: &str,
+    results: &TestRunResults,
+    started_at: DateTime<Utc>,
+    finished_at: DateTime<Utc>,
+    run_mode: Option<&str>,
+    env_file: Option<&str>,
+    variables: Vec<(String, String)>,
+    file_id_override: Option<&str>,
+) -> Result<Option<RecordedSession>, String> {
+    if !config.auto_record {
+        return Ok(None);
+    }
+    let Some(root) = config.root.as_ref() else {
+        return Ok(None);
+    };
+    let store = SessionStore::open(PathBuf::from(root))
+        .map_err(|e| format!("open sessions store at {}: {}", root, e))?;
+    let identity = FileIdentity::from_path_and_alias(
+        file_path.and_then(|p| p.to_str()),
+        None,
+        "tui-buffer",
+    );
+    let parsed_suite = parse_test_suite(source_content);
+    let (suite_redact_rules, block_redact_rules) =
+        request_pilot_core::sessions::build_body_redact_rules(
+            &parsed_suite,
+            &config.body_redaction_paths,
+        );
+    let input = RecordInput {
+        identity,
+        source_path: file_path,
+        source_content,
+        policy: config.capture_policy.clone(),
+        trigger: SessionTrigger::Manual,
+        component: Component::Tui,
+        started_at,
+        finished_at,
+        mode: run_mode.map(|s| s.to_string()),
+        env_file: env_file.map(|s| s.to_string()),
+        env_identity: None,
+        variables,
+        results: results.clone(),
+        file_id_override: file_id_override.map(|s| s.to_string()),
+        redact_body_rules: suite_redact_rules,
+        block_redact_body_rules: block_redact_rules,
+    };
+    store
+        .record_run(input)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
 /// Messages sent from the test runner to the event loop.
 pub enum RunnerMessage {
     BlockStart(BlockProgress),
@@ -199,11 +284,55 @@ pub enum RunnerMessage {
         file_idx: usize,
         file_id: u64,
         results: TestRunResults,
+        record_ctx: Option<AutoRecordContext>,
     },
     AzureAuthResult(Result<request_pilot_core::azure_auth::AzureToken, String>),
     AzureCliCheck(bool),
     LiveCaptureRequest(crate::live_capture::CapturedRequest),
     LiveCaptureStatus { connected: bool },
+}
+
+/// Metadata describing a session snapshot the user has loaded into the
+/// Files tab. Mirrors the desktop app's `snapshot` field on a loaded file.
+#[derive(Debug, Clone)]
+pub struct SnapshotMeta {
+    pub file_id: String,
+    pub sha256: String,
+    pub run_id: String,
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// Which subset of a snapshot the user is about to replay. Drives the
+/// confirmation modal text and the spawn path selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayKind {
+    /// Re-run every block in the snapshot's suite.
+    All,
+    /// Re-run a single block, identified by name.
+    Block(String),
+}
+
+/// State for the "Replay this snapshot?" confirmation modal. Captured at
+/// the moment the user pressed `r` so the modal can show stable values
+/// even if the cursor moves while the modal is open.
+#[derive(Debug, Clone)]
+pub struct ReplayConfirm {
+    pub kind: ReplayKind,
+    pub file_idx: usize,
+    pub file_name: String,
+    pub mode: Option<String>,
+    pub env_file: Option<String>,
+    pub first_host: Option<String>,
+    pub snapshot_meta: SnapshotMeta,
+}
+
+/// State for the "Detach snapshot?" confirmation modal. Captured at the
+/// moment the user pressed `D` so the modal can show stable values even
+/// if the active file selection moves while the modal is open.
+#[derive(Debug, Clone)]
+pub struct DetachConfirm {
+    pub file_idx: usize,
+    pub file_name: String,
 }
 
 /// A loaded .http file with parsed suite and optional results.
@@ -216,6 +345,13 @@ pub struct LoadedFile {
     pub results: Option<TestRunResults>,
     pub expanded: bool,
     pub group_expanded: HashMap<String, bool>,
+    /// When `Some`, this file was reconstituted from a recorded session
+    /// (via `SessionStore::load_as_snapshot`) and should be treated as
+    /// read-only. Mirrors desktop's `snapshot?` field.
+    pub snapshot: Option<SnapshotMeta>,
+    /// When true, edits/saves should be rejected. Set together with
+    /// `snapshot` for snapshot-loaded files.
+    pub locked: bool,
 }
 
 /// Tree node for navigating the file/group/block hierarchy.
@@ -254,6 +390,12 @@ pub struct App {
     pub loaded_files: Vec<LoadedFile>,
     pub env_vars: HashMap<String, String>,
     pub env_path: Option<PathBuf>,
+    /// Persisted list of loaded .env files and currently-active index. Kept
+    /// in sync with `<config_dir>/request-pilot/env_config.json`.
+    pub env_config: request_pilot_core::env_config::EnvConfig,
+    /// Env picker overlay state.
+    pub env_picker_open: bool,
+    pub env_picker_cursor: usize,
     pub history: HistoryStore,
     pub active_file_idx: Option<usize>,
     pub active_block_idx: Option<usize>,
@@ -407,6 +549,19 @@ pub struct App {
     runner_rx: Option<mpsc::UnboundedReceiver<RunnerMessage>>,
     runner_tx: mpsc::UnboundedSender<RunnerMessage>,
     next_file_id: u64,
+
+    // Sessions tab state (shared config with desktop app).
+    pub sessions_tab: crate::sessions_tab::SessionsTabState,
+
+    /// When `Some`, a snapshot replay confirmation modal is open. All input
+    /// is routed to the modal until the user confirms (`y`/`Y`/Enter) or
+    /// cancels (`n`/`N`/Esc).
+    pub pending_replay: Option<ReplayConfirm>,
+
+    /// When `Some`, a "Detach snapshot?" confirmation modal is open. All
+    /// input is routed to the modal until the user confirms (`y`/`Y`/Enter)
+    /// or cancels (`n`/`N`/Esc).
+    pub pending_detach: Option<DetachConfirm>,
 }
 
 impl App {
@@ -421,6 +576,19 @@ impl App {
         let vars: Vec<(String, String)> = self.env_vars.iter()
             .map(|(k, v)| (k.clone(), v.clone())).collect();
         vars
+    }
+
+    /// Returns the names of `@prompt` variables in the given file that are not
+    /// yet resolved (no value in suite.variables or in env_vars). Used to warn
+    /// the user before spawning a run so they can supply values via the
+    /// variables editor (`V` key).
+    fn unresolved_prompts(&self, fi: usize) -> Vec<String> {
+        let Some(file) = self.loaded_files.get(fi) else { return Vec::new(); };
+        file.suite.prompts.iter().filter_map(|p| {
+            let in_vars = file.suite.variables.iter().any(|(k, v)| k == &p.name && !v.is_empty());
+            let in_env = self.env_vars.iter().any(|(k, v)| k == &p.name && !v.is_empty());
+            if in_vars || in_env { None } else { Some(p.name.clone()) }
+        }).collect()
     }
 
     /// Collect dev_auth token mappings from the active file's @mode app blocks.
@@ -452,13 +620,27 @@ impl App {
     }
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let env_config = request_pilot_core::env_config::load().unwrap_or_default();
+        // If a previously-active .env exists, load its values up front so the
+        // user's first render already reflects the active env.
+        let mut env_vars: HashMap<String, String> = HashMap::new();
+        if let Some(entry) = env_config.active_entry() {
+            if let Ok((_n, vars)) =
+                request_pilot_core::env_file::read_env_named_from_path(&entry.path)
+            {
+                env_vars = vars;
+            }
+        }
         Self {
             mode: Mode::Files,
             focus: Focus::FileTree,
             sidebar_tab: SidebarTab::Files,
             loaded_files: Vec::new(),
-            env_vars: HashMap::new(),
+            env_vars,
             env_path: None,
+            env_config,
+            env_picker_open: false,
+            env_picker_cursor: 0,
             history: HistoryStore::new(),
             active_file_idx: None,
             active_block_idx: None,
@@ -568,6 +750,9 @@ impl App {
             runner_rx: Some(rx),
             runner_tx: tx,
             next_file_id: 0,
+            sessions_tab: crate::sessions_tab::SessionsTabState::from_disk(),
+            pending_replay: None,
+            pending_detach: None,
         }
     }
 
@@ -578,14 +763,76 @@ impl App {
             path.to_path_buf()
         };
         let path_str = path.to_string_lossy().to_string();
-        let vars = request_pilot_core::env_file::read_env_from_path(&path_str)
-            .map_err(|e| color_eyre::eyre::eyre!(e))?;
-        for (k, v) in vars {
-            self.env_vars.insert(k, v);
-        }
+        let (directive_name, vars) =
+            request_pilot_core::env_file::read_env_named_from_path(&path_str)
+                .map_err(|e| color_eyre::eyre::eyre!(e))?;
+        // Derive display name: directive > filename stem > "env".
+        let name = directive_name
+            .or_else(|| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "env".to_string());
+        let was_empty = self.env_config.entries.is_empty();
+        let idx = self
+            .env_config
+            .add(request_pilot_core::env_config::EnvEntry {
+                path: path_str.clone(),
+                name: name.clone(),
+            });
+        let _ = request_pilot_core::env_config::save(&self.env_config);
+        // An explicit "load .env" is a direct user action — always merge its
+        // values into the runtime env_vars map. The persisted active_index
+        // only controls which entry auto-applies at startup.
+        self.apply_env_vars(&vars);
+        // First-ever entry auto-activates (so it sticks across restarts).
+        let _ = was_empty;
+        let _ = idx;
         self.env_path = Some(path.clone());
-        self.set_status(format!("Loaded env: {}", path.display()));
+        self.set_status(format!("Loaded env '{}': {}", name, path.display()));
         Ok(())
+    }
+
+    /// Merge resolved env file vars into the runtime `env_vars` map. Existing
+    /// runtime edits are preserved for keys the env file doesn't define.
+    fn apply_env_vars(&mut self, vars: &HashMap<String, String>) {
+        for (k, v) in vars {
+            self.env_vars.insert(k.clone(), v.clone());
+        }
+    }
+
+    /// Activate (or deactivate with `None`) an entry in the persisted env list
+    /// by index. Re-reads the file and merges its vars into `env_vars`.
+    pub fn activate_env_index(&mut self, index: Option<usize>) {
+        self.env_config.set_active(index);
+        let _ = request_pilot_core::env_config::save(&self.env_config);
+        if let Some(entry) = self.env_config.active_entry().cloned() {
+            match request_pilot_core::env_file::read_env_named_from_path(&entry.path) {
+                Ok((_n, vars)) => {
+                    self.apply_env_vars(&vars);
+                    self.set_status(format!("Activated env: {}", entry.name));
+                }
+                Err(e) => self.set_status(format!("env read error: {}", e)),
+            }
+        } else {
+            self.set_status("No env active".to_string());
+        }
+    }
+
+    /// Remove an entry from the persisted env list.
+    pub fn remove_env_index(&mut self, index: usize) {
+        self.env_config.remove(index);
+        let _ = request_pilot_core::env_config::save(&self.env_config);
+        // Re-apply whatever is active now (may be None).
+        let active = self.env_config.active_entry().cloned();
+        if let Some(entry) = active {
+            if let Ok((_n, vars)) =
+                request_pilot_core::env_file::read_env_named_from_path(&entry.path)
+            {
+                self.apply_env_vars(&vars);
+            }
+        }
     }
 
     pub fn load_file(&mut self, path: &Path) -> color_eyre::Result<()> {
@@ -618,6 +865,8 @@ impl App {
             results: None,
             expanded: true,
             group_expanded: HashMap::new(),
+            snapshot: None,
+            locked: false,
         });
 
         self.rebuild_tree();
@@ -729,6 +978,79 @@ impl App {
 
     pub fn set_status(&mut self, msg: String) {
         self.status_message = Some((msg, std::time::Instant::now()));
+    }
+
+    /// Returns a reference to the currently active `LoadedFile`, if any.
+    pub fn active_loaded_file(&self) -> Option<&LoadedFile> {
+        self.active_file_idx.and_then(|fi| self.loaded_files.get(fi))
+    }
+
+    /// True when the active file was loaded from a snapshot and is locked
+    /// against edits. Convenience helper for the editor key handler and UI.
+    pub fn active_file_locked(&self) -> bool {
+        self.active_loaded_file().map(|f| f.locked).unwrap_or(false)
+    }
+
+    /// Load a recorded session as a read-only snapshot into `loaded_files`
+    /// and switch to the Files mode. The new entry has `snapshot: Some(..)`
+    /// and `locked: true`. Returns an error string on failure (no store
+    /// configured, missing run, parse error, etc.) and leaves state
+    /// unchanged in that case.
+    pub fn load_snapshot_from_session(
+        &mut self,
+        file_id: &str,
+        sha256: &str,
+        run_id: &str,
+        display_name: &str,
+    ) -> Result<(), String> {
+        let store = self
+            .sessions_tab
+            .store
+            .as_ref()
+            .ok_or_else(|| "No sessions store configured".to_string())?;
+        let (source, suite, record) = store
+            .load_as_snapshot(file_id, sha256, run_id)
+            .map_err(|e| e.to_string())?;
+
+        let short_sha = &sha256[..sha256.len().min(8)];
+        let base = if display_name.is_empty() {
+            file_id
+        } else {
+            display_name
+        };
+        let name = format!("{} @ {}", base, short_sha);
+
+        let new_id = self.next_file_id;
+        self.next_file_id += 1;
+        let results = record.results.clone();
+        self.loaded_files.push(LoadedFile {
+            id: new_id,
+            path: None,
+            name,
+            content: source,
+            suite,
+            results: Some(results),
+            expanded: true,
+            group_expanded: HashMap::new(),
+            snapshot: Some(SnapshotMeta {
+                file_id: file_id.to_string(),
+                sha256: sha256.to_string(),
+                run_id: run_id.to_string(),
+                recorded_at: record.started_at,
+            }),
+            locked: true,
+        });
+        self.rebuild_tree();
+        let new_idx = self.loaded_files.len() - 1;
+        self.active_file_idx = Some(new_idx);
+        self.active_block_idx = if self.loaded_files[new_idx].suite.blocks.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        self.mode = Mode::Files;
+        self.focus = Focus::FileTree;
+        Ok(())
     }
 
     /// Set or clear auto-run interval. Updates timer accordingly.
@@ -942,6 +1264,8 @@ impl App {
             results: None,
             expanded: true,
             group_expanded: HashMap::new(),
+            snapshot: None,
+            locked: false,
         });
         self.rebuild_tree();
         self.active_file_idx = Some(self.loaded_files.len() - 1);
@@ -970,6 +1294,8 @@ impl App {
                 results: None,
                 expanded: true,
                 group_expanded: HashMap::new(),
+                snapshot: None,
+                locked: false,
             });
             self.active_file_idx = Some(self.loaded_files.len() - 1);
         }
@@ -1000,6 +1326,9 @@ impl App {
             steps: Vec::new(),
             diff: None,
             errors: Default::default(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
         };
         if let Some(file) = self.loaded_files.get_mut(fi) {
             file.suite.blocks.push(blank);
@@ -1203,6 +1532,8 @@ impl App {
             results: None,
             expanded: true,
             group_expanded: HashMap::new(),
+            snapshot: None,
+            locked: false,
         });
         let idx = self.loaded_files.len() - 1;
         self.live_capture_file_idx = Some(idx);
@@ -1258,7 +1589,7 @@ impl App {
             format!("{} request", req.method)
         };
 
-        let mut block = format!("###\n# @name {}\n{} {}\n", label, req.method, req.url);
+        let mut block = format!("###\n@name {}\n{} {}\n", label, req.method, req.url);
 
         // Filter out browser-internal and sensitive headers
         let skip_prefixes = [":", "sec-ch-", "sec-fetch-"];
@@ -1783,6 +2114,14 @@ impl App {
     // --- Run helpers ---
 
     fn spawn_suite_run(&mut self, fi: usize) {
+        let missing = self.unresolved_prompts(fi);
+        if !missing.is_empty() {
+            self.set_status(format!(
+                "⚠ @prompt vars unresolved: {} — press V to set values, then re-run",
+                missing.join(", ")
+            ));
+            return;
+        }
         self.is_running = true;
         self.progress_current = 0;
         self.progress_total = self.loaded_files[fi].suite.blocks.len();
@@ -1805,9 +2144,19 @@ impl App {
             extra_vars.push(("__telemetry_file".to_string(), file_name));
         }
         let run_mode = self.run_mode().map(|s| s.to_string());
+        let env_file = self
+            .env_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
         let dev_auth_mappings = if self.dev_mode { self.collect_dev_auth_mappings() } else { Vec::new() };
         let tx = self.runner_tx.clone();
         let handler = Arc::new(TuiProgress::new(tx.clone()));
+        let started_at = Utc::now();
+        let run_mode_for_ctx = run_mode.clone();
+        let file_id_override_for_ctx = self.loaded_files[fi]
+            .snapshot
+            .as_ref()
+            .map(|s| s.file_id.clone());
 
         tokio::spawn(async move {
             // In dev mode, fetch tokens for each @dev_auth scope and inject as extra vars
@@ -1829,12 +2178,32 @@ impl App {
             let results = request_pilot_core::test_runner::run_suite(
                 &suite, &extra_vars, Some(handler), run_mode.as_deref(),
             ).await;
-            let _ = tx.send(RunnerMessage::SuiteComplete { file_idx: fi, file_id: fid, results });
+            let record_ctx = Some(AutoRecordContext {
+                started_at,
+                run_mode: run_mode_for_ctx,
+                env_file,
+                variables: extra_vars,
+                file_id_override: file_id_override_for_ctx,
+            });
+            let _ = tx.send(RunnerMessage::SuiteComplete {
+                file_idx: fi,
+                file_id: fid,
+                results,
+                record_ctx,
+            });
         });
         self.set_status("Running all tests...".to_string());
     }
 
     fn spawn_single_block_run(&mut self, fi: usize, bi: usize) {
+        let missing = self.unresolved_prompts(fi);
+        if !missing.is_empty() {
+            self.set_status(format!(
+                "⚠ @prompt vars unresolved: {} — press V to set values, then re-run",
+                missing.join(", ")
+            ));
+            return;
+        }
         let otel_on = self.otel_enabled;
         let suite_data = self.loaded_files.get(fi).and_then(|file| {
             file.suite.blocks.get(bi).map(|block| {
@@ -1868,9 +2237,19 @@ impl App {
                 extra_vars.push(("__telemetry_file".to_string(), file_name));
             }
             let run_mode = self.run_mode().map(|s| s.to_string());
+            let env_file = self
+                .env_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string());
             let dev_auth_mappings = if self.dev_mode { self.collect_dev_auth_mappings() } else { Vec::new() };
             let tx = self.runner_tx.clone();
             let handler = Arc::new(TuiProgress::new(tx.clone()));
+            let started_at = Utc::now();
+            let run_mode_for_ctx = run_mode.clone();
+            let file_id_override_for_ctx = self.loaded_files[fi]
+                .snapshot
+                .as_ref()
+                .map(|s| s.file_id.clone());
 
             tokio::spawn(async move {
                 if !dev_auth_mappings.is_empty() {
@@ -1925,14 +2304,186 @@ impl App {
                         full_results.block_results[bi] = single_br;
                     }
                 }
+                let record_ctx = Some(AutoRecordContext {
+                    started_at,
+                    run_mode: run_mode_for_ctx,
+                    env_file,
+                    variables: extra_vars,
+                    file_id_override: file_id_override_for_ctx,
+                });
                 let _ = tx.send(RunnerMessage::SuiteComplete {
-                    file_idx: fi, file_id: fid, results: full_results,
+                    file_idx: fi, file_id: fid, results: full_results, record_ctx,
                 });
             });
         }
     }
 
+    /// Compute the first request host across the suite of `loaded_files[fi]`,
+    /// for display in the replay confirmation modal. Returns `None` if no
+    /// block carries a parseable URL.
+    fn first_host_for_file(&self, fi: usize) -> Option<String> {
+        let file = self.loaded_files.get(fi)?;
+        for block in &file.suite.blocks {
+            let url = block.request.url.as_str();
+            if url.is_empty() {
+                continue;
+            }
+            // Take the chunk between "://" and the next '/'. Good enough for
+            // a one-line modal hint.
+            if let Some(rest) = url.split_once("://").map(|(_, r)| r) {
+                let host = rest.split('/').next().unwrap_or("");
+                if !host.is_empty() {
+                    return Some(host.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Build a `ReplayConfirm` for a single-block replay of the snapshot at
+    /// `file_idx`. Returns `None` if the file is not a snapshot or `block_idx`
+    /// is out of range.
+    pub fn build_block_replay_confirm(
+        &self,
+        file_idx: usize,
+        block_idx: usize,
+    ) -> Option<ReplayConfirm> {
+        let file = self.loaded_files.get(file_idx)?;
+        let snapshot = file.snapshot.clone()?;
+        let block = file.suite.blocks.get(block_idx)?;
+        Some(ReplayConfirm {
+            kind: ReplayKind::Block(block.name.clone()),
+            file_idx,
+            file_name: file.name.clone(),
+            mode: self.run_mode().map(|s| s.to_string()),
+            env_file: self
+                .env_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            first_host: self.first_host_for_file(file_idx),
+            snapshot_meta: snapshot,
+        })
+    }
+
+    /// Spawn a single-block run triggered by a snapshot replay confirmation.
+    /// Locates the named block in the snapshot's suite, then defers to the
+    /// existing `spawn_single_block_run` path. The auto-record step in the
+    /// `SuiteComplete` handler already pins the new session under the
+    /// snapshot's `file_id` whenever the active file is a snapshot, so no
+    /// extra plumbing is needed here.
+    pub fn spawn_single_block_run_for_replay(&mut self, replay: ReplayConfirm) {
+        let block_name = match &replay.kind {
+            ReplayKind::Block(name) => name.clone(),
+            ReplayKind::All => {
+                self.set_status(
+                    "Internal: spawn_single_block_run_for_replay called with ReplayKind::All"
+                        .to_string(),
+                );
+                return;
+            }
+        };
+        let fi = replay.file_idx;
+        let Some(file) = self.loaded_files.get(fi) else {
+            self.set_status("Replay aborted: file no longer loaded".to_string());
+            return;
+        };
+        if file.snapshot.as_ref().map(|s| &s.file_id) != Some(&replay.snapshot_meta.file_id) {
+            self.set_status("Replay aborted: snapshot mismatch".to_string());
+            return;
+        }
+        let Some(bi) = file.suite.blocks.iter().position(|b| b.name == block_name) else {
+            self.set_status(format!(
+                "Replay aborted: block '{}' not found in snapshot",
+                block_name
+            ));
+            return;
+        };
+        self.active_file_idx = Some(fi);
+        self.active_block_idx = Some(bi);
+        self.spawn_single_block_run(fi, bi);
+    }
+
+    /// Build a `ReplayConfirm` for a full-suite replay of the snapshot at
+    /// `file_idx`. Returns `None` if the file is not a snapshot.
+    pub fn build_all_replay_confirm(&self, file_idx: usize) -> Option<ReplayConfirm> {
+        let file = self.loaded_files.get(file_idx)?;
+        let snapshot = file.snapshot.clone()?;
+        Some(ReplayConfirm {
+            kind: ReplayKind::All,
+            file_idx,
+            file_name: file.name.clone(),
+            mode: self.run_mode().map(|s| s.to_string()),
+            env_file: self
+                .env_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            first_host: self.first_host_for_file(file_idx),
+            snapshot_meta: snapshot,
+        })
+    }
+
+    /// Spawn a full-suite run triggered by a snapshot replay confirmation.
+    /// Defers to the existing `spawn_suite_run` path. The auto-record step
+    /// in the `SuiteComplete` handler already pins the new session under the
+    /// snapshot's `file_id` whenever the active file is a snapshot, so the
+    /// new run lands beside the original in the Sessions tab.
+    pub fn spawn_suite_run_for_replay(&mut self, replay: ReplayConfirm) {
+        if !matches!(replay.kind, ReplayKind::All) {
+            self.set_status(
+                "Internal: spawn_suite_run_for_replay called with non-All kind".to_string(),
+            );
+            return;
+        }
+        let fi = replay.file_idx;
+        let Some(file) = self.loaded_files.get(fi) else {
+            self.set_status("Replay aborted: file no longer loaded".to_string());
+            return;
+        };
+        if file.snapshot.as_ref().map(|s| &s.file_id) != Some(&replay.snapshot_meta.file_id) {
+            self.set_status("Replay aborted: snapshot mismatch".to_string());
+            return;
+        }
+        self.active_file_idx = Some(fi);
+        self.spawn_suite_run(fi);
+    }
+
+    /// Build a `DetachConfirm` for the snapshot at `file_idx`. Returns
+    /// `None` if the file is not loaded or is not a snapshot.
+    pub fn confirm_detach(&self, file_idx: usize) -> Option<DetachConfirm> {
+        let file = self.loaded_files.get(file_idx)?;
+        if !file.locked || file.snapshot.is_none() {
+            return None;
+        }
+        Some(DetachConfirm {
+            file_idx,
+            file_name: file.name.clone(),
+        })
+    }
+
+    /// Apply a pending detach: clear the snapshot marker and unlock the
+    /// file so the user can edit and save it as a fresh buffer. The
+    /// recorded session on disk is untouched and still visible in the
+    /// Sessions tab.
+    pub fn apply_detach(&mut self) {
+        let Some(detach) = self.pending_detach.take() else { return; };
+        if let Some(file) = self.loaded_files.get_mut(detach.file_idx) {
+            file.snapshot = None;
+            file.locked = false;
+        }
+        self.set_status(
+            "Snapshot detached. Original session is still in Sessions tab.".to_string(),
+        );
+    }
+
     fn spawn_group_run(&mut self, fi: usize, block_indices: Vec<usize>) {
+        let missing = self.unresolved_prompts(fi);
+        if !missing.is_empty() {
+            self.set_status(format!(
+                "⚠ @prompt vars unresolved: {} — press V to set values, then re-run",
+                missing.join(", ")
+            ));
+            return;
+        }
         let otel_on = self.otel_enabled;
         let suite_data = self.loaded_files.get(fi).map(|file| {
             let blocks: Vec<_> = block_indices.iter()
@@ -1968,10 +2519,20 @@ impl App {
                 extra_vars.push(("__telemetry_file".to_string(), file_name));
             }
             let run_mode = self.run_mode().map(|s| s.to_string());
+            let env_file = self
+                .env_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string());
             let dev_auth_mappings = if self.dev_mode { self.collect_dev_auth_mappings() } else { Vec::new() };
             let tx = self.runner_tx.clone();
             let handler = Arc::new(TuiProgress::new(tx.clone()));
             let indices = block_indices;
+            let started_at = Utc::now();
+            let run_mode_for_ctx = run_mode.clone();
+            let file_id_override_for_ctx = self.loaded_files[fi]
+                .snapshot
+                .as_ref()
+                .map(|s| s.file_id.clone());
 
             tokio::spawn(async move {
                 if !dev_auth_mappings.is_empty() {
@@ -2028,8 +2589,15 @@ impl App {
                     passed, failed, skipped, total_time_ms, block_results, final_variables,
                     telemetry: None,
                 };
+                let record_ctx = Some(AutoRecordContext {
+                    started_at,
+                    run_mode: run_mode_for_ctx,
+                    env_file,
+                    variables: extra_vars,
+                    file_id_override: file_id_override_for_ctx,
+                });
                 let _ = tx.send(RunnerMessage::SuiteComplete {
-                    file_idx: fi, file_id: fid, results: full_results,
+                    file_idx: fi, file_id: fid, results: full_results, record_ctx,
                 });
             });
         }
@@ -2081,7 +2649,7 @@ impl App {
                             icon, progress.name, self.progress_current, self.progress_total
                         ));
                     }
-                    RunnerMessage::SuiteComplete { file_idx, file_id, results } => {
+                    RunnerMessage::SuiteComplete { file_idx, file_id, results, record_ctx } => {
                         let resolved_idx = if self.loaded_files.get(file_idx).map_or(false, |f| f.id == file_id) {
                             Some(file_idx)
                         } else {
@@ -2094,13 +2662,43 @@ impl App {
                             if let Some(ref stats) = results.telemetry {
                                 self.otel_stats = Some(stats.clone());
                             }
-                            self.loaded_files[idx].results = Some(results);
+                            self.loaded_files[idx].results = Some(results.clone());
 
                             if let Some(ref r) = self.loaded_files[idx].results {
                                 self.set_status(format!(
                                     "\u{2713} {} passed  \u{2717} {} failed  \u{2298} {} skipped  \u{00b7} {}ms",
                                     r.passed, r.failed, r.skipped, r.total_time_ms
                                 ));
+                            }
+
+                            // Best-effort auto-record into Sessions store. Never
+                            // surfaces failures to the user (the run already
+                            // produced its results).
+                            if let Some(ctx) = record_ctx {
+                                let cfg = sessions_config::load_from(&default_config_path())
+                                    .unwrap_or_default();
+                                let file = &self.loaded_files[idx];
+                                let recorded = auto_record_run(
+                                    &cfg,
+                                    file.path.as_deref(),
+                                    &file.content,
+                                    &results,
+                                    ctx.started_at,
+                                    Utc::now(),
+                                    ctx.run_mode.as_deref(),
+                                    ctx.env_file.as_deref(),
+                                    ctx.variables,
+                                    ctx.file_id_override.as_deref(),
+                                );
+                                match recorded {
+                                    Ok(Some(_)) => {
+                                        self.sessions_tab.refresh();
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        log::warn!("[sessions] auto-record failed: {}", e);
+                                    }
+                                }
                             }
                         }
                         self.is_running = false;
@@ -2212,3 +2810,609 @@ impl App {
 
 use crate::events;
 use crate::ui;
+
+#[cfg(test)]
+mod auto_record_tests {
+    use super::*;
+    use request_pilot_core::http_client::HttpResponse;
+    use request_pilot_core::assertions::AssertionResult;
+    use request_pilot_core::test_runner::{BlockResult, ExtractResult};
+    use request_pilot_core::sessions::CapturePolicy;
+    use std::collections::HashMap;
+
+    fn tmp_dir(label: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "rp-tui-autorecord-{}-{}",
+            label,
+            uuid::Uuid::new_v4()
+        ));
+        p
+    }
+
+    fn dummy_results() -> TestRunResults {
+        TestRunResults {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            total_time_ms: 1,
+            block_results: vec![BlockResult {
+                seq: Some(1),
+                name: "ping".to_string(),
+                block_type: "test".to_string(),
+                group: None,
+                request_method: "GET".to_string(),
+                request_url: "https://example.com/ping".to_string(),
+                request_headers: vec![],
+                request_body: None,
+                status: "passed".to_string(),
+                response: Some(HttpResponse {
+                    status: 200,
+                    status_text: "OK".to_string(),
+                    headers: vec![],
+                    body: "{\"ok\":true}".to_string(),
+                    time_ms: 1,
+                    size_bytes: 11,
+                }),
+                assertion_results: vec![AssertionResult {
+                    assertion: "status == 200".to_string(),
+                    expected: Some("200".to_string()),
+                    actual: Some("200".to_string()),
+                    passed: true,
+                }],
+                extract_results: vec![ExtractResult {
+                    variable: "id".to_string(),
+                    value: Some("1".to_string()),
+                    success: true,
+                }],
+                error: None,
+                time_ms: 1,
+                step_results: vec![],
+                diff_result: None,
+            }],
+            final_variables: HashMap::new(),
+            telemetry: None,
+        }
+    }
+
+    fn find_run_json(root: &Path) -> Option<PathBuf> {
+        let files_dir = root.join("files");
+        if !files_dir.is_dir() {
+            return None;
+        }
+        for f_entry in std::fs::read_dir(&files_dir).ok()?.flatten() {
+            let versions = f_entry.path().join("versions");
+            for v_entry in std::fs::read_dir(&versions).ok()?.flatten() {
+                let sessions = v_entry.path().join("sessions");
+                for s_entry in std::fs::read_dir(&sessions).ok()?.flatten() {
+                    let candidate = s_entry.path().join("run.json");
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn tui_auto_record_writes_run_when_enabled() {
+        let root = tmp_dir("enabled");
+        let cfg = SessionsConfig {
+            root: Some(root.to_string_lossy().to_string()),
+            auto_record: true,
+            capture_policy: CapturePolicy::default(),
+            capture_preset: "snapshot".to_string(),
+            retention: None,
+            body_redaction_paths: Vec::new(),
+        };
+        let now = Utc::now();
+        let recorded = auto_record_run(
+            &cfg,
+            None,
+            "GET https://example.com/ping\n",
+            &dummy_results(),
+            now,
+            now,
+            None,
+            None,
+            vec![],
+            None,
+        )
+        .expect("auto_record_run should succeed");
+        assert!(recorded.is_some(), "expected a recorded session");
+        let run_json = find_run_json(&root)
+            .expect("expected a run.json under <root>/files/<file_id>/versions/<sha>/sessions/run-*");
+        assert!(run_json.is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tui_auto_record_disabled_skips() {
+        let root = tmp_dir("disabled");
+        let cfg = SessionsConfig {
+            root: Some(root.to_string_lossy().to_string()),
+            auto_record: false,
+            capture_policy: CapturePolicy::default(),
+            capture_preset: "snapshot".to_string(),
+            retention: None,
+            body_redaction_paths: Vec::new(),
+        };
+        let now = Utc::now();
+        let recorded = auto_record_run(
+            &cfg,
+            None,
+            "GET https://example.com/ping\n",
+            &dummy_results(),
+            now,
+            now,
+            None,
+            None,
+            vec![],
+            None,
+        )
+        .expect("auto_record_run should succeed");
+        assert!(recorded.is_none(), "expected no session when disabled");
+        assert!(
+            find_run_json(&root).is_none(),
+            "no run.json should be written when auto_record=false"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tui_auto_record_no_root_skips() {
+        let cfg = SessionsConfig {
+            root: None,
+            auto_record: true,
+            capture_policy: CapturePolicy::default(),
+            capture_preset: "snapshot".to_string(),
+            retention: None,
+            body_redaction_paths: Vec::new(),
+        };
+        let now = Utc::now();
+        let recorded = auto_record_run(
+            &cfg,
+            None,
+            "GET https://example.com/ping\n",
+            &dummy_results(),
+            now,
+            now,
+            None,
+            None,
+            vec![],
+            None,
+        )
+        .expect("auto_record_run should not error when root is None");
+        assert!(recorded.is_none());
+    }
+}
+#[cfg(test)]
+mod snapshot_load_tests {
+    use super::*;
+    use request_pilot_core::http_client::HttpResponse;
+    use request_pilot_core::assertions::AssertionResult;
+    use request_pilot_core::test_runner::{BlockResult, ExtractResult};
+    use request_pilot_core::sessions::{
+        CapturePolicy, Component, FileIdentity, RecordInput, SessionStore, SessionTrigger,
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn tmp_root(label: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "rp-tui-snapshot-load-{}-{}",
+            label,
+            uuid::Uuid::new_v4()
+        ));
+        p
+    }
+
+    fn dummy_results() -> TestRunResults {
+        TestRunResults {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            total_time_ms: 1,
+            block_results: vec![BlockResult {
+                seq: Some(1),
+                name: "ping".to_string(),
+                block_type: "test".to_string(),
+                group: None,
+                request_method: "GET".to_string(),
+                request_url: "https://example.com/ping".to_string(),
+                request_headers: vec![],
+                request_body: None,
+                status: "passed".to_string(),
+                response: Some(HttpResponse {
+                    status: 200,
+                    status_text: "OK".to_string(),
+                    headers: vec![],
+                    body: "{\"ok\":true}".to_string(),
+                    time_ms: 1,
+                    size_bytes: 11,
+                }),
+                assertion_results: vec![AssertionResult {
+                    assertion: "status == 200".to_string(),
+                    expected: Some("200".to_string()),
+                    actual: Some("200".to_string()),
+                    passed: true,
+                }],
+                extract_results: vec![ExtractResult {
+                    variable: "id".to_string(),
+                    value: Some("1".to_string()),
+                    success: true,
+                }],
+                error: None,
+                time_ms: 1,
+                step_results: vec![],
+                diff_result: None,
+            }],
+            final_variables: HashMap::new(),
+            telemetry: None,
+        }
+    }
+
+    #[test]
+    fn load_snapshot_populates_loaded_files() {
+        let root = tmp_root("populates");
+        let store = SessionStore::open(&root).unwrap();
+        let now = Utc::now();
+        let recorded = store
+            .record_run(RecordInput {
+                identity: FileIdentity::Alias("checkout".into()),
+                source_path: None,
+                source_content: "GET https://example.com/ping\n",
+                policy: CapturePolicy::default(),
+                trigger: SessionTrigger::Manual,
+                component: Component::Cli,
+                started_at: now,
+                finished_at: now,
+                mode: None,
+                env_file: None,
+                env_identity: None,
+                variables: vec![],
+                results: dummy_results(),
+                file_id_override: None,
+                redact_body_rules: Vec::new(),
+                block_redact_body_rules: std::collections::HashMap::new(),
+            })
+            .expect("record_run");
+
+        let mut app = App::new();
+        app.sessions_tab.store = Some(Arc::new(store));
+        let before = app.loaded_files.len();
+
+        app.load_snapshot_from_session(
+            &recorded.file_id,
+            &recorded.sha256,
+            &recorded.run_id,
+            "checkout",
+        )
+        .expect("load_snapshot_from_session should succeed");
+
+        assert_eq!(app.loaded_files.len(), before + 1);
+        let last = app.loaded_files.last().unwrap();
+        assert!(last.snapshot.is_some(), "snapshot meta should be set");
+        assert!(last.locked, "snapshot-loaded files must be locked");
+        let meta = last.snapshot.as_ref().unwrap();
+        assert_eq!(meta.file_id, recorded.file_id);
+        assert_eq!(meta.sha256, recorded.sha256);
+        assert_eq!(meta.run_id, recorded.run_id);
+        assert_eq!(app.mode, Mode::Files);
+        assert_eq!(app.active_file_idx, Some(app.loaded_files.len() - 1));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn load_snapshot_missing_returns_err() {
+        let root = tmp_root("missing");
+        let store = SessionStore::open(&root).unwrap();
+
+        let mut app = App::new();
+        app.sessions_tab.store = Some(Arc::new(store));
+        let before = app.loaded_files.len();
+        let prev_mode = app.mode;
+
+        let res = app.load_snapshot_from_session(
+            "no-such-file",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "no-such-run",
+            "fake",
+        );
+        assert!(res.is_err(), "expected Err for missing snapshot");
+        assert_eq!(app.loaded_files.len(), before, "loaded_files unchanged");
+        assert_eq!(app.mode, prev_mode, "mode unchanged on error");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn load_snapshot_without_store_returns_err() {
+        let mut app = App::new();
+        app.sessions_tab.store = None;
+        let before = app.loaded_files.len();
+        let res = app.load_snapshot_from_session("f", "abcdef", "r", "n");
+        assert!(res.is_err());
+        assert_eq!(app.loaded_files.len(), before);
+    }
+}
+
+#[cfg(test)]
+mod replay_block_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use request_pilot_core::assertions::AssertionResult;
+    use request_pilot_core::http_client::HttpResponse;
+    use request_pilot_core::sessions::{
+        CapturePolicy, Component, FileIdentity, RecordInput, SessionStore, SessionTrigger,
+    };
+    use request_pilot_core::test_runner::{BlockResult, ExtractResult};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn tmp_root(label: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "rp-tui-replay-block-{}-{}",
+            label,
+            uuid::Uuid::new_v4()
+        ));
+        p
+    }
+
+    fn block_result(name: &str, url: &str) -> BlockResult {
+        BlockResult {
+            seq: Some(1),
+            name: name.to_string(),
+            block_type: "test".to_string(),
+            group: None,
+            request_method: "GET".to_string(),
+            request_url: url.to_string(),
+            request_headers: vec![],
+            request_body: None,
+            status: "passed".to_string(),
+            response: Some(HttpResponse {
+                status: 200,
+                status_text: "OK".to_string(),
+                headers: vec![],
+                body: "{}".to_string(),
+                time_ms: 1,
+                size_bytes: 2,
+            }),
+            assertion_results: vec![AssertionResult {
+                assertion: "status == 200".to_string(),
+                expected: Some("200".to_string()),
+                actual: Some("200".to_string()),
+                passed: true,
+            }],
+            extract_results: vec![ExtractResult {
+                variable: "id".to_string(),
+                value: Some("1".to_string()),
+                success: true,
+            }],
+            error: None,
+            time_ms: 1,
+            step_results: vec![],
+            diff_result: None,
+        }
+    }
+
+    fn two_block_results() -> TestRunResults {
+        TestRunResults {
+            passed: 2,
+            failed: 0,
+            skipped: 0,
+            total_time_ms: 2,
+            block_results: vec![
+                block_result("first", "https://example.com/first"),
+                block_result("second", "https://example.com/second"),
+            ],
+            final_variables: HashMap::new(),
+            telemetry: None,
+        }
+    }
+
+    /// End-to-end check for the snapshot block-replay confirmation flow:
+    /// 1. Record an original 2-block session.
+    /// 2. Load it as a snapshot (no path on disk).
+    /// 3. Build a `ReplayConfirm` for just the first block.
+    /// 4. Auto-record a synthetic single-block result with
+    ///    `file_id_override = snapshot.file_id`, mirroring what
+    ///    `spawn_single_block_run_for_replay` causes once the run completes.
+    /// 5. Assert the new run.json lives under the *original* file_id and
+    ///    contains exactly one block result.
+    #[test]
+    fn replay_block_confirm_records_single_block() {
+        let root = tmp_root("records");
+        let store = SessionStore::open(&root).unwrap();
+        let now = Utc::now();
+        let source = "# @name first\nGET https://example.com/first\n\n###\n\n# @name second\nGET https://example.com/second\n";
+        let recorded = store
+            .record_run(RecordInput {
+                identity: FileIdentity::Alias("replay-target".into()),
+                source_path: None,
+                source_content: source,
+                policy: CapturePolicy::default(),
+                trigger: SessionTrigger::Manual,
+                component: Component::Cli,
+                started_at: now,
+                finished_at: now,
+                mode: None,
+                env_file: None,
+                env_identity: None,
+                variables: vec![],
+                results: two_block_results(),
+                file_id_override: None,
+                redact_body_rules: Vec::new(),
+                block_redact_body_rules: std::collections::HashMap::new(),
+            })
+            .expect("record_run");
+
+        // Step 2 — load as snapshot into a fresh App.
+        let mut app = App::new();
+        app.sessions_tab.store = Some(Arc::new(store));
+        app.load_snapshot_from_session(
+            &recorded.file_id,
+            &recorded.sha256,
+            &recorded.run_id,
+            "replay-target",
+        )
+        .expect("load_snapshot_from_session");
+        let fi = app.active_file_idx.expect("active file after snapshot load");
+        assert_eq!(app.loaded_files[fi].suite.blocks.len(), 2);
+
+        // Step 3 — build the per-block replay confirm.
+        let confirm = app
+            .build_block_replay_confirm(fi, 0)
+            .expect("snapshot file with focused block must produce a confirm");
+        assert!(matches!(confirm.kind, ReplayKind::Block(ref n) if n == "first"));
+        assert_eq!(confirm.snapshot_meta.file_id, recorded.file_id);
+
+        // Step 4 — simulate the post-run auto-record. The runtime path goes
+        // through `SuiteComplete`, which forwards `file.snapshot.file_id` as
+        // the override; we mirror that contract here.
+        let cfg = SessionsConfig {
+            root: Some(root.to_string_lossy().to_string()),
+            auto_record: true,
+            capture_policy: CapturePolicy::default(),
+            capture_preset: "snapshot".to_string(),
+            retention: None,
+            body_redaction_paths: Vec::new(),
+        };
+        let single = TestRunResults {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            total_time_ms: 1,
+            block_results: vec![block_result("first", "https://example.com/first")],
+            final_variables: HashMap::new(),
+            telemetry: None,
+        };
+        let recorded_replay = auto_record_run(
+            &cfg,
+            None,
+            source,
+            &single,
+            now,
+            now,
+            None,
+            None,
+            vec![],
+            Some(confirm.snapshot_meta.file_id.as_str()),
+        )
+        .expect("auto_record_run")
+        .expect("expected recorded session");
+
+        // Step 5 — assertions on the new session.
+        assert_eq!(
+            recorded_replay.file_id, recorded.file_id,
+            "replayed run must record under the snapshot's file_id"
+        );
+        assert_ne!(
+            recorded_replay.run_id, recorded.run_id,
+            "replay must mint a new run_id distinct from the original"
+        );
+
+        // Disk layout: <root>/files/<file_id>/versions/<sha>/sessions/<run_id>/run.json
+        let run_json = root
+            .join("files")
+            .join(&recorded.file_id)
+            .join("versions")
+            .join(&recorded_replay.sha256)
+            .join("sessions")
+            .join(&recorded_replay.run_id)
+            .join("run.json");
+        assert!(
+            run_json.is_file(),
+            "expected replay run.json at {}",
+            run_json.display()
+        );
+
+        // Cross-check the persisted block_results length: a single-block
+        // replay must produce exactly one block result on disk.
+        let body = std::fs::read_to_string(&run_json).expect("read run.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("run.json is valid JSON");
+        let blocks = parsed
+            .get("results")
+            .and_then(|r| r.get("block_results"))
+            .and_then(|b| b.as_array())
+            .expect("run.json has results.block_results array");
+        assert_eq!(
+            blocks.len(),
+            1,
+            "single-block replay should record exactly one block result"
+        );
+        assert_eq!(
+            blocks[0].get("name").and_then(|n| n.as_str()),
+            Some("first")
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Lowercase `r` while focused on a non-Block tree node (e.g. the
+    /// snapshot's file row) must NOT pop the replay-confirm modal. The key
+    /// falls through to the normal "run all" path, which is harmless in a
+    /// test (it only sets a queue flag).
+    #[test]
+    fn lowercase_r_without_focused_block_falls_through() {
+        let root = tmp_root("nofocus");
+        let store = SessionStore::open(&root).unwrap();
+        let now = Utc::now();
+        let source = "# @name first\nGET https://example.com/first\n\n###\n\n# @name second\nGET https://example.com/second\n";
+
+        let recorded = store
+            .record_run(RecordInput {
+                identity: FileIdentity::Alias("replay-target".into()),
+                source_path: None,
+                source_content: source,
+                policy: CapturePolicy::default(),
+                trigger: SessionTrigger::Manual,
+                component: Component::Cli,
+                started_at: now,
+                finished_at: now,
+                mode: None,
+                env_file: None,
+                env_identity: None,
+                variables: vec![],
+                results: two_block_results(),
+                file_id_override: None,
+                redact_body_rules: Vec::new(),
+                block_redact_body_rules: std::collections::HashMap::new(),
+            })
+            .expect("record_run");
+
+        let mut app = App::new();
+        app.sessions_tab.store = Some(Arc::new(store));
+        app.load_snapshot_from_session(
+            &recorded.file_id,
+            &recorded.sha256,
+            &recorded.run_id,
+            "replay-target",
+        )
+        .expect("load_snapshot_from_session");
+
+        // Place the cursor on the File node (index 0 in the rebuilt tree).
+        // No block is focused.
+        app.tree_cursor = 0;
+        assert!(matches!(app.tree_nodes[0], TreeNode::File { .. }));
+
+        // Press lowercase 'r'. Route through the real `handle_key` so we
+        // exercise the same code path as the live event loop.
+        crate::events::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+        );
+
+        assert!(
+            app.pending_replay.is_none(),
+            "no replay modal when focused node is not a Block"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

@@ -11,14 +11,65 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::{App, Mode, Focus};
 use crate::ui::theme;
 
-const DIRECTIVES: &[&str] = &[
-    "# @name", "# @description", "# @assert", "# @extract",
-    "# @setup", "# @test", "# @teardown", "# @group",
-    "# @depends", "# @mode", "# @dev_auth", "# @disabled",
-    "# @type", "# @compare", "# @step", "# @diff",
+const PILOT_DIRECTIVES: &[&str] = &[
+    "name", "description", "note", "assert", "extract",
+    "setup", "test", "teardown", "group",
+    "depends", "mode", "dev_auth", "disabled",
+    "type", "compare", "step", "diff",
+    "auto_run", "telemetry", "telemetry_token", "telemetry_service",
+    "prompt",
 ];
 
 const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+
+/// Returns true if `trimmed` is a Pilot comment-directive line:
+/// `# @x`, `# @@x`, `// @x`, or `// @@x` where `x` is any known directive.
+fn is_pilot_directive_line(trimmed: &str) -> bool {
+    let after_comment = if let Some(rest) = trimmed.strip_prefix("//") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix('#') {
+        rest
+    } else {
+        return false;
+    };
+    let after_comment = after_comment.trim_start();
+    let after_at = if let Some(rest) = after_comment.strip_prefix("@@") {
+        rest
+    } else if let Some(rest) = after_comment.strip_prefix('@') {
+        rest
+    } else {
+        return false;
+    };
+    PILOT_DIRECTIVES.iter().any(|d| {
+        after_at == *d
+            || after_at.starts_with(&format!("{} ", d))
+            || after_at.starts_with(&format!("{}\t", d))
+    })
+}
+
+/// Returns true if `trimmed` is one of the compare-family directives that
+/// act as sub-block separators (reset body state): `# @step`/`# @@step`,
+/// `# @compare`/`# @@compare`, `# @diff`/`# @@diff` (and `//` variants).
+fn is_compare_subblock_line(trimmed: &str) -> bool {
+    let after_comment = if let Some(rest) = trimmed.strip_prefix("//") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix('#') {
+        rest
+    } else {
+        return false;
+    };
+    let after_comment = after_comment.trim_start();
+    let after_at = if let Some(rest) = after_comment.strip_prefix("@@") {
+        rest
+    } else if let Some(rest) = after_comment.strip_prefix('@') {
+        rest
+    } else {
+        return false;
+    };
+    after_at == "compare"
+        || after_at.starts_with("step ") || after_at.starts_with("step\t")
+        || after_at.starts_with("diff ") || after_at.starts_with("diff\t")
+}
 
 fn method_color(method: &str) -> ratatui::style::Color {
     match method {
@@ -59,24 +110,33 @@ fn highlight_variables(text: &str, base_style: Style) -> Vec<Span<'static>> {
 fn highlight_line(line: &str, in_body: bool) -> Vec<Span<'static>> {
     let trimmed = line.trim();
 
-    if trimmed.starts_with("###") {
+    // Request separator: ### or --- (line-anchored, with optional space/EOL after)
+    let is_sep = if let Some(rest) = trimmed.strip_prefix("###") {
+        rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace())
+    } else if let Some(rest) = trimmed.strip_prefix("---") {
+        rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace())
+    } else {
+        false
+    };
+    if is_sep {
         return vec![Span::styled(
             line.to_string(),
             Style::default().fg(theme::YELLOW()).add_modifier(Modifier::BOLD),
         )];
     }
 
-    for d in DIRECTIVES {
-        if trimmed.starts_with(d) {
-            return vec![Span::styled(line.to_string(), Style::default().fg(theme::MAUVE()))];
-        }
+    // Pilot directive comment (# @x, # @@x, // @x, // @@x)
+    if is_pilot_directive_line(trimmed) {
+        return vec![Span::styled(line.to_string(), Style::default().fg(theme::MAUVE()))];
     }
 
+    // Top-level variable definition or bare directive (lines starting with @)
     if trimmed.starts_with('@') {
         return highlight_variables(line, Style::default().fg(theme::MAUVE()));
     }
 
-    if trimmed.starts_with('#') {
+    // Plain comment (# or //)
+    if trimmed.starts_with('#') || trimmed.starts_with("//") {
         return vec![Span::styled(line.to_string(), Style::default().fg(theme::GREEN()))];
     }
 
@@ -293,11 +353,18 @@ pub fn render_editor(frame: &mut Frame, app: &App, area: Rect) {
         let mut had_empty_after_headers = false;
         for (i, line) in raw_lines.iter().enumerate() {
             let trimmed = line.trim();
-            if trimmed.starts_with("###") {
+            let is_sep = if let Some(rest) = trimmed.strip_prefix("###") {
+                rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace())
+            } else if let Some(rest) = trimmed.strip_prefix("---") {
+                rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace())
+            } else {
+                false
+            };
+            if is_sep {
                 had_method = false;
                 had_empty_after_headers = false;
                 in_body_flags[i] = false;
-            } else if trimmed.starts_with("# @step ") || trimmed == "# @compare" || trimmed.starts_with("# @diff ") {
+            } else if is_compare_subblock_line(trimmed) {
                 // Compare directives reset body state (act like sub-block separators)
                 had_method = false;
                 had_empty_after_headers = false;
@@ -666,6 +733,49 @@ pub fn handle_editor_keys(app: &mut App, key: KeyEvent) {
 
 fn handle_editor_keys_inner(app: &mut App, key: KeyEvent) {
     let total_lines = app.code_editor_content.split('\n').count();
+
+    // Snapshot lock: when the active file was loaded from a recorded
+    // session it is read-only. Force VIEW mode and reject keys that
+    // would mutate the buffer (Char/Backspace/Delete/Tab/Enter as
+    // newline insert) or save. Navigation keys (arrows, Home/End,
+    // PgUp/PgDn, Ctrl+U/D scroll, search) are still allowed so users
+    // can browse the snapshot. The uppercase `D` "detach" key is
+    // handled at a higher dispatch layer (see `events::handle_key`)
+    // and never reaches this guard.
+    let snapshot_locked = app.active_file_locked();
+    if snapshot_locked && app.code_editor_editing {
+        app.code_editor_editing = false;
+    }
+    if snapshot_locked {
+        let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let is_edit_attempt = match key.code {
+            KeyCode::Char('i') | KeyCode::Char('e') if !is_ctrl => true,
+            KeyCode::Char('s') | KeyCode::Char('v') | KeyCode::Char('x') if is_ctrl => true,
+            KeyCode::Char(_) if is_ctrl => false,
+            KeyCode::Char(_) => true,
+            KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Tab
+            | KeyCode::BackTab => true,
+            KeyCode::Enter if !is_ctrl => true,
+            _ => false,
+        };
+        if is_edit_attempt {
+            // Throttle: only emit the read-only message once per second
+            // so it doesn't spam on every keystroke held down.
+            let should_announce = match app.status_message.as_ref() {
+                Some((msg, at)) => {
+                    msg != "Snapshot is read-only. Detach to edit."
+                        || at.elapsed() >= std::time::Duration::from_secs(1)
+                }
+                None => true,
+            };
+            if should_announce {
+                app.set_status("Snapshot is read-only. Detach to edit.".into());
+            }
+            return;
+        }
+    }
 
     // Variable autocomplete takes priority
     if app.var_ac_open {

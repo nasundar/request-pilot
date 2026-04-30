@@ -10,7 +10,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             match key.code {
                 KeyCode::Char('f') | KeyCode::Char('h') | KeyCode::Char('l')
                 | KeyCode::Char('q') | KeyCode::Char('?')
-                | KeyCode::Char('V') | KeyCode::Char('T') | KeyCode::Char('R') => {
+                | KeyCode::Char('V') | KeyCode::Char('T') | KeyCode::Char('R')
+                | KeyCode::Char('D') => {
                     // fall through to global key handling below
                 }
                 _ => {
@@ -35,6 +36,46 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             return;
         }
         InputMode::Normal => {}
+    }
+
+    // 1b. Env picker overlay
+    if app.env_picker_open {
+        let n = app.env_config.entries.len();
+        // cursor 0 = (none), 1..=n = entries
+        match key.code {
+            KeyCode::Esc => { app.env_picker_open = false; }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.env_picker_cursor = (app.env_picker_cursor + 1).min(n);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.env_picker_cursor = app.env_picker_cursor.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                let idx = if app.env_picker_cursor == 0 { None } else { Some(app.env_picker_cursor - 1) };
+                app.activate_env_index(idx);
+                app.env_picker_open = false;
+            }
+            KeyCode::Char('d') => {
+                if app.env_picker_cursor > 0 {
+                    let idx = app.env_picker_cursor - 1;
+                    app.remove_env_index(idx);
+                    // Clamp cursor to new length
+                    let new_n = app.env_config.entries.len();
+                    app.env_picker_cursor = app.env_picker_cursor.min(new_n);
+                }
+            }
+            KeyCode::Char('a') => {
+                // Open "Load .env" input prompt and close picker.
+                app.env_picker_open = false;
+                app.input_mode = InputMode::Input {
+                    prompt: "Load .env file: ".to_string(),
+                    purpose: InputPurpose::LoadEnv,
+                    buffer: String::new(),
+                };
+            }
+            _ => {}
+        }
+        return;
     }
 
     // 2. Help overlay with scroll
@@ -66,6 +107,23 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     // 3. Diff viewer overlay
     if app.diff_viewer_open {
         components::diff_viewer::handle_diff_keys(app, key);
+        return;
+    }
+
+    // 3a. Snapshot replay confirmation modal — must come before any other
+    // overlay/mode handler so y/n/Esc/Enter are routed to the modal even if
+    // the underlying file is locked.
+    if app.pending_replay.is_some() {
+        handle_replay_confirm_keys(app, key);
+        return;
+    }
+
+    // 3a'. Snapshot detach confirmation modal — same routing rule as the
+    // replay modal: it must intercept keys before any lock check or other
+    // overlay handler runs, otherwise the locked-snapshot read-only guard
+    // in the code editor would swallow `y`/`n`.
+    if app.pending_detach.is_some() {
+        handle_detach_confirm_keys(app, key);
         return;
     }
 
@@ -218,6 +276,20 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     // 7. Global keybinds
     let in_text_input = matches!(app.focus, Focus::FilterInput);
 
+    // 7a. Sessions mode owns most keys (including 'f', 'h', 'l', 'g', 'r', '/'),
+    // so route them before the global mode-switch handlers below grab them.
+    if app.mode == Mode::Sessions {
+        // Always pass through quit and help.
+        let pass_through = matches!(
+            key.code,
+            KeyCode::Char('q') | KeyCode::Char('?')
+        ) || matches!(key.code, KeyCode::F(1) | KeyCode::F(3) | KeyCode::F(4) | KeyCode::F(5));
+        if !pass_through {
+            handle_sessions_mode(app, key);
+            return;
+        }
+    }
+
     match key.code {
         KeyCode::Char('q') if !in_text_input => {
             app.should_quit = true;
@@ -245,6 +317,16 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             app.mode = Mode::Logs;
             return;
         }
+        KeyCode::Char('S') if !in_text_input && app.mode != Mode::Sessions => {
+            app.mode = Mode::Sessions;
+            app.sessions_tab.refresh();
+            return;
+        }
+        KeyCode::F(4) => {
+            app.mode = Mode::Sessions;
+            app.sessions_tab.refresh();
+            return;
+        }
         KeyCode::F(1) => {
             app.mode = Mode::Files;
             app.focus = Focus::FileTree;
@@ -260,7 +342,41 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             return;
         }
         KeyCode::Char('R') if !in_text_input => {
+            // If the active file was loaded from a snapshot, Shift-R opens the
+            // replay-all confirmation modal instead of kicking off a regular
+            // run. The modal records the new run under the snapshot's
+            // `file_id` so it groups beside the original in the Sessions tab.
+            if let Some(fi) = app.active_file_idx {
+                if app
+                    .loaded_files
+                    .get(fi)
+                    .and_then(|f| f.snapshot.as_ref())
+                    .is_some()
+                {
+                    if let Some(replay) = app.build_all_replay_confirm(fi) {
+                        app.pending_replay = Some(replay);
+                        app.set_status("Replay snapshot? [Y]es / [N]o".to_string());
+                        return;
+                    }
+                }
+            }
             app.queue_run_all();
+            return;
+        }
+        KeyCode::Char('D') if !in_text_input => {
+            // Shift-D detaches the active snapshot: the recorded session
+            // stays on disk in the Sessions tab, but this loaded entry
+            // becomes a regular unsaved buffer the user can edit. We
+            // open a confirm modal first; the modal-key handler above
+            // applies the detach on `y`/`Y`/Enter.
+            if let Some(fi) = app.active_file_idx {
+                if let Some(detach) = app.confirm_detach(fi) {
+                    app.pending_detach = Some(detach);
+                    app.set_status("Detach snapshot? [Y]es / [N]o".to_string());
+                    return;
+                }
+            }
+            // Not on a locked snapshot: nothing to do.
             return;
         }
         KeyCode::Char('c') if !in_text_input => {
@@ -328,6 +444,16 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             };
             return;
         }
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Env picker: list loaded .env files, activate / remove / add.
+            // Position cursor on the currently-active entry (or "(none)" at 0).
+            app.env_picker_cursor = match app.env_config.active_index {
+                Some(i) => i + 1,
+                None => 0,
+            };
+            app.env_picker_open = true;
+            return;
+        }
         // Toolbar shortcuts
         KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             toolbar::handle_toolbar_shortcuts(app, key);
@@ -368,6 +494,76 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::History => components::history::handle_history_keys(app, key),
         Mode::Code => crate::code_editor::handle_editor_keys(app, key),
         Mode::Logs => components::logs::handle_logs_keys(app, key),
+        Mode::Sessions => handle_sessions_mode(app, key),
+    }
+}
+
+fn handle_sessions_mode(app: &mut App, key: KeyEvent) {
+    // Search input mode: capture chars/backspace, Esc clears, Enter exits.
+    if app.sessions_tab.searching {
+        let s = &mut app.sessions_tab;
+        match key.code {
+            KeyCode::Esc => {
+                s.search.clear();
+                s.searching = false;
+                s.clamp_selection();
+            }
+            KeyCode::Enter => {
+                s.searching = false;
+            }
+            KeyCode::Backspace => {
+                s.search.pop();
+                s.clamp_selection();
+            }
+            KeyCode::Char(c) => {
+                s.search.push(c);
+                s.clamp_selection();
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = Mode::Files;
+            app.focus = Focus::FileTree;
+        }
+        KeyCode::Enter => {
+            // Load the selected session as a read-only snapshot into the
+            // Files tab, mirroring the desktop app's behavior.
+            let selection = app.sessions_tab.selected_row_ref().map(|r| {
+                (
+                    r.file.file_id.clone(),
+                    r.version.sha256.clone(),
+                    r.session.run_id.clone(),
+                    r.file.display_name.clone(),
+                )
+            });
+            if let Some((file_id, sha, run_id, name)) = selection {
+                match app.load_snapshot_from_session(&file_id, &sha, &run_id, &name) {
+                    Ok(()) => {
+                        let short = &sha[..sha.len().min(8)];
+                        app.set_status(format!("Loaded snapshot {} ({})", name, short));
+                    }
+                    Err(e) => {
+                        app.set_status(format!("Failed to load snapshot: {}", e));
+                    }
+                }
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => app.sessions_tab.move_down(),
+        KeyCode::Up | KeyCode::Char('k') => app.sessions_tab.move_up(),
+        KeyCode::Right | KeyCode::Char('l') => app.sessions_tab.next_group(),
+        KeyCode::Left | KeyCode::Char('h') => app.sessions_tab.prev_group(),
+        KeyCode::Tab | KeyCode::Char('g') => app.sessions_tab.toggle_group_by(),
+        KeyCode::Char('f') => app.sessions_tab.cycle_status_filter(),
+        KeyCode::Char('/') => {
+            app.sessions_tab.searching = true;
+            app.sessions_tab.search.clear();
+        }
+        KeyCode::Char('r') => app.sessions_tab.refresh(),
+        _ => {}
     }
 }
 
@@ -682,6 +878,48 @@ fn expand_paths_to_depth(
 
 fn handle_response(app: &mut App, key: KeyEvent) {
     crate::components::response::handle_response_keys(app, key);
+}
+
+/// Handle keys while the snapshot replay confirmation modal is open. Accepts
+/// `y`/`Y`/Enter to confirm, `n`/`N`/Esc to cancel. Any other key is ignored
+/// (the modal stays open).
+fn handle_replay_confirm_keys(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            if let Some(replay) = app.pending_replay.take() {
+                match &replay.kind {
+                    crate::app::ReplayKind::Block(_) => {
+                        app.spawn_single_block_run_for_replay(replay);
+                    }
+                    crate::app::ReplayKind::All => {
+                        app.spawn_suite_run_for_replay(replay);
+                    }
+                }
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.pending_replay = None;
+            app.set_status("Replay cancelled".to_string());
+        }
+        _ => {}
+    }
+}
+
+/// Handle keys while the snapshot detach confirmation modal is open. Accepts
+/// `y`/`Y`/Enter to confirm (clears the snapshot marker and unlocks the
+/// file), `n`/`N`/Esc to cancel. Any other key is ignored (the modal
+/// stays open).
+fn handle_detach_confirm_keys(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            app.apply_detach();
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.pending_detach = None;
+            app.set_status("Detach cancelled".to_string());
+        }
+        _ => {}
+    }
 }
 
 // Sidebar event handling delegated to components::sidebar

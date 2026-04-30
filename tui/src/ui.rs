@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use crate::app::{App, Mode, Focus, SidebarTab, InputMode};
 use crate::components;
@@ -411,10 +411,14 @@ pub async fn draw_splash(terminal: &mut ratatui::DefaultTerminal) -> color_eyre:
 pub fn draw(frame: &mut Frame, app: &App) {
     let has_input = !matches!(app.input_mode, InputMode::Normal);
     let show_progress = !app.run_progress_lines.is_empty() || app.is_running;
+    let show_snapshot_banner = app.active_file_locked();
 
     let mut constraints = vec![
         Constraint::Length(1),    // top bar
     ];
+    if show_snapshot_banner {
+        constraints.push(Constraint::Length(1)); // snapshot stripe
+    }
     constraints.push(Constraint::Min(10)); // main area
     if show_progress {
         constraints.push(Constraint::Length(4)); // progress strip
@@ -431,6 +435,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     let mut ci = 0;
     draw_top_bar(frame, app, chunks[ci]); ci += 1;
+    if show_snapshot_banner {
+        draw_snapshot_banner(frame, app, chunks[ci]); ci += 1;
+    }
     draw_main(frame, app, chunks[ci]); ci += 1;
     if show_progress {
         render_progress_strip(frame, app, chunks[ci]); ci += 1;
@@ -451,6 +458,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     if let Some(idx) = app.history_detail_idx {
         draw_history_detail(frame, app, frame.area(), idx);
+    }
+
+    if app.env_picker_open {
+        components::overlays::render_env_picker(frame, frame.area(), app);
     }
 
     // Diff viewer overlay
@@ -484,6 +495,145 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.auto_run_popup_open {
         toolbar::render_auto_run_popup(frame, app, frame.area());
     }
+
+    // Snapshot replay confirmation modal — drawn last so it sits on top of
+    // every other overlay.
+    if app.pending_replay.is_some() {
+        render_replay_confirm(frame, app, frame.area());
+    }
+    // Snapshot detach confirmation modal — drawn after replay so it sits on
+    // top if both are somehow open (shouldn't happen, but render order is
+    // safe regardless).
+    if app.pending_detach.is_some() {
+        render_detach_confirm(frame, app, frame.area());
+    }
+}
+
+fn render_replay_confirm(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(replay) = app.pending_replay.as_ref() else { return; };
+
+    let popup_w: u16 = 64.min(area.width.saturating_sub(4));
+    let popup_h: u16 = 12.min(area.height.saturating_sub(4));
+    if popup_w < 30 || popup_h < 8 { return; }
+    let x = (area.width.saturating_sub(popup_w)) / 2;
+    let y = (area.height.saturating_sub(popup_h)) / 2;
+    let popup_area = Rect::new(x, y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup_area);
+
+    let (title, header_line) = match &replay.kind {
+        crate::app::ReplayKind::Block(name) => (
+            " Replay block ",
+            format!("Replay block \"{}\"?", name),
+        ),
+        crate::app::ReplayKind::All => (
+            " Replay snapshot ",
+            "Replay all blocks in this snapshot?".to_string(),
+        ),
+    };
+    let mode = replay.mode.clone().unwrap_or_else(|| "(default)".to_string());
+    let env = replay.env_file.clone().unwrap_or_else(|| "(none)".to_string());
+    let host = replay.first_host.clone().unwrap_or_else(|| "(unknown)".to_string());
+    let body_footer = match &replay.kind {
+        crate::app::ReplayKind::Block(_) => "Records new single-block session under same file_id.",
+        crate::app::ReplayKind::All => "Records new full-suite session under same file_id.",
+    };
+
+    let lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            header_line,
+            Style::default().add_modifier(Modifier::BOLD).fg(theme::PEACH()),
+        )),
+        Line::from(""),
+        Line::from(format!("File:    {}", replay.file_name)),
+        Line::from(format!("Mode:    {}", mode)),
+        Line::from(format!("Env:     {}", env)),
+        Line::from(format!("Host:    {}", host)),
+        Line::from(""),
+        Line::from(Span::styled(
+            body_footer,
+            Style::default().fg(theme::TEXT_FAINT()),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("[Y]es", Style::default().fg(theme::GREEN())),
+            Span::raw(" / "),
+            Span::styled("[N]o", Style::default().fg(theme::RED())),
+        ]),
+    ];
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BLUE()))
+        .style(Style::default().bg(theme::BG_SURFACE()));
+    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    frame.render_widget(para, popup_area);
+}
+
+fn render_detach_confirm(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(detach) = app.pending_detach.as_ref() else { return; };
+
+    let popup_w: u16 = 64.min(area.width.saturating_sub(4));
+    let popup_h: u16 = 11.min(area.height.saturating_sub(4));
+    if popup_w < 30 || popup_h < 8 { return; }
+    let x = (area.width.saturating_sub(popup_w)) / 2;
+    let y = (area.height.saturating_sub(popup_h)) / 2;
+    let popup_area = Rect::new(x, y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup_area);
+
+    let lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            "Detach snapshot?",
+            Style::default().add_modifier(Modifier::BOLD).fg(theme::PEACH()),
+        )),
+        Line::from(""),
+        Line::from(format!("File: {}", detach.file_name)),
+        Line::from(""),
+        Line::from(Span::styled(
+            "The recorded session stays intact in your Sessions tab.",
+            Style::default().fg(theme::TEXT_FAINT()),
+        )),
+        Line::from(Span::styled(
+            "Detaching turns this into an unsaved fresh buffer you can edit.",
+            Style::default().fg(theme::TEXT_FAINT()),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("[Y]es", Style::default().fg(theme::GREEN())),
+            Span::raw(" / "),
+            Span::styled("[N]o", Style::default().fg(theme::RED())),
+        ]),
+    ];
+
+    let block = Block::default()
+        .title(" Detach snapshot ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BLUE()))
+        .style(Style::default().bg(theme::BG_SURFACE()));
+    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    frame.render_widget(para, popup_area);
+}
+
+fn draw_snapshot_banner(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(file) = app.active_loaded_file() else { return; };
+    let Some(snap) = file.snapshot.as_ref() else { return; };
+
+    let run_short: String = snap.run_id.chars().take(8).collect();
+    let sha_short: String = snap.sha256.chars().take(8).collect();
+    let recorded = snap.recorded_at.format("%Y-%m-%d %H:%M").to_string();
+
+    let text = format!(
+        " 📸 Snapshot · run-{} · recorded {} · sha {} · read-only (press D to detach)",
+        run_short, recorded, sha_short
+    );
+    let style = Style::default()
+        .bg(theme::YELLOW())
+        .fg(theme::BG_DARK())
+        .add_modifier(Modifier::BOLD);
+    let line = Line::from(Span::styled(text, style));
+    frame.render_widget(Paragraph::new(line).style(style), area);
 }
 
 fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -514,6 +664,9 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         Span::styled("l ", Style::default().fg(theme::LAVENDER())),
         Span::styled("Logs ", mode_style(Mode::Logs, app.mode)),
+        Span::raw(" "),
+        Span::styled("S ", Style::default().fg(theme::LAVENDER())),
+        Span::styled("Sessions ", mode_style(Mode::Sessions, app.mode)),
         Span::raw("  "),
         Span::styled("R Run All", Style::default().fg(theme::GREEN())),
     ];
@@ -586,7 +739,252 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
         Mode::History => components::history::render_history_mode(frame, app, area),
         Mode::Code => crate::code_editor::render_editor(frame, app, area),
         Mode::Logs => components::logs::render_logs_mode(frame, app, area),
+        Mode::Sessions => draw_sessions_mode(frame, app, area),
     }
+}
+
+fn draw_sessions_mode(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::sessions_tab::{GroupBy, StatusFilter};
+
+    let outer = Block::default()
+        .title(" \u{1f5c2} Sessions ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BLUE()));
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    let s = &app.sessions_tab;
+
+    // Empty / error short-circuits.
+    if s.store.is_none() {
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "\u{1f4ed} No sessions folder configured",
+                Style::default().fg(theme::TEXT()).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Configure in desktop app's Sessions Settings to enable here.",
+                Style::default().fg(theme::TEXT_FAINT()),
+            )),
+        ];
+        let para = Paragraph::new(lines)
+            .alignment(ratatui::layout::Alignment::Center)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(para, inner);
+        return;
+    }
+    if let Some(err) = s.last_error.as_ref() {
+        let lines = vec![
+            Line::from(Span::styled(
+                "\u{26a0} Error loading sessions",
+                Style::default().fg(theme::RED()).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                err.clone(),
+                Style::default().fg(theme::TEXT()),
+            )),
+        ];
+        let para = Paragraph::new(lines)
+            .alignment(ratatui::layout::Alignment::Center)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(para, inner);
+        return;
+    }
+
+    // Vertical split: filter bar (1) | search bar? (1) | three-pane | hint (1).
+    let mut constraints: Vec<Constraint> = vec![Constraint::Length(1)];
+    if s.searching || !s.search.is_empty() {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Min(3));
+    constraints.push(Constraint::Length(1));
+
+    let v_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    let mut idx = 0;
+    let bar_area = v_chunks[idx];
+    idx += 1;
+
+    // Filter / group-by bar
+    let group_chip = |label: &str, selected: bool| -> Span<'static> {
+        let style = if selected {
+            Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::TEXT_FAINT())
+        };
+        Span::styled(format!("[{}] ", label), style)
+    };
+    let bar_spans = vec![
+        Span::styled("Group: ", Style::default().fg(theme::TEXT_FAINT())),
+        group_chip("File", s.group_by == GroupBy::File),
+        group_chip("Date", s.group_by == GroupBy::Date),
+        group_chip("Version", s.group_by == GroupBy::Version),
+        Span::raw("  "),
+        Span::styled("Filter: ", Style::default().fg(theme::TEXT_FAINT())),
+        group_chip("All", s.status_filter == StatusFilter::All),
+        group_chip("Pass", s.status_filter == StatusFilter::Passed),
+        group_chip("Fail", s.status_filter == StatusFilter::Failed),
+        group_chip("Skip", s.status_filter == StatusFilter::Mixed),
+    ];
+    frame.render_widget(Paragraph::new(Line::from(bar_spans)), bar_area);
+
+    // Optional search bar
+    if s.searching || !s.search.is_empty() {
+        let search_area = v_chunks[idx];
+        idx += 1;
+        let prefix = if s.searching { "/ " } else { "search: " };
+        let cursor = if s.searching { "\u{2588}" } else { "" };
+        let line = Line::from(vec![
+            Span::styled(prefix, Style::default().fg(theme::PEACH()).add_modifier(Modifier::BOLD)),
+            Span::styled(s.search.clone(), Style::default().fg(theme::TEXT())),
+            Span::styled(cursor, Style::default().fg(theme::BLUE())),
+        ]);
+        frame.render_widget(Paragraph::new(line), search_area);
+    }
+
+    let body_area = v_chunks[idx];
+    idx += 1;
+    let hint_area = v_chunks[idx];
+
+    // Three-pane horizontal split.
+    let h = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(20),
+            Constraint::Percentage(40),
+            Constraint::Percentage(40),
+        ])
+        .split(body_area);
+
+    let groups = s.grouped();
+
+    // ── Left pane: groups ──────────────────────────────────────────────
+    let left_block = Block::default()
+        .title(" Groups ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BG_SURFACE()));
+    if groups.is_empty() {
+        let para = Paragraph::new(Line::from(Span::styled(
+            "(no sessions)",
+            Style::default().fg(theme::TEXT_FAINT()),
+        )))
+        .block(left_block.clone())
+        .wrap(Wrap { trim: false });
+        frame.render_widget(para, h[0]);
+    } else {
+        let items: Vec<ListItem> = groups
+            .iter()
+            .map(|(name, rows)| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(name.clone(), Style::default().fg(theme::TEXT())),
+                    Span::styled(
+                        format!(" ({})", rows.len()),
+                        Style::default().fg(theme::TEXT_FAINT()),
+                    ),
+                ]))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(left_block)
+            .highlight_style(
+                Style::default()
+                    .bg(theme::BG_HIGHLIGHT())
+                    .fg(theme::BLUE())
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("> ");
+        let mut state = ListState::default();
+        state.select(Some(s.selected_group.min(groups.len().saturating_sub(1))));
+        frame.render_stateful_widget(list, h[0], &mut state);
+    }
+
+    // ── Center pane: sessions ──────────────────────────────────────────
+    let center_block = Block::default()
+        .title(" Sessions ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BG_SURFACE()));
+    let active_rows: &[&crate::sessions_tab::SessionRow] = groups
+        .get(s.selected_group)
+        .map(|g| g.1.as_slice())
+        .unwrap_or(&[]);
+    if active_rows.is_empty() {
+        let para = Paragraph::new(Line::from(Span::styled(
+            "(empty group)",
+            Style::default().fg(theme::TEXT_FAINT()),
+        )))
+        .block(center_block.clone())
+        .wrap(Wrap { trim: false });
+        frame.render_widget(para, h[1]);
+    } else {
+        let items: Vec<ListItem> = active_rows
+            .iter()
+            .map(|r| {
+                let icon = r.status_icon();
+                let status = r.status_label();
+                let icon_style = match status {
+                    "passed" => Style::default().fg(theme::GREEN()),
+                    "failed" => Style::default().fg(theme::RED()),
+                    _ => Style::default().fg(theme::PEACH()),
+                };
+                let ts = r.session.started_at.format("%m-%d %H:%M").to_string();
+                let sha = r.version.sha256.chars().take(8).collect::<String>();
+                let counts = format!(
+                    "{}/{}/{}",
+                    r.session.passed, r.session.failed, r.session.skipped
+                );
+                ListItem::new(Line::from(vec![
+                    Span::styled(icon, icon_style),
+                    Span::raw(" "),
+                    Span::styled(ts, Style::default().fg(theme::TEXT_FAINT())),
+                    Span::raw(" "),
+                    Span::styled(
+                        truncate_to(&r.file.display_name, 18),
+                        Style::default().fg(theme::TEXT()),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(sha, Style::default().fg(theme::MAUVE())),
+                    Span::raw(" "),
+                    Span::styled(counts, Style::default().fg(theme::TEXT_FAINT())),
+                ]))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(center_block)
+            .highlight_style(
+                Style::default()
+                    .bg(theme::BG_HIGHLIGHT())
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("> ");
+        let mut state = ListState::default();
+        state.select(Some(s.selected_row.min(active_rows.len().saturating_sub(1))));
+        frame.render_stateful_widget(list, h[1], &mut state);
+    }
+
+    // ── Right pane: detail ────────────────────────────────────────────
+    draw_session_detail(frame, h[2], s);
+
+    // Hint bar
+    let hint = if s.searching {
+        " type to search   Enter=apply   Esc=cancel "
+    } else {
+        " j/k row  h/l group  g=group-by  f=filter  /=search  r=refresh  Esc=back "
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            hint,
+            Style::default().fg(theme::TEXT_FAINT()),
+        )),
+        hint_area,
+    );
+
+    let _ = Clear; // keep import alive
 }
 
 fn draw_input_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -1013,11 +1411,20 @@ fn get_keyhints(app: &App) -> String {
             }
         }
         Mode::Logs => " ↑↓=scroll  f=filter  c=clear  a=auto-scroll  Esc=files ".to_string(),
+        Mode::Sessions => " S=sessions  f=files  Esc=files ".to_string(),
     }
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![];
+
+    // Active env indicator (leftmost).
+    if let Some(entry) = app.env_config.active_entry() {
+        spans.push(Span::styled(
+            format!(" 🌐 {} ", entry.name),
+            Style::default().fg(theme::BG_OVERLAY()).bg(theme::BLUE()).add_modifier(Modifier::BOLD),
+        ));
+    }
 
     if app.is_running {
         let spinner = app.spinner_char();
@@ -1255,5 +1662,246 @@ fn render_progress_expanded(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(theme::BG_OVERLAY())),
         inner,
+    );
+}
+
+/// Render the right-hand "detail" pane of the Sessions tab. Shows a
+/// header with summary metadata, the per-block list (loaded from disk via
+/// `SessionsTabState::load_selected_record`), and a footer with the
+/// redaction report and a snippet of the captured `source.http`.
+///
+/// Layout: header (5 lines) | block list (flex) | footer (4 lines).
+pub fn draw_session_detail(
+    frame: &mut Frame,
+    area: Rect,
+    state: &crate::sessions_tab::SessionsTabState,
+) {
+    let block = Block::default()
+        .title(" Detail ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BG_SURFACE()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(row) = state.selected_row_ref() else {
+        let para = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "Select a session",
+                Style::default().fg(theme::TEXT_FAINT()),
+            )),
+        ])
+        .alignment(ratatui::layout::Alignment::Center)
+        .wrap(Wrap { trim: false });
+        frame.render_widget(para, inner);
+        return;
+    };
+
+    // Try to load the full record (cached per run_id).
+    let loaded = state.load_selected_full();
+    let (source_opt, record_opt, error_opt): (
+        Option<String>,
+        Option<request_pilot_core::sessions::SessionRecord>,
+        Option<String>,
+    ) = match loaded {
+        Some(Ok((src, rec))) => (Some(src), Some(rec), None),
+        Some(Err(e)) => (None, None, Some(e.to_string())),
+        None => (None, None, None),
+    };
+
+    if let Some(err) = error_opt {
+        let para = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("Error loading session: {}", err),
+                Style::default().fg(theme::RED()),
+            )),
+        ])
+        .wrap(Wrap { trim: false });
+        frame.render_widget(para, inner);
+        return;
+    }
+
+    // Vertical split: header | blocks | footer.
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Min(3),
+            Constraint::Length(4),
+        ])
+        .split(inner);
+
+    // ── Header ───────────────────────────────────────────────────────
+    let sha8: String = row.version.sha256.chars().take(8).collect();
+    let started = row.session.started_at.format("%Y-%m-%d %H:%M:%S").to_string();
+    let total_ms = row.session.total_time_ms;
+    let header_lines = vec![
+        Line::from(vec![
+            Span::styled(
+                truncate_to(&row.file.display_name, 40),
+                Style::default().fg(theme::TEXT()).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(sha8, Style::default().fg(theme::MAUVE())),
+        ]),
+        Line::from(vec![
+            Span::styled("Started: ", Style::default().fg(theme::TEXT_FAINT())),
+            Span::styled(started, Style::default().fg(theme::TEXT())),
+            Span::raw("   "),
+            Span::styled("Duration: ", Style::default().fg(theme::TEXT_FAINT())),
+            Span::styled(format!("{} ms", total_ms), Style::default().fg(theme::TEXT())),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                format!("\u{2713} {} passed", row.session.passed),
+                Style::default().fg(theme::GREEN()),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("\u{2717} {} failed", row.session.failed),
+                Style::default().fg(theme::RED()),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("\u{26a0} {} skipped", row.session.skipped),
+                Style::default().fg(theme::PEACH()),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Run: ", Style::default().fg(theme::TEXT_FAINT())),
+            Span::styled(
+                truncate_to(&row.session.run_id, 36),
+                Style::default().fg(theme::TEXT_DIM()),
+            ),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(header_lines).wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+
+    // ── Block list ──────────────────────────────────────────────────
+    let mut block_items: Vec<ListItem> = Vec::new();
+    if let Some(record) = record_opt.as_ref() {
+        let max_url = (chunks[1].width as usize).saturating_sub(20).max(10);
+        for b in record.results.block_results.iter() {
+            let (icon, color) = match b.status.as_str() {
+                "passed" => ("\u{2713}", theme::GREEN()),
+                "failed" => ("\u{2717}", theme::RED()),
+                "skipped" => ("\u{26a0}", theme::PEACH()),
+                _ => ("?", theme::TEXT_FAINT()),
+            };
+            let resp_status = b
+                .response
+                .as_ref()
+                .map(|r| format!("{}", r.status))
+                .unwrap_or_else(|| "-".to_string());
+            let url_disp = truncate_to(&b.request_url, max_url);
+            let header = Line::from(vec![
+                Span::styled(icon, Style::default().fg(color)),
+                Span::raw(" "),
+                Span::styled(
+                    truncate_to(&b.name, 28),
+                    Style::default().fg(theme::TEXT()).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(b.status.clone(), Style::default().fg(color)),
+                Span::raw("  "),
+                Span::styled(
+                    format!("{} ms", b.time_ms),
+                    Style::default().fg(theme::TEXT_FAINT()),
+                ),
+            ]);
+            let req = Line::from(vec![
+                Span::raw("   "),
+                Span::styled(
+                    b.request_method.clone(),
+                    Style::default().fg(theme::BLUE()).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(url_disp, Style::default().fg(theme::TEXT_DIM())),
+                Span::raw("  "),
+                Span::styled(
+                    format!("\u{2192} {}", resp_status),
+                    Style::default().fg(theme::TEXT_FAINT()),
+                ),
+            ]);
+            let mut lines = vec![header, req];
+            if b.status == "failed" {
+                if let Some(err) = b.error.as_ref() {
+                    lines.push(Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(
+                            truncate_to(err, max_url + 8),
+                            Style::default().fg(theme::RED()),
+                        ),
+                    ]));
+                }
+            }
+            block_items.push(ListItem::new(lines));
+        }
+    }
+    if block_items.is_empty() {
+        let para = Paragraph::new(Line::from(Span::styled(
+            "(no blocks recorded)",
+            Style::default().fg(theme::TEXT_FAINT()),
+        )))
+        .wrap(Wrap { trim: false });
+        frame.render_widget(para, chunks[1]);
+    } else {
+        let list = List::new(block_items);
+        frame.render_widget(list, chunks[1]);
+    }
+
+    // ── Footer: redaction report + source snippet ───────────────────
+    let mut footer_lines: Vec<Line> = Vec::new();
+    if let Some(record) = record_opt.as_ref() {
+        let r = &record.redaction_report;
+        let preset = match (
+            &record.capture_policy.variables,
+            &record.capture_policy.request_bodies,
+        ) {
+            (request_pilot_core::sessions::VariableCapture::All,
+                request_pilot_core::sessions::BodyCapture::Full) => "full-debug",
+            (_, request_pilot_core::sessions::BodyCapture::Off) => "privacy-first",
+            _ => "snapshot",
+        };
+        footer_lines.push(Line::from(vec![
+            Span::styled("Redactions: ", Style::default().fg(theme::TEXT_FAINT())),
+            Span::styled(
+                format!("{} headers", r.headers_redacted),
+                Style::default().fg(theme::TEXT()),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("{} bodies", r.bodies_dropped + r.bodies_truncated),
+                Style::default().fg(theme::TEXT()),
+            ),
+            Span::raw("  "),
+            Span::styled("preset: ", Style::default().fg(theme::TEXT_FAINT())),
+            Span::styled(preset, Style::default().fg(theme::MAUVE())),
+        ]));
+    }
+    if let Some(src) = source_opt.as_ref() {
+        let snippet: String = src.lines().take(2).collect::<Vec<_>>().join(" \u{00b7} ");
+        let max = (chunks[2].width as usize).saturating_sub(10).max(10);
+        footer_lines.push(Line::from(vec![
+            Span::styled("Source: ", Style::default().fg(theme::TEXT_FAINT())),
+            Span::styled(
+                truncate_to(&snippet, max),
+                Style::default().fg(theme::TEXT_DIM()),
+            ),
+        ]));
+    }
+    if footer_lines.is_empty() {
+        footer_lines.push(Line::from(Span::styled(
+            "(loading…)",
+            Style::default().fg(theme::TEXT_FAINT()),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(footer_lines).wrap(Wrap { trim: false }),
+        chunks[2],
     );
 }

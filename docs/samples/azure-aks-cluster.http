@@ -13,109 +13,115 @@
 #     access_token = <your-token-from-az-cli>
 # ============================================================
 
-@variables
-tenant_id = your-tenant-id
-client_id = your-client-id
-client_secret = your-client-secret
-subscription_id = your-subscription-id
-resource_group = your-resource-group
-cluster_name = your-aks-cluster
-aks_api = 2024-01-01
-mgmt_api = https://management.azure.com
-### @setup Fetch Azure AD Token
-# @mode app
-# @dev_auth https://management.azure.com/.default
-# @description Authenticates using client credentials flow (skipped in dev mode)
+@tenant_id = your-tenant-id
+@client_id = your-client-id
+@client_secret = your-client-secret
+@subscription_id = your-subscription-id
+@resource_group = your-resource-group
+@cluster_name = your-aks-cluster
+@aks_api = 2024-01-01
+@mgmt_api = https://management.azure.com
+
+# Strip the OAuth client_secret from the form body and the access_token
+# from the token response before they're written to a session record.
+# (Sessions records bodies under the default 📸 Snapshot preset.)
+# @@redact body /client_secret=[^&\r\n]+/
+# @@redact body $.access_token
+
+### @@setup Fetch Azure AD Token
+# @@mode app
+# @@dev_auth https://management.azure.com/.default
+# @@description Authenticates using client credentials flow (skipped in dev mode)
 POST https://login.microsoftonline.com/{{tenant_id}}/oauth2/v2.0/token
 Content-Type: application/x-www-form-urlencoded
 
 grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope=https://management.azure.com/.default
 
-# @extract access_token = $.access_token
-# @assert status == 200
-# @assert $.access_token != null
+# @@extract access_token = $.access_token
+# @@assert status == 200
+# @@assert $.access_token != null
 
-### @setup Verify Cluster Exists
-# @description Confirm the AKS cluster is running and accessible
+### @@setup Verify Cluster Exists
+# @@description Confirm the AKS cluster is running and accessible
 GET {{mgmt_api}}/subscriptions/{{subscription_id}}/resourceGroups/{{resource_group}}/providers/Microsoft.ContainerService/managedClusters/{{cluster_name}}?api-version={{aks_api}}
 Authorization: Bearer {{access_token}}
 
-# @extract cluster_id = $.id
-# @extract cluster_location = $.location
-# @extract k8s_version = $.properties.kubernetesVersion
-# @extract node_rg = $.properties.nodeResourceGroup
-# @extract fqdn = $.properties.fqdn
-# @assert status == 200
-# @assert $.name == {{cluster_name}}
-# @assert $.properties.provisioningState == Succeeded
-# @assert $.properties.powerState.code == Running
+# @@extract cluster_id = $.id
+# @@extract cluster_location = $.location
+# @@extract k8s_version = $.properties.kubernetesVersion
+# @@extract node_rg = $.properties.nodeResourceGroup
+# @@extract fqdn = $.properties.fqdn
+# @@assert status == 200
+# @@assert $.name == {{cluster_name}}
+# @@assert $.properties.provisioningState == Succeeded
+# @@assert $.properties.powerState.code == Running
 
-### @test List All Clusters in Subscription
-# @description Enumerate all AKS clusters across the subscription
+### @@test List All Clusters in Subscription
+# @@description Enumerate all AKS clusters across the subscription
 GET {{mgmt_api}}/subscriptions/{{subscription_id}}/providers/Microsoft.ContainerService/managedClusters?api-version={{aks_api}}
 Authorization: Bearer {{access_token}}
 
-# @assert status == 200
-# @assert $.value.length > 0
+# @@assert status == 200
+# @@assert $.value.length > 0
 
-### @test List Clusters in Resource Group
-# @description List clusters scoped to the specific resource group
+### @@test List Clusters in Resource Group
+# @@description List clusters scoped to the specific resource group
 GET {{mgmt_api}}/subscriptions/{{subscription_id}}/resourceGroups/{{resource_group}}/providers/Microsoft.ContainerService/managedClusters?api-version={{aks_api}}
 Authorization: Bearer {{access_token}}
 
-# @assert status == 200
-# @assert $.value.length > 0
+# @@assert status == 200
+# @@assert $.value.length > 0
 
-### @test Get Cluster Upgrade Profile
-# @description Check available Kubernetes upgrade versions
+### @@test Get Cluster Upgrade Profile
+# @@description Check available Kubernetes upgrade versions
 GET {{mgmt_api}}{{cluster_id}}/upgradeProfiles/default?api-version={{aks_api}}
 Authorization: Bearer {{access_token}}
 
-# @extract upgrade_profile_id = $.id
-# @assert status == 200
-# @assert $.properties.controlPlaneProfile.kubernetesVersion == {{k8s_version}}
+# @@extract upgrade_profile_id = $.id
+# @@assert status == 200
+# @@assert $.properties.controlPlaneProfile.kubernetesVersion == {{k8s_version}}
 
-### @test List Agent Pools (Node Pools)
-# @description Get all node pools in the cluster
+### @@test List Agent Pools (Node Pools)
+# @@description Get all node pools in the cluster
 GET {{mgmt_api}}{{cluster_id}}/agentPools?api-version={{aks_api}}
 Authorization: Bearer {{access_token}}
 
-# @extract first_pool_name = $.value[0].name
-# @extract first_pool_count = $.value[0].properties.count
-# @assert status == 200
-# @assert $.value.length > 0
-# @assert $.value[0].properties.provisioningState == Succeeded
+# @@extract first_pool_name = $.value[0].name
+# @@extract first_pool_count = $.value[0].properties.count
+# @@assert status == 200
+# @@assert $.value.length > 0
+# @@assert $.value[0].properties.provisioningState == Succeeded
 
-### @test Get Node Pool Details
-# @description Inspect the first node pool
+### @@test Get Node Pool Details
+# @@description Inspect the first node pool
 GET {{mgmt_api}}{{cluster_id}}/agentPools/{{first_pool_name}}?api-version={{aks_api}}
 Authorization: Bearer {{access_token}}
 
-# @assert status == 200
-# @assert $.properties.count > 0
-# @assert $.properties.osType == Linux
-# @assert $.properties.mode != null
+# @@assert status == 200
+# @@assert $.properties.count > 0
+# @@assert $.properties.osType == Linux
+# @@assert $.properties.mode != null
 
-### @test Get Cluster Access Credentials (Admin)
-# @description Retrieve cluster admin kubeconfig (requires appropriate RBAC)
+### @@test Get Cluster Access Credentials (Admin)
+# @@description Retrieve cluster admin kubeconfig (requires appropriate RBAC)
 POST {{mgmt_api}}{{cluster_id}}/listClusterAdminCredential?api-version={{aks_api}}
 Authorization: Bearer {{access_token}}
 
-# @assert status == 200
-# @assert $.kubeconfigs.length > 0
-# @assert $.kubeconfigs[0].name != null
+# @@assert status == 200
+# @@assert $.kubeconfigs.length > 0
+# @@assert $.kubeconfigs[0].name != null
 
-### @test Get Cluster Diagnostics — OS Options
-# @description List supported OS options for the cluster's location
+### @@test Get Cluster Diagnostics — OS Options
+# @@description List supported OS options for the cluster's location
 GET {{mgmt_api}}/subscriptions/{{subscription_id}}/providers/Microsoft.ContainerService/locations/{{cluster_location}}/osOptions?api-version={{aks_api}}
 Authorization: Bearer {{access_token}}
 
-# @assert status == 200
+# @@assert status == 200
 
-### @test Get Available Agent Pool Versions
-# @description List Kubernetes versions available for new agent pools
+### @@test Get Available Agent Pool Versions
+# @@description List Kubernetes versions available for new agent pools
 GET {{mgmt_api}}/subscriptions/{{subscription_id}}/providers/Microsoft.ContainerService/locations/{{cluster_location}}/kubernetesVersions?api-version={{aks_api}}
 Authorization: Bearer {{access_token}}
 
-# @assert status == 200
-# @assert $.values.length > 0
+# @@assert status == 200
+# @@assert $.values.length > 0

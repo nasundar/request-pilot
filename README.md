@@ -57,10 +57,10 @@ A cross-platform HTTP client and **E2E integration test framework** — author r
 
 | Feature | Description |
 |---|---|
-| **Enhanced `.http` Format** | `@variables`, `@setup`/`@test`/`@teardown` blocks, `@assert`/`@extract`/`@description`/`@disabled`/`@group`/`@depends`/`@mode`/`@dev_auth`/`@compare`/`@step`/`@diff` directives, `{{variable}}` interpolation |
-| **Test Runner** | Setup → Test → Teardown lifecycle; parallel execution via `tokio::JoinSet` with `@group`/`@depends` dependency graph (topological wave scheduling), skip-on-failure |
-| **Variables System** | Static definitions, `.env` file integration, dynamic `@extract` from responses, built-in generators (`$timestamp`, `$uuid`, `$randomInt`) |
-| **Assertions** | `# @assert status == 200`, `# @assert $.field != null`, `# @assert $.items.length > 0` — 7 operators with JSON path support |
+| **REST Client–Compatible `.http` Format** | Top-level `@var = value` definitions and `{{var}}` references work in VS Code REST Client unmodified. Pilot extensions (`### @@setup`/`@@test`/`@@teardown` block markers, `# @@assert`/`# @@extract`/`# @@description`/`# @@disabled`/`# @@group`/`# @@depends`/`# @@mode`/`# @@dev_auth`/`# @@request-id`/`# @@compare`/`# @@step`/`# @@diff` directives) live inside comments REST Client ignores. Legacy `# @x` directives and `@variables` blocks remain accepted for backward compatibility. |
+| **Test Runner** | Setup → Test → Teardown lifecycle; parallel execution via `tokio::JoinSet` with `@@group`/`@@depends` dependency graph (topological wave scheduling), skip-on-failure |
+| **Variables System** | Top-level `@name = value` (REST Client native) — also accepts `@variables` block (legacy). `.env` file integration, dynamic `# @@extract` from responses, built-in generators: `$timestamp`, `$datetime`, `$uuid`, `$guid`, `$randomInt`, `$randomInt min max`, `$processEnv VAR`, `$localHostname` |
+| **Assertions** | ``# @@assert status == 200`, ``# @@assert $.field != null`, ``# @@assert $.items.length > 0` — 7 operators with JSON path support |
 | **Run Modes** | Run All, Run Single Block, Run Group, Run File — all with live streaming progress |
 
 ### UI Modes
@@ -88,25 +88,25 @@ Multi-scope Azure auth for developers — skip client-credentials setup blocks a
 | Feature | Description |
 |---|---|
 | **Stateful Auth Button** | 🔒 Off → 🔓 Needs Auth (amber pulse) → 🔑 Authenticated (green) → ⚠ Expired (orange) |
-| **Multi-Scope Support** | Auto-detects all `# @dev_auth <scope>` directives; caches tokens per scope |
+| **Multi-Scope Support** | Auto-detects all ``# @@dev_auth <scope>` directives; caches tokens per scope |
 | **3-Strategy Cascade** | 1) `az` CLI → 2) device code with file's `client_id` → 3) device code with Azure CLI public client |
-| **`# @mode app\|dev`** | `app` blocks run in normal mode (client credentials), `dev` blocks run in dev mode (user auth) |
-| **`# @dev_auth <scope>`** | Declares Azure scope per token-fetching setup block (e.g., `https://management.azure.com/.default`) |
+| **``# @@mode app\|dev`** | `app` blocks run in normal mode (client credentials), `dev` blocks run in dev mode (user auth) |
+| **``# @@dev_auth <scope>`** | Declares Azure scope per token-fetching setup block (e.g., `https://management.azure.com/.default`) |
 | **Scope Tooltip** | Hover the auth button to see per-scope details and expiry times |
 
 **Setup:**
 1. Install [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) and run `az login`
 2. Annotate token-fetching setup blocks:
    ```http
-   ### @setup Fetch ARM Token
-   # @mode app
-   # @dev_auth https://management.azure.com/.default
+   ### @@setup Fetch ARM Token
+   # @@mode app
+   # @@dev_auth https://management.azure.com/.default
    POST https://login.microsoftonline.com/{{tenant_id}}/oauth2/v2.0/token
    Content-Type: application/x-www-form-urlencoded
 
    grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope=https://management.azure.com/.default
 
-   # @extract arm_token = $.access_token
+   # @@extract arm_token = $.access_token
    ```
 3. Click **🔒 Azure** in the toolbar — the app detects scopes, fetches tokens via `az account get-access-token`, and injects them as the block's `@extract` variables
 
@@ -125,7 +125,7 @@ Multi-scope Azure auth for developers — skip client-credentials setup blocks a
 | **JWT/Token Decode** | Hover any variable to see decoded value; JWT tokens show header, claims, issuer, audience, expiry status |
 | **Hierarchical Sidebar** | Files → Groups → Blocks with collapse/expand, status dots, count badges, ▶ Run buttons |
 | **Block Progress Streaming** | Live pass/fail/skip updates during test execution |
-| **Step Toggle** | Enable/disable blocks via sidebar checkbox or `# @disabled` directive |
+| **Step Toggle** | Enable/disable blocks via sidebar checkbox or ``# @@disabled` directive |
 | **Guided Tour** | Two-part onboarding tour covering all features; re-open via ❓ button |
 | **Performance Engine** | Heavy computation (JSON formatting, tree building, diffing) offloaded to Rust with Rayon parallelism; virtual scrolling renders only visible rows (~50 DOM nodes for 100K+ lines); collapsed diff hunks show only changes + context; lazy JSON tree with on-demand expansion; Web Worker pool for off-thread text processing. See [Performance Migration Report](docs/PERFORMANCE_MIGRATION.md) |
 | **Cross-Platform** | Windows, macOS, Linux via Tauri v2 |
@@ -138,14 +138,13 @@ The desktop app can connect to the Request Pilot browser extension via a local W
 
 Export traces, metrics, and logs from every test run to any OTLP-compatible backend — Azure Monitor Application Insights, Jaeger, Grafana Tempo, etc.
 
-**Setup:** Set well-known telemetry variables in your `@variables` block:
+**Setup:** Define well-known telemetry variables at the top of your `.http` file:
 ```http
-@variables
-telemetry_traces_endpoint = https://otel-collector.example.com/v1/traces
-telemetry_metrics_endpoint = https://otel-collector.example.com/v1/metrics
-telemetry_logs_endpoint = https://otel-collector.example.com/v1/logs
-telemetry_token = my-bearer-token
-telemetry_service = my-api-e2e-tests
+@telemetry_traces_endpoint = https://otel-collector.example.com/v1/traces
+@telemetry_metrics_endpoint = https://otel-collector.example.com/v1/metrics
+@telemetry_logs_endpoint = https://otel-collector.example.com/v1/logs
+@telemetry_token = my-bearer-token
+@telemetry_service = my-api-e2e-tests
 ```
 
 If any endpoint variable is set (non-empty), telemetry auto-enables. Endpoints can also be extracted dynamically via `@setup` steps (e.g., fetching OTLP endpoints from an ARM API response). Use `telemetry_token` for Bearer auth or `telemetry_api_key` for `x-ms-ikey` header.
@@ -188,31 +187,31 @@ Compare responses from two API endpoints within a single test block — ideal fo
 
 **Syntax:**
 ```http
-### @test API Migration Parity
-# @compare
+### @@test API Migration Parity
+# @@compare
 
-# @step baseline
+# @@step baseline
 GET {{base_url}}/api/v1/users/{{user_id}}
 Authorization: Bearer {{access_token}}
 
-# @assert status == 200
+# @@assert status == 200
 
-# @step candidate
+# @@step candidate
 GET {{base_url}}/api/v2/users/{{user_id}}
 Authorization: Bearer {{access_token}}
 
-# @assert status == 200
+# @@assert status == 200
 
-# @diff baseline candidate
-# @assert $diff.match == true
-# @assert $diff.similarity >= 0.95
-# @assert $diff.changed_count == 0
+# @@diff baseline candidate
+# @@assert $diff.match == true
+# @@assert $diff.similarity >= 0.95
+# @@assert $diff.changed_count == 0
 ```
 
 **How it works:**
-- `# @compare` — modifier on a `@test` block that enables multi-step comparison mode
-- `# @step <name>` — defines a named step; each step has its own request, assertions, and extracts
-- `# @diff <step_a> <step_b>` — triggers comparison between two named steps
+- ``# @@compare` — modifier on a `@test` block that enables multi-step comparison mode
+- ``# @@step <name>` — defines a named step; each step has its own request, assertions, and extracts
+- ``# @@diff <step_a> <step_b>` — triggers comparison between two named steps
 - Steps execute sequentially; each step's assertions and extracts evaluate immediately
 - Comparison assertions (`$diff.*`) evaluate after all steps complete
 - JSON deep comparison with path-level diffs; text fallback with character-level similarity for non-JSON responses
@@ -261,7 +260,206 @@ cargo tauri build
 
 ---
 
+## `.http` Syntax Reference
+
+Request Pilot **extends** the [VS Code REST Client](https://marketplace.visualstudio.com/items?itemName=humao.rest-client) `.http` format. The same file works in both tools — REST Client treats Pilot extensions as harmless comments, and Pilot understands REST Client's full syntax.
+
+### REST Client compatible (works in both tools)
+
+```http
+# Comments use # or //
+@base_url = https://api.example.com
+@token = your-token-here
+
+### A request, separated by ### or ---
+# @name getUser
+GET {{base_url}}/users/me
+Authorization: Bearer {{token}}
+
+---
+
+@description Same separator, same effect
+GET {{base_url}}/orgs
+```
+
+- **Variables:** top-level `@name = value` (the `=` is required).
+- **References:** `{{name}}` — note **no `@` inside braces**.
+- **Bare directives:** `@name foo`, `@description ...`, `@note ...`, `@prompt VAR description` (no `=`, distinguished from variables by absence of `=`).
+- **Built-ins:** `{{$timestamp}}`, `{{$datetime}}`, `{{$uuid}}`, `{{$guid}}`, `{{$randomInt}}`, `{{$randomInt min max}}`, `{{$processEnv VAR}}`, `{{$localHostname}}`.
+- **Separators:** `###` or `---` at start of a line (followed by space/EOL).
+- **Comments:** `#` or `//`.
+
+### Pilot extensions (namespaced under `@@`)
+
+All Pilot-specific features sit inside comment lines with the `@@` prefix, so REST Client ignores them entirely:
+
+```http
+### @@setup Authenticate
+# @@description Fetch OAuth2 token via client credentials
+# @@mode app
+# @@dev_auth https://api.example.com/.default
+POST {{auth_url}}/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id={{client_id}}
+
+# @@extract access_token = $.access_token
+# @@assert status == 200
+
+### @@test List Users
+# @@group user-api
+GET {{base_url}}/users
+Authorization: Bearer {{access_token}}
+
+# @@assert status == 200
+# @@assert $.value.length > 0
+```
+
+| Marker | Meaning |
+|---|---|
+| `### @@setup Title` / `### @@test Title` / `### @@teardown Title` | Block type (sequential / parallel-safe / sequential cleanup) |
+| `# @@assert <path> <op> <value>` | Validate response (`==`, `!=`, `>`, `<`, `>=`, `<=`, `contains`) |
+| `# @@extract <name> = <jsonpath>` | Save response value into a variable |
+| `# @@group <name>` | Run together in parallel |
+| `# @@depends <name>` | Wait for another group/block |
+| `# @@disabled` | Skip this block |
+| `# @@mode app\|dev` | Run only in app or dev (Azure CLI) auth mode |
+| `# @@dev_auth <scope>` | Azure scope used when dev mode replaces this token-fetch |
+| `# @@auto_run <duration>` | Periodically re-run the suite |
+| `# @@request-id [header]` | Auto-inject a fresh UUIDv4 into every request under `header` (default `X-Request-Id`). Per-block override: `# @@request-id X-Other`. Opt out: `# @@request-id off`. |
+| `# @@compare` + `# @@step <name>` + `# @@diff <a> <b>` | Multi-step request comparison |
+| `# @@telemetry` / `# @@telemetry_token` / `# @@telemetry_service` | OTEL exporter binding |
+
+`// @@directive` is also accepted as an alias for `# @@directive`.
+
+### Backward compatibility
+
+- Legacy single-`@` directives (`# @assert`, `# @extract`, `### @setup …`) are still accepted by the parser indefinitely.
+- The legacy `@variables` block is still accepted; it’s simply equivalent to a sequence of top-level `@name = value` definitions.
+- The generator only emits the new syntax — round-tripping a file through Pilot will normalize it.
+
+---
+
+## Environments (`.env` files)
+
+Request Pilot keeps environment handling simple: **committed defaults live
+inside your `.http` file**, and **per-environment overrides live in plain
+`.env` files** that users load at runtime.
+
+### Where variables come from (precedence, high → low)
+
+1. Runtime `# @@extract` from prior blocks.
+2. In-app **Variables** panel (interactive edits).
+3. The currently-active `.env` file.
+4. Top-level `@name = value` definitions in the `.http` file.
+
+A `.env` value will only shine through if the `.http` file didn't already hard-code one in the Variables panel — that's by design so a committed default can always win if a developer wants it to.
+
+### `.env` file format
+
+Standard `KEY=VALUE` lines. Comments start with `#`. Values may be quoted.
+Files remain fully compatible with `dotenv`, `docker --env-file`, etc.
+
+```env
+# @@name staging
+BASE_URL=https://staging.example.com
+AUTH_SCOPE=https://staging.example.com/.default
+CLIENT_ID=staging-client-id
+```
+
+The optional `# @@name <name>` directive names the environment for display
+(`staging` above). It lives in a comment, so plain `.env` consumers ignore
+it. If omitted, the filename stem (e.g. `prod.env` → `prod`) is used.
+
+### Multiple envs, one active at a time
+
+- Load as many `.env` files as you need (`dev.env`, `staging.env`,
+  `prod.env`, `regional-prod-eu.env`, …).
+- Exactly **one** is active at any moment. The first loaded auto-activates.
+- The list + active choice persist across restarts
+  (`<config_dir>/request-pilot/env_config.json`).
+
+### Desktop
+
+- 🌐 **Environment dropdown** in the toolbar shows the active env.
+- Click it to list loaded files, switch active, remove an entry, or click
+  **+ Load .env file** to add another.
+
+### TUI
+
+- <kbd>Ctrl</kbd>+<kbd>E</kbd> — load/add a `.env` file (auto-activates if first).
+- <kbd>Ctrl</kbd>+<kbd>P</kbd> — open the env picker overlay.
+  - <kbd>j</kbd>/<kbd>k</kbd> navigate, <kbd>Enter</kbd> activate,
+    <kbd>a</kbd> add, <kbd>d</kbd> remove, <kbd>Esc</kbd> close.
+- Active env shows as `🌐 {name}` at the start of the status bar.
+
+### Samples
+
+See [`docs/samples/dev.env`](docs/samples/dev.env) and
+[`docs/samples/prod.env`](docs/samples/prod.env).
+
+---
+
+## Sessions — Persisted Test Runs
+
+Request Pilot can persist every test-suite run to a local directory so you
+can browse historical results, drill into individual request/response
+pairs, and **load a session back as a snapshot** — the exact `.http`
+source plus block statuses, captured request/response payloads, and
+assertion outcomes from the moment of the run.
+
+- **Off by default** — set a sessions folder in *🗂 Sessions → ⚙ Settings*
+  (with a native Browse button) to start recording. The desktop and TUI
+  share one `sessions_config.json` (root, auto-record, capture preset).
+- **📸 Snapshot preset** *(default)* — full request and response bodies
+  (capped at 10 MB), names-only variables, sensitive headers/query
+  params auto-redacted. Two other presets in Settings: 🔒 Privacy-first
+  (drops request bodies) and 🐛 Full debug (no redaction).
+- **Snapshot loading** — clicking a session row opens it as a read-only
+  snapshot. **🔓 Detach** unlocks it; **▶ Replay all** re-runs with
+  confirmation and creates a new session under the same `file_id`.
+- **Stats auto-computed per run** — per-`(file_id, sha)` and per-file
+  `stats.json` rollups (totals, hourly 24h / daily 30d buckets,
+  per-block aggregates, latency p50/p95/p99/max), updated incrementally
+  on every run. Desktop has a **📊 Stats** tab in the session detail
+  plus an inline pass-rate strip on each version group.
+- **TUI Sessions tab** — press **S** or **F4** for a three-pane
+  groups / sessions / detail view with group-by, status filter, search,
+  refresh, and full snapshot parity: **Enter** to load, **Shift-R** to
+  replay all, **r** to replay a single block, **D** to detach.
+- **Content-addressed** — each unique source content (LF-normalized
+  `sha256`) gets its own version directory; old versions stay intact.
+- **Crash-safe** — every write goes through a temp file + atomic rename.
+- **Sortable run-ids** — UUIDv7.
+- **Retention & body redaction** — optional `retention` caps
+  (`max_age_days` / `max_sessions_per_version` / `max_total_size_gb`)
+  applied at desktop startup and via `request-pilot sessions prune`;
+  `# @@redact body $.path` (JSONPath) / `# @@redact body /regex/`
+  directives plus a global `body_redaction_paths` config to strip
+  secrets out of recorded bodies.
+
+### Command-line tool (`request-pilot`)
+
+The `cli/` workspace builds a `request-pilot` binary that operates on
+the same sessions store as the desktop and TUI:
+
+```bash
+$ request-pilot sessions list --since 24h
+$ request-pilot sessions show <run-id> [--json]
+$ request-pilot sessions stats <file-id> [--sha <sha>] [--json]
+$ request-pilot sessions export <run-id> --format md -o run.md
+$ request-pilot sessions replay <run-id> [--block <name>] [--env <path>]
+$ request-pilot sessions prune --older-than 30d --keep-last 50 [--dry-run] [--force]
+```
+
+See [`docs/sessions.md`](docs/sessions.md) for the full layout, capture
+presets, snapshot/replay workflow, CLI reference, retention rules, and
+body-redaction syntax.
+
+---
+
 ## Browser Extension (Edge/Chrome)
+
 
 A Manifest V3 extension for intercepting, modifying, and analyzing HTTP traffic.
 
@@ -447,11 +645,11 @@ The Rust library powering all three frontends — **223 unit tests**, zero warni
 
 | Module | Description |
 |---|---|
-| **`http_parser`** | Parse and generate `.http` files — `@variables`, block types, all directives (`@assert`, `@extract`, `@group`, `@depends`, `@mode`, `@dev_auth`, `@disabled`, `@telemetry`, `@compare`, `@step`, `@diff`), HTTP request syntax |
-| **`test_runner`** | Execute test suites — setup → parallel tests (topological wave scheduling via `@group`/`@depends`) → teardown, with streaming progress events and OTEL telemetry export |
+| **`http_parser`** | Parse and generate `.http` files — REST Client compatible (`@var = value`, `{{var}}`, bare `@name`/`@description`/`@note`/`@prompt` directives, `###`/`---` separators, `#`/`//` comments) plus Pilot extensions (`### @@setup`/`@@test`/`@@teardown` blocks; `# @@assert`/`# @@extract`/`# @@group`/`# @@depends`/`# @@mode`/`# @@dev_auth`/`# @@disabled`/`# @@telemetry`/`# @@compare`/`# @@step`/`# @@diff` directives). Dual-reads legacy `# @x` syntax. |
+| **`test_runner`** | Execute test suites — setup → parallel tests (topological wave scheduling via `@@group`/`@@depends`) → teardown, with streaming progress events and OTEL telemetry export |
 | **`http_client`** | reqwest-based async HTTP with variable interpolation, smart URL encoding |
-| **`assertions`** | Evaluate `@assert` directives — 7 operators (`==`, `!=`, `>`, `<`, `>=`, `<=`, `contains`), JSON path selectors, status/header/body targets |
-| **`variables`** | Variable store with `{{interpolation}}`, built-ins (`$timestamp`, `$uuid`, `$randomInt`), merge with .env, unresolved detection |
+| **`assertions`** | Evaluate `# @@assert` directives — 7 operators (`==`, `!=`, `>`, `<`, `>=`, `<=`, `contains`), JSON path selectors, status/header/body targets |
+| **`variables`** | Variable store with `{{interpolation}}`, REST Client-compatible built-ins (`$timestamp`, `$datetime`, `$uuid`, `$guid`, `$randomInt`, `$randomInt min max`, `$processEnv VAR`, `$localHostname`), `.env` merge, unresolved detection |
 | **`azure_auth`** | Azure CLI token fetch (`az`/`az.cmd`), device code flow (start + poll), availability detection |
 | **`telemetry`** | OTEL observability — build OTLP protobuf payloads (traces, metrics, logs) and export to Azure Monitor Application Insights or any OTLP-compatible backend. Zero new dependencies. 5 metrics (3 DELTA counters, 2 DELTA exponential histograms) with test-level dimensions, hierarchical trace spans, structured logs |
 | **`history`** | In-memory history store (max 1000), filtering by method/status/URL/source/run_id, trie-based URL autocomplete |

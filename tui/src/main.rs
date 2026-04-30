@@ -3,6 +3,8 @@ mod code_editor;
 mod components;
 mod events;
 mod live_capture;
+mod migrate;
+mod sessions_tab;
 mod toolbar;
 #[cfg(test)]
 mod tests;
@@ -24,7 +26,8 @@ use std::fs::File;
         Examples:\n  \
         request-pilot --file tests/api.http\n  \
         request-pilot -f api.http -f auth.http --env .env\n  \
-        request-pilot -f suite.http -e prod.env --run",
+        request-pilot -f suite.http -e prod.env --run\n  \
+        request-pilot migrate tests/*.http",
     after_help = "Use Ctrl+O to open files interactively, or pass them via --file."
 )]
 struct Cli {
@@ -39,6 +42,26 @@ struct Cli {
     /// Run all tests immediately after loading
     #[arg(short, long)]
     run: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Migrate a .http file from legacy Pilot syntax (# @x, @variables block, ### @type)
+    /// to the new REST Client–compatible syntax (# @@x, top-level @name = value, ### @@type).
+    ///
+    /// By default prints a unified diff; pass --write to update files in place.
+    Migrate {
+        /// .http files to migrate
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+
+        /// Write changes to files in place (default: dry-run, show diff only)
+        #[arg(short, long)]
+        write: bool,
+    },
 }
 
 #[tokio::main]
@@ -54,6 +77,12 @@ async fn main() -> color_eyre::Result<()> {
     }
 
     let cli = Cli::parse();
+
+    // Handle `migrate` subcommand — runs headless (no TUI)
+    if let Some(Command::Migrate { files, write }) = cli.command {
+        return migrate::run(files, write);
+    }
+
     let mut app = App::new();
 
     // Load .env file if provided

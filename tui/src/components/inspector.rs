@@ -722,7 +722,11 @@ fn extract_file_description(content: &str) -> Vec<String> {
                 desc.push(text.to_string());
             }
         }
-        if trimmed.starts_with("@variables") || trimmed.starts_with("###") {
+        if trimmed.starts_with("@variables")
+            || trimmed.starts_with("###")
+            || trimmed.starts_with("---")
+            || trimmed.starts_with('@')
+        {
             break;
         }
     }

@@ -4,16 +4,32 @@ use std::collections::HashMap;
 /// Format: KEY=VALUE, one per line. Lines starting with # are comments. Empty lines ignored.
 /// Values can be optionally quoted with " or '.
 pub fn parse_env(content: &str) -> HashMap<String, String> {
+    parse_env_named(content).1
+}
+
+/// Parse a .env file content, returning both any `# @@name <name>` directive
+/// (falling back to legacy `# @name <name>`) and the variable map. Directive
+/// must appear in a comment line — plain dotenv/docker readers ignore it.
+pub fn parse_env_named(content: &str) -> (Option<String>, HashMap<String, String>) {
     let mut map = HashMap::new();
+    let mut name: Option<String> = None;
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix('#') {
+            // Look for `@@name <value>` or legacy `@name <value>` inside the comment.
+            if name.is_none() {
+                if let Some(v) = extract_name_directive(rest) {
+                    name = Some(v);
+                }
+            }
             continue;
         }
         if let Some((key, value)) = trimmed.split_once('=') {
             let key = key.trim().to_string();
             let mut value = value.trim().to_string();
-            // Strip surrounding quotes
             if (value.starts_with('"') && value.ends_with('"'))
                 || (value.starts_with('\'') && value.ends_with('\''))
             {
@@ -24,7 +40,24 @@ pub fn parse_env(content: &str) -> HashMap<String, String> {
             }
         }
     }
-    map
+    (name, map)
+}
+
+fn extract_name_directive(comment_body: &str) -> Option<String> {
+    let s = comment_body.trim_start();
+    // Accept `@@name <value>`, `@@name=<value>`, and legacy `@name <value>` / `@name=<value>`.
+    let rest = if let Some(r) = s.strip_prefix("@@name") {
+        r
+    } else if let Some(r) = s.strip_prefix("@name") {
+        r
+    } else {
+        return None;
+    };
+    let rest = rest.trim_start_matches(|c: char| c == '=' || c.is_whitespace());
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest.trim().to_string())
 }
 
 /// Generate .env file content from key-value pairs.
@@ -53,6 +86,16 @@ pub fn read_env_from_path(path: &str) -> Result<HashMap<String, String>, String>
     let content =
         std::fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {}", path, e))?;
     Ok(parse_env(&content))
+}
+
+/// Read and parse a .env file, returning its embedded `# @@name` directive
+/// (if any) alongside the variable map.
+pub fn read_env_named_from_path(
+    path: &str,
+) -> Result<(Option<String>, HashMap<String, String>), String> {
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {}", path, e))?;
+    Ok(parse_env_named(&content))
 }
 
 /// Write env vars to a .env file on disk.
@@ -147,5 +190,68 @@ mod tests {
         assert_eq!(parsed.get("HOST").unwrap(), "localhost");
         assert_eq!(parsed.get("PORT").unwrap(), "8080");
         assert_eq!(parsed.get("NAME").unwrap(), "test user");
+    }
+
+    #[test]
+    fn name_directive_double_at() {
+        let content = "# @@name staging\nBASE_URL=https://staging";
+        let (name, vars) = parse_env_named(content);
+        assert_eq!(name.as_deref(), Some("staging"));
+        assert_eq!(vars.get("BASE_URL").unwrap(), "https://staging");
+    }
+
+    #[test]
+    fn name_directive_legacy_single_at() {
+        let content = "# @name prod\nBASE_URL=https://api";
+        let (name, _) = parse_env_named(content);
+        assert_eq!(name.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn name_directive_equals_form() {
+        let content = "# @@name=dev\nK=V";
+        let (name, _) = parse_env_named(content);
+        assert_eq!(name.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn name_directive_extra_whitespace() {
+        let content = "#    @@name    regional-prod-eu   \nK=V";
+        let (name, _) = parse_env_named(content);
+        assert_eq!(name.as_deref(), Some("regional-prod-eu"));
+    }
+
+    #[test]
+    fn name_directive_absent() {
+        let content = "# just a comment\nK=V";
+        let (name, vars) = parse_env_named(content);
+        assert!(name.is_none());
+        assert_eq!(vars.get("K").unwrap(), "V");
+    }
+
+    #[test]
+    fn name_directive_first_wins() {
+        let content = "# @@name first\n# @@name second\nK=V";
+        let (name, _) = parse_env_named(content);
+        assert_eq!(name.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn name_directive_only_before_vars() {
+        // Comment after KV lines is fine; parser still picks up the directive
+        // if it appears anywhere as a standalone comment.
+        let content = "K=V\n# @@name afterwards";
+        let (name, _) = parse_env_named(content);
+        assert_eq!(name.as_deref(), Some("afterwards"));
+    }
+
+    #[test]
+    fn plain_dotenv_compatibility() {
+        // Directive must live in a comment line so it's silently ignored by
+        // plain dotenv / docker --env-file consumers.
+        let content = "# @@name staging\nFOO=bar";
+        let plain_map = parse_env(content);
+        assert_eq!(plain_map.len(), 1);
+        assert_eq!(plain_map.get("FOO").unwrap(), "bar");
     }
 }

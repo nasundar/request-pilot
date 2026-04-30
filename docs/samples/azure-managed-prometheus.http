@@ -15,96 +15,101 @@
 #     (found in Azure Monitor workspace → Overview → Query endpoint)
 # ============================================================
 
-@variables
-tenant_id = your-tenant-id
-client_id = your-client-id
-client_secret = your-client-secret
-subscription_id = your-subscription-id
-resource_group = your-resource-group
-workspace_name = your-amw-workspace
-api_version = 2023-04-03
-mgmt_api = https://management.azure.com
-query_endpoint = https://your-workspace.prometheusquery.monitor.azure.com
-### @setup Fetch Azure AD Token
-# @mode app
-# @dev_auth https://management.azure.com/.default
-# @description Authenticates using client credentials and extracts the bearer token (skipped in dev mode)
+@tenant_id = your-tenant-id
+@client_id = your-client-id
+@client_secret = your-client-secret
+@subscription_id = your-subscription-id
+@resource_group = your-resource-group
+@workspace_name = your-amw-workspace
+@api_version = 2023-04-03
+@mgmt_api = https://management.azure.com
+@query_endpoint = https://your-workspace.prometheusquery.monitor.azure.com
+
+# Strip the OAuth client_secret from the form body and the access_token
+# from the token response before they're written to a session record.
+# @@redact body /client_secret=[^&\r\n]+/
+# @@redact body $.access_token
+
+### @@setup Fetch Azure AD Token
+# @@mode app
+# @@dev_auth https://management.azure.com/.default
+# @@description Authenticates using client credentials and extracts the bearer token (skipped in dev mode)
 POST https://login.microsoftonline.com/{{tenant_id}}/oauth2/v2.0/token
 Content-Type: application/x-www-form-urlencoded
 
 grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope=https://management.azure.com/.default
 
-# @extract access_token = $.access_token
-# @assert status == 200
-# @assert $.access_token != null
-# @assert $.token_type == Bearer
+# @@extract access_token = $.access_token
+# @@assert status == 200
+# @@assert $.access_token != null
+# @@assert $.token_type == Bearer
 
-### @setup Verify Workspace Exists
-# @description Confirms the Azure Monitor workspace is accessible
+### @@setup Verify Workspace Exists
+# @@description Confirms the Azure Monitor workspace is accessible
 GET {{mgmt_api}}/subscriptions/{{subscription_id}}/resourceGroups/{{resource_group}}/providers/Microsoft.Monitor/accounts/{{workspace_name}}?api-version={{api_version}}
 Authorization: Bearer {{access_token}}
 
-# @extract workspace_id = $.id
-# @extract workspace_location = $.location
-# @assert status == 200
-# @assert $.name == {{workspace_name}}
-# @assert $.properties.provisioningState == Succeeded
+# @@extract workspace_id = $.id
+# @@extract workspace_location = $.location
+# @@assert status == 200
+# @@assert $.name == {{workspace_name}}
+# @@assert $.properties.provisioningState == Succeeded
 
-### @test Query — Instant (PromQL)
-# @description Runs an instant PromQL query against the workspace
+### @@test Query — Instant (PromQL)
+# @@description Runs an instant PromQL query against the workspace
 GET {{query_endpoint}}/api/v1/query?query=up&time={{$timestamp}}
 Authorization: Bearer {{access_token}}
 
-# @assert status == 200
-# @assert $.status == success
-# @assert $.data.resultType == vector
+# @@assert status == 200
+# @@assert $.status == success
+# @@assert $.data.resultType == vector
 
-### @test Query — Range (PromQL)
-# @description Runs a range query for the last 5 minutes with 60s step
+### @@test Query — Range (PromQL)
+# @@description Runs a range query for the last 5 minutes with 60s step
 GET {{query_endpoint}}/api/v1/query_range?query=up&start={{$timestamp}}&end={{$timestamp}}&step=60
 Authorization: Bearer {{access_token}}
 
-# @assert status == 200
-# @assert $.status == success
-# @assert $.data.resultType == matrix
+# @@assert status == 200
+# @@assert $.status == success
+# @@assert $.data.resultType == matrix
 
-### @test Query — Label Names
-# @description Lists all label names known to this workspace
+### @@test Query — Label Names
+# @@description Lists all label names known to this workspace
 GET {{query_endpoint}}/api/v1/labels
 Authorization: Bearer {{access_token}}
 
-# @assert status == 200
-# @assert $.status == success
-# @assert $.data.length > 0
+# @@assert status == 200
+# @@assert $.status == success
+# @@assert $.data.length > 0
 
-### @test Query — Label Values for __name__
-# @description Gets all metric names
+### @@test Query — Label Values for __name__
+# @@description Gets all metric names
 GET {{query_endpoint}}/api/v1/label/__name__/values
 Authorization: Bearer {{access_token}}
 
-# @assert status == 200
-# @assert $.status == success
+# @@assert status == 200
+# @@assert $.status == success
 
-### @test Query — Series Metadata
-# @description Finds series matching the up metric
+### @@test Query — Series Metadata
+# @@description Finds series matching the up metric
 POST {{query_endpoint}}/api/v1/series
 Authorization: Bearer {{access_token}}
 Content-Type: application/x-www-form-urlencoded
 
 match[]=up
 
-# @assert status == 200
-# @assert $.status == success
+# @@assert status == 200
+# @@assert $.status == success
 
-### @test List Prometheus Rule Groups
-# @description Lists all rule groups configured on the workspace
+### @@test List Prometheus Rule Groups
+# @@description Lists all rule groups configured on the workspace
 GET {{mgmt_api}}/subscriptions/{{subscription_id}}/resourceGroups/{{resource_group}}/providers/Microsoft.AlertsManagement/prometheusRuleGroups?api-version=2023-03-01
 Authorization: Bearer {{access_token}}
 
-# @assert status == 200
+# @@assert status == 200
 
-### @test Create Prometheus Rule Group
-# @description Creates a recording rule group for aggregated metrics
+### @@test Create Prometheus Rule Group
+# @@description Creates a recording rule group for aggregated metrics
 PUT {{mgmt_api}}/subscriptions/{{subscription_id}}/resourceGroups/{{resource_group}}/providers/Microsoft.AlertsManagement/prometheusRuleGroups/request-pilot-test-rules?api-version=2023-03-01
 Authorization: Bearer {{access_token}}
 Content-Type: application/json
@@ -126,15 +131,15 @@ Content-Type: application/json
   }
 }
 
-# @extract rule_group_id = $.id
-# @assert status >= 200
-# @assert status <= 201
-# @assert $.name == request-pilot-test-rules
+# @@extract rule_group_id = $.id
+# @@assert status >= 200
+# @@assert status <= 201
+# @@assert $.name == request-pilot-test-rules
 
-### @teardown Delete Test Rule Group
-# @description Cleans up the rule group created during tests
+### @@teardown Delete Test Rule Group
+# @@description Cleans up the rule group created during tests
 DELETE {{mgmt_api}}{{rule_group_id}}?api-version=2023-03-01
 Authorization: Bearer {{access_token}}
 
-# @assert status >= 200
-# @assert status <= 204
+# @@assert status >= 200
+# @@assert status <= 204

@@ -125,3 +125,95 @@ pub fn render_help_popup(frame: &mut Frame, area: Rect, scroll: u16) {
         frame.render_widget(hint, hint_area);
     }
 }
+
+/// Render the environment picker overlay (triggered by Ctrl+P). Lists all
+/// loaded `.env` files plus a "(none)" option at the top. Active entry is
+/// marked with ● and the highlighted row is the current cursor position.
+pub fn _render_env_picker_removed() {}
+
+pub fn render_env_picker(frame: &mut Frame, area: Rect, app: &crate::app::App) {
+    let entries = &app.env_config.entries;
+    let n = entries.len();
+    let popup_width = 68u16.min(area.width.saturating_sub(4));
+    let popup_height = (n as u16 + 8).min(area.height.saturating_sub(4)).max(9);
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+    frame.render_widget(ratatui::widgets::Clear, popup_area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let sel = Style::default().fg(theme::BG_OVERLAY()).bg(theme::BLUE()).add_modifier(Modifier::BOLD);
+    let normal = Style::default().fg(theme::TEXT());
+    let faint = Style::default().fg(theme::TEXT_FAINT());
+    let active_dot = "● ";
+    let active_idx = app.env_config.active_index;
+
+    let style0 = if app.env_picker_cursor == 0 { sel } else { normal };
+    lines.push(Line::from(vec![
+        Span::styled(
+            if active_idx.is_none() { active_dot } else { "  " },
+            Style::default().fg(theme::GREEN()),
+        ),
+        Span::styled("(none)", style0),
+    ]));
+
+    for (i, entry) in entries.iter().enumerate() {
+        let is_active = active_idx == Some(i);
+        let style = if app.env_picker_cursor == i + 1 { sel } else { normal };
+        let path_short = shorten_path(&entry.path);
+        lines.push(Line::from(vec![
+            Span::styled(
+                if is_active { active_dot } else { "  " },
+                Style::default().fg(theme::GREEN()),
+            ),
+            Span::styled(entry.name.clone(), style),
+            Span::raw("  "),
+            Span::styled(path_short, faint),
+        ]));
+    }
+
+    if entries.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "No .env files loaded. Press 'a' to add one.",
+            faint,
+        )));
+    }
+
+    let block = Block::default()
+        .title(" 🌐 Environments (Ctrl+P) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BLUE()))
+        .style(Style::default().bg(theme::BG_OVERLAY()));
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, popup_area);
+
+    let hint_y = popup_area.y + popup_area.height - 1;
+    if hint_y < area.height {
+        let hint_area = Rect::new(popup_area.x + 2, hint_y, popup_area.width.saturating_sub(4), 1);
+        let hint = Paragraph::new(Line::from(vec![
+            Span::styled("j/k", Style::default().fg(theme::PEACH())),
+            Span::styled(" move  ", faint),
+            Span::styled("Enter", Style::default().fg(theme::PEACH())),
+            Span::styled(" activate  ", faint),
+            Span::styled("a", Style::default().fg(theme::PEACH())),
+            Span::styled(" add  ", faint),
+            Span::styled("d", Style::default().fg(theme::PEACH())),
+            Span::styled(" remove  ", faint),
+            Span::styled("Esc", Style::default().fg(theme::PEACH())),
+            Span::styled(" close", faint),
+        ]));
+        frame.render_widget(hint, hint_area);
+    }
+}
+
+fn shorten_path(p: &str) -> String {
+    let norm = p.replace('\\', "/");
+    let parts: Vec<&str> = norm.split('/').collect();
+    if parts.len() <= 2 {
+        norm
+    } else {
+        format!("…/{}", parts[parts.len().saturating_sub(2)..].join("/"))
+    }
+}
+

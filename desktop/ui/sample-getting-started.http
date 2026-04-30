@@ -39,64 +39,69 @@
 #     extracted URL chaining, response structure validation
 # ============================================================
 
-@variables
 # --- Microsoft Identity Platform ---
-azure_ad_base = https://login.microsoftonline.com
-tenant = common
+@azure_ad_base = https://login.microsoftonline.com
+@tenant = common
 
 # --- NuGet Public API ---
-nuget_base = https://api.nuget.org
+@nuget_base = https://api.nuget.org
 
 # --- Microsoft Services ---
-graph_base = https://graph.microsoft.com
-azure_status_url = https://azure.status.microsoft.com
-github_api = https://api.github.com
+@graph_base = https://graph.microsoft.com
+@azure_status_url = https://azure.status.microsoft.com
+@github_api = https://api.github.com
 
 # --- Extracted at runtime (populated by @setup blocks) ---
-access_token =
-jwks_uri =
-issuer =
-token_endpoint =
-authorization_endpoint =
-nuget_search_url =
+@access_token = 
+@jwks_uri = 
+@issuer = 
+@token_endpoint = 
+@authorization_endpoint = 
+@nuget_search_url = 
 
-### @setup Fetch OpenID Configuration
-# @description Fetches Azure AD v2.0 OpenID discovery document and extracts key endpoints
+# Sessions: scrub the OAuth client_secret from request bodies and the
+# access_token from token-fetch responses so recorded run.json files
+# never contain credentials. Both directives apply to every block below.
+# @@redact body /client_secret=[^&\r\n]+/
+# @@redact body $.access_token
+
+### @@setup Fetch OpenID Configuration
+# @@description Fetches Azure AD v2.0 OpenID discovery document and extracts key endpoints
 GET {{azure_ad_base}}/{{tenant}}/v2.0/.well-known/openid-configuration
 
-# @extract jwks_uri = $.jwks_uri
-# @extract issuer = $.issuer
-# @extract token_endpoint = $.token_endpoint
-# @extract authorization_endpoint = $.authorization_endpoint
-# @assert status == 200
-# @assert $.issuer != null
-# @assert $.jwks_uri != null
-# @assert $.token_endpoint != null
-# @assert $.authorization_endpoint != null
-# @assert $.response_types_supported.length > 0
+# @@extract jwks_uri = $.jwks_uri
+# @@extract issuer = $.issuer
+# @@extract token_endpoint = $.token_endpoint
+# @@extract authorization_endpoint = $.authorization_endpoint
+# @@assert status == 200
+# @@assert $.issuer != null
+# @@assert $.jwks_uri != null
+# @@assert $.token_endpoint != null
+# @@assert $.authorization_endpoint != null
+# @@assert $.response_types_supported.length > 0
 
-### @setup Fetch NuGet Service Index
-# @description Fetches NuGet v3 service index and extracts the search query endpoint
+### @@setup Fetch NuGet Service Index
+# @@description Fetches NuGet v3 service index and extracts the search query endpoint
 GET {{nuget_base}}/v3/index.json
 
-# @extract nuget_search_url = $.resources[0].@id
-# @assert status == 200
-# @assert $.version != null
-# @assert $.resources.length > 0
+# @@extract nuget_search_url = $.resources[0].@id
+# @@assert status == 200
+# @@assert $.version != null
+# @@assert $.resources.length > 0
 
-### @setup Fetch Graph Token
-# @mode app
-# @dev_auth https://graph.microsoft.com/.default
-# @description Fetches an access token for Microsoft Graph using client credentials (skipped in dev mode)
+### @@setup Fetch Graph Token
+# @@mode app
+# @@dev_auth https://graph.microsoft.com/.default
+# @@description Fetches an access token for Microsoft Graph using client credentials (skipped in dev mode)
 POST {{azure_ad_base}}/{{tenant}}/oauth2/v2.0/token
 Content-Type: application/x-www-form-urlencoded
 
 grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_secret}}&scope={{auth_scope}}
 
-# @extract access_token = $.access_token
-# @assert status == 200
-# @assert $.access_token != null
-# @assert $.token_type == Bearer
+# @@extract access_token = $.access_token
+# @@assert status == 200
+# @@assert $.access_token != null
+# @@assert $.token_type == Bearer
 
 ###
 # --------------------------------------------------
@@ -104,34 +109,34 @@ grant_type=client_credentials&client_id={{client_id}}&client_secret={{client_sec
 # Validate Azure AD identity discovery endpoints
 # --------------------------------------------------
 
-### @test Fetch JWKS Signing Keys
-# @description Retrieves JWT signing keys from the jwks_uri extracted in setup
-# @group azure-identity
+### @@test Fetch JWKS Signing Keys
+# @@description Retrieves JWT signing keys from the jwks_uri extracted in setup
+# @@group azure-identity
 GET {{jwks_uri}}
 
-# @assert status == 200
-# @assert $.keys.length > 0
-# @assert $.keys[0].kty == RSA
-# @assert $.keys[0].kid != null
-# @assert $.keys[0].use == sig
+# @@assert status == 200
+# @@assert $.keys.length > 0
+# @@assert $.keys[0].kty == RSA
+# @@assert $.keys[0].kid != null
+# @@assert $.keys[0].use == sig
 
-### @test Fetch v1 OpenID Config
-# @description Fetches v1.0 OpenID config to compare against v2.0 extracted in setup
-# @group azure-identity
+### @@test Fetch v1 OpenID Config
+# @@description Fetches v1.0 OpenID config to compare against v2.0 extracted in setup
+# @@group azure-identity
 GET {{azure_ad_base}}/{{tenant}}/.well-known/openid-configuration
 
-# @assert status == 200
-# @assert $.issuer != null
-# @assert $.jwks_uri != null
-# @assert $.token_endpoint != null
+# @@assert status == 200
+# @@assert $.issuer != null
+# @@assert $.jwks_uri != null
+# @@assert $.token_endpoint != null
 
-### @test Validate Token Endpoint
-# @description Verifies the extracted token endpoint responds (OPTIONS/HEAD-safe check)
-# @group azure-identity
+### @@test Validate Token Endpoint
+# @@description Verifies the extracted token endpoint responds (OPTIONS/HEAD-safe check)
+# @@group azure-identity
 GET {{azure_ad_base}}/{{tenant}}/v2.0/.well-known/openid-configuration
 
-# @assert status == 200
-# @assert $.token_endpoint contains /oauth2/v2.0/token
+# @@assert status == 200
+# @@assert $.token_endpoint contains /oauth2/v2.0/token
 
 ###
 # --------------------------------------------------
@@ -139,23 +144,23 @@ GET {{azure_ad_base}}/{{tenant}}/v2.0/.well-known/openid-configuration
 # Query NuGet public package registry
 # --------------------------------------------------
 
-### @test Search NuGet Packages
-# @description Searches for the popular Newtonsoft.Json package
-# @group nuget-packages
+### @@test Search NuGet Packages
+# @@description Searches for the popular Newtonsoft.Json package
+# @@group nuget-packages
 GET https://azuresearch-usnc.nuget.org/query?q=Newtonsoft.Json&take=5
 
-# @assert status == 200
-# @assert $.totalHits > 0
-# @assert $.data.length > 0
-# @assert $.data[0].id == Newtonsoft.Json
+# @@assert status == 200
+# @@assert $.totalHits > 0
+# @@assert $.data.length > 0
+# @@assert $.data[0].id == Newtonsoft.Json
 
-### @test Get Package Registration
-# @description Fetches registration metadata for the Azure.Core package
-# @group nuget-packages
+### @@test Get Package Registration
+# @@description Fetches registration metadata for the Azure.Core package
+# @@group nuget-packages
 GET https://api.nuget.org/v3/registration5-gz-semver2/azure.core/index.json
 
-# @assert status == 200
-# @assert $.items.length > 0
+# @@assert status == 200
+# @@assert $.items.length > 0
 
 ###
 # --------------------------------------------------
@@ -163,30 +168,30 @@ GET https://api.nuget.org/v3/registration5-gz-semver2/azure.core/index.json
 # Validate public Microsoft service endpoints
 # --------------------------------------------------
 
-### @test Fetch Azure Status Page
-# @description Checks the Azure global status page is reachable
-# @group microsoft-services
+### @@test Fetch Azure Status Page
+# @@description Checks the Azure global status page is reachable
+# @@group microsoft-services
 GET {{azure_status_url}}/en-us/status
 
-# @assert status == 200
+# @@assert status == 200
 
-### @test Fetch Graph API Metadata
-# @description Validates the public Microsoft Graph OData metadata endpoint
-# @group microsoft-services
+### @@test Fetch Graph API Metadata
+# @@description Validates the public Microsoft Graph OData metadata endpoint
+# @@group microsoft-services
 GET {{graph_base}}/v1.0/$metadata
 Accept: application/xml
 
-# @assert status == 200
+# @@assert status == 200
 
-### @test Fetch GitHub Microsoft Org
-# @description Queries GitHub API for the Microsoft organization (GitHub is Microsoft-owned)
-# @group microsoft-services
+### @@test Fetch GitHub Microsoft Org
+# @@description Queries GitHub API for the Microsoft organization (GitHub is Microsoft-owned)
+# @@group microsoft-services
 GET {{github_api}}/orgs/microsoft
 Accept: application/vnd.github.v3+json
 
-# @assert status == 200
-# @assert $.login == microsoft
-# @assert $.type == Organization
+# @@assert status == 200
+# @@assert $.login == microsoft
+# @@assert $.type == Organization
 
 ###
 # --------------------------------------------------
@@ -195,15 +200,15 @@ Accept: application/vnd.github.v3+json
 # (Uses token from setup — in dev mode, your own credentials)
 # --------------------------------------------------
 
-### @test Get Graph Organization
-# @description Fetches organization info from Microsoft Graph using auth token
-# @group graph-authenticated
+### @@test Get Graph Organization
+# @@description Fetches organization info from Microsoft Graph using auth token
+# @@group graph-authenticated
 GET {{graph_base}}/v1.0/organization
 Authorization: Bearer {{access_token}}
 
-# @assert status == 200
-# @assert $.value.length > 0
-# @assert $.value[0].displayName != null
+# @@assert status == 200
+# @@assert $.value.length > 0
+# @@assert $.value[0].displayName != null
 
 ###
 # --------------------------------------------------
@@ -211,18 +216,18 @@ Authorization: Bearer {{access_token}}
 # Validate error and edge-case responses
 # --------------------------------------------------
 
-### @test Non-Existent NuGet Package
-# @description Searches for a package that should not exist
-# @group error-handling
+### @@test Non-Existent NuGet Package
+# @@description Searches for a package that should not exist
+# @@group error-handling
 GET https://azuresearch-usnc.nuget.org/query?q=zzz-nonexistent-package-{{$uuid}}&take=1
 
-# @assert status == 200
-# @assert $.totalHits == 0
-# @assert $.data.length == 0
+# @@assert status == 200
+# @@assert $.totalHits == 0
+# @@assert $.data.length == 0
 
-### @test Invalid OpenID Tenant
-# @description Requests OpenID config for a bogus tenant — expects an error
-# @group error-handling
+### @@test Invalid OpenID Tenant
+# @@description Requests OpenID config for a bogus tenant — expects an error
+# @@group error-handling
 GET {{azure_ad_base}}/nonexistent-tenant-{{$timestamp}}/.well-known/openid-configuration
 
-# @assert status == 400
+# @@assert status == 400

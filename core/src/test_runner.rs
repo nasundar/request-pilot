@@ -7,7 +7,42 @@ use crate::assertions::{self, AssertionResult};
 use crate::http_client;
 use crate::http_parser::{TestBlock, TestSuite};
 use crate::telemetry::{self, TelemetryCollector, TelemetryStats};
-use crate::variables::VariableStore;
+use crate::variables::{CapturedResponse, VariableStore};
+
+/// Append an auto-injected request-id header (fresh UUIDv4) to `headers`, but
+/// only if no header with the same name is already present (case-insensitive).
+/// No-op when `block.request_id_disabled` is true or `block.request_id_header`
+/// is None. Called right before dispatching the HTTP request.
+fn inject_request_id_header(headers: &mut Vec<(String, String)>, block: &TestBlock) {
+    if block.request_id_disabled {
+        return;
+    }
+    let Some(name) = block.request_id_header.as_deref() else {
+        return;
+    };
+    if headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name)) {
+        return;
+    }
+    headers.push((name.to_string(), uuid::Uuid::new_v4().to_string()));
+}
+
+/// Capture a completed block's response into the var_store so later blocks
+/// can reference it via `{{blockName.response.*}}` interpolation.
+fn capture_block_response(var_store: &mut VariableStore, result: &BlockResult) {
+    if result.name.is_empty() {
+        return;
+    }
+    if let Some(resp) = &result.response {
+        var_store.set_response(
+            &result.name,
+            CapturedResponse {
+                status: resp.status,
+                headers: resp.headers.clone(),
+                body: resp.body.clone(),
+            },
+        );
+    }
+}
 
 /// Lightweight progress event emitted per-block during suite execution.
 #[derive(Debug, Serialize, Clone)]
@@ -194,6 +229,7 @@ async fn execute_block(block: TestBlock, var_store: VariableStore, extra_headers
     for (k, v) in &extra_headers {
         headers.push((k.clone(), var_store.interpolate(v)));
     }
+    inject_request_id_header(&mut headers, &block);
     let body = block
         .request
         .body
@@ -319,6 +355,7 @@ async fn execute_compare_block(
         for (k, v) in &extra_headers {
             headers.push((k.clone(), var_store.interpolate(v)));
         }
+        inject_request_id_header(&mut headers, &block);
         let body = step.request.body.as_ref().map(|b| var_store.interpolate(b));
 
         let start = std::time::Instant::now();
@@ -712,6 +749,7 @@ async fn run_tests_with_groups(
                         }
                     }
                 }
+                capture_block_response(var_store, &result);
                 all_results.push((idx, result));
             }
         }
@@ -760,6 +798,24 @@ async fn run_suite_inner(
     handler: Option<Arc<dyn ProgressHandler>>,
     run_mode: Option<&str>,
 ) -> TestRunResults {
+    // Resolve file-level `# @@request-id` into each block's effective header
+    // (blocks without their own override inherit the file-level default;
+    // blocks with `request_id_disabled` stay opted-out).
+    let suite_owned: TestSuite = if suite.request_id_header.is_some() {
+        let mut s = suite.clone();
+        if let Some(ref file_hdr) = s.request_id_header.clone() {
+            for b in &mut s.blocks {
+                if !b.request_id_disabled && b.request_id_header.is_none() {
+                    b.request_id_header = Some(file_hdr.clone());
+                }
+            }
+        }
+        s
+    } else {
+        suite.clone()
+    };
+    let suite = &suite_owned;
+
     let mut var_store = VariableStore::from_pairs(&suite.variables);
     var_store.merge(extra_variables);
 
@@ -815,6 +871,7 @@ async fn run_suite_inner(
                 }
             }
         }
+        capture_block_response(&mut var_store, &result);
         if result.status != "passed" {
             setup_failed = true;
         }
@@ -878,6 +935,7 @@ async fn run_suite_inner(
                 }
             }
         }
+        capture_block_response(&mut var_store, &result);
         emit_completed(&handler, &result);
         record_block_telemetry(&mut telemetry, &result, block.group.as_deref());
         block_results.push(result);
@@ -943,12 +1001,19 @@ pub async fn resolve_variables_only(
 
     for block in &setup_blocks {
         let url = var_store.interpolate(&block.request.url);
-        let headers: Vec<(String, String)> = block
+        let mut headers: Vec<(String, String)> = block
             .request
             .headers
             .iter()
             .map(|(k, v)| (k.clone(), var_store.interpolate(v)))
             .collect();
+        // Same request-id resolution as run_suite_inner: file-level default
+        // applies unless the block opts out or overrides.
+        let mut resolved_block = (*block).clone();
+        if !resolved_block.request_id_disabled && resolved_block.request_id_header.is_none() {
+            resolved_block.request_id_header = suite.request_id_header.clone();
+        }
+        inject_request_id_header(&mut headers, &resolved_block);
         let body = block
             .request
             .body
@@ -971,6 +1036,16 @@ pub async fn resolve_variables_only(
                     if let Some(v) = value {
                         var_store.set(&extract.variable_name, &v);
                     }
+                }
+                if !block.name.is_empty() {
+                    var_store.set_response(
+                        &block.name,
+                        CapturedResponse {
+                            status: response.status,
+                            headers: response.headers.clone(),
+                            body: response.body.clone(),
+                        },
+                    );
                 }
             }
             Err(err) => {
@@ -1082,6 +1157,115 @@ mod tests {
         assert_eq!(er.value.as_deref(), Some("abc123"));
     }
 
+    #[test]
+    fn inject_request_id_header_adds_when_missing() {
+        let block = TestBlock {
+            block_type: "test".into(),
+            name: "t".into(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: vec![],
+            request: crate::http_parser::ParsedRequest {
+                name: None,
+                method: "GET".into(),
+                url: "http://x".into(),
+                headers: vec![],
+                body: None,
+            },
+            assertions: vec![],
+            extracts: vec![],
+            compare: false,
+            steps: vec![],
+            diff: None,
+            errors: Vec::new(),
+            request_id_header: Some("X-Request-Id".into()),
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
+        };
+        let mut headers = vec![("Content-Type".into(), "application/json".into())];
+        inject_request_id_header(&mut headers, &block);
+        assert_eq!(headers.len(), 2);
+        let (name, value) = &headers[1];
+        assert_eq!(name, "X-Request-Id");
+        assert_eq!(value.len(), 36); // uuid length
+    }
+
+    #[test]
+    fn inject_request_id_header_skips_when_already_present() {
+        let block = TestBlock {
+            block_type: "test".into(),
+            name: "t".into(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: vec![],
+            request: crate::http_parser::ParsedRequest {
+                name: None,
+                method: "GET".into(),
+                url: "http://x".into(),
+                headers: vec![],
+                body: None,
+            },
+            assertions: vec![],
+            extracts: vec![],
+            compare: false,
+            steps: vec![],
+            diff: None,
+            errors: Vec::new(),
+            request_id_header: Some("X-Request-Id".into()),
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
+        };
+        // case-insensitive match on existing header name
+        let mut headers = vec![("x-request-id".into(), "user-supplied-id".into())];
+        inject_request_id_header(&mut headers, &block);
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].1, "user-supplied-id");
+    }
+
+    #[test]
+    fn inject_request_id_header_noop_when_disabled_or_none() {
+        let mut block = TestBlock {
+            block_type: "test".into(),
+            name: "t".into(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: vec![],
+            request: crate::http_parser::ParsedRequest {
+                name: None,
+                method: "GET".into(),
+                url: "http://x".into(),
+                headers: vec![],
+                body: None,
+            },
+            assertions: vec![],
+            extracts: vec![],
+            compare: false,
+            steps: vec![],
+            diff: None,
+            errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
+        };
+        let mut headers: Vec<(String, String)> = vec![];
+        inject_request_id_header(&mut headers, &block);
+        assert!(headers.is_empty());
+
+        block.request_id_header = Some("X-Request-Id".into());
+        block.request_id_disabled = true;
+        inject_request_id_header(&mut headers, &block);
+        assert!(headers.is_empty());
+    }
+
     use crate::http_parser::{CompareStep, Extract, ParsedRequest};
 
     fn make_block(
@@ -1113,6 +1297,9 @@ mod tests {
             steps: Vec::new(),
             diff: None,
             errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
         }
     }
 
@@ -1392,6 +1579,9 @@ mod tests {
             ],
             diff: None,
             errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
         };
 
         let var_store = VariableStore::new();
@@ -1462,6 +1652,9 @@ mod tests {
                 step_b: "nonexistent".to_string(),
             }),
             errors: vec!["@diff references unknown step 'nonexistent'".to_string()],
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
         };
 
         let var_store = VariableStore::new();
@@ -1533,6 +1726,9 @@ mod tests {
                 step_b: "step_b".to_string(),
             }),
             errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
         };
 
         let var_store = VariableStore::new();
@@ -1582,6 +1778,9 @@ mod tests {
                 "@diff references unknown step 'a'".to_string(),
                 "@diff references unknown step 'b'".to_string(),
             ],
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
         };
 
         let var_store = VariableStore::new();
@@ -1649,6 +1848,9 @@ mod tests {
                 step_b: "beta".to_string(),
             }),
             errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
         };
 
         let var_store = VariableStore::new();
