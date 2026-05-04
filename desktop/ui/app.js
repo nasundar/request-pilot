@@ -16,8 +16,7 @@ const $$ = (sel) => document.querySelectorAll(sel);
 let loadedFiles = [];
 let activeFileIndex = -1;
 let activeBlockIndex = -1;
-let envVars = {};            // {name: value} — from .env file
-let envFilePath = null;      // path to loaded .env file
+let runtimeOverrides = {};   // {name: value} — populated by @@extract / post-run final_variables. Cleared at the start of every Run All.
 let disabledBlocks = {};     // {"fileIdx-blockIdx": true} — disabled steps
 let isRunning = false;
 let lastResponse = null;
@@ -427,10 +426,6 @@ const extraHeadersCount = $('#extraHeadersCount');
 const fileTree        = $('#fileTree');
 const envList         = $('#envList');
 const loadEnvBtn      = $('#loadEnvBtn');
-const saveEnvBtn      = $('#saveEnvBtn');
-const addEnvVarBtn    = $('#addEnvVarBtn');
-const clearEnvBtn     = $('#clearEnvBtn');
-const envFileInput    = $('#envFileInput');
 const assertionsTab   = $('#assertionsTab');
 const assertionsContent = $('#assertionsContent');
 const testResultsBar  = $('#testResultsBar');
@@ -1069,20 +1064,13 @@ bodyInput.addEventListener('scroll', () => {
 });
 
 // --- Variable interpolation ---
+// Resolution stack (low → high precedence):
+//   1. .http file `@variables` (defaults shipped in repo)
+//   2. active .env file values (loaded user overrides)
+//   3. runtimeOverrides (`@@extract` results, post-run final_variables)
 function interpolateVariables(str) {
   if (!str) return str;
-  const merged = {};
-  if (activeEnvVars && activeEnvVars.length > 0) {
-    activeEnvVars.forEach(([name, value]) => { merged[name] = value; });
-  }
-  loadedFiles.forEach(file => {
-    if (file.suite.variables) {
-      file.suite.variables.forEach(([name, value]) => { merged[name] = value; });
-    }
-  });
-  Object.entries(envVars).forEach(([name, value]) => {
-    if (value !== '') merged[name] = value;
-  });
+  const merged = buildMergedVarsObject();
   return str.replace(/\{\{(\w+)\}\}/g, (match, name) => {
     if (name === '$timestamp') return Date.now().toString();
     if (name === '$uuid') return crypto.randomUUID();
@@ -1092,37 +1080,62 @@ function interpolateVariables(str) {
 }
 
 function collectVariablesArray() {
+  return Object.entries(buildMergedVarsObject());
+}
+
+function buildMergedVarsObject() {
   const merged = {};
-  // Env profile values (lowest precedence — overwritten by file/env edits)
-  if (activeEnvVars && activeEnvVars.length > 0) {
-    activeEnvVars.forEach(([name, value]) => { merged[name] = value; });
-  }
+  // .http file defaults — lowest precedence
   loadedFiles.forEach(file => {
-    if (file.suite.variables) {
+    if (file.suite && file.suite.variables) {
       file.suite.variables.forEach(([name, value]) => { merged[name] = value; });
     }
   });
-  Object.entries(envVars).forEach(([name, value]) => {
+  // Active .env vars override .http defaults
+  if (activeEnvVars && activeEnvVars.length > 0) {
+    activeEnvVars.forEach(([name, value]) => { merged[name] = value; });
+  }
+  // Runtime overrides (@@extract, post-run final_variables) — highest precedence
+  Object.entries(runtimeOverrides).forEach(([name, value]) => {
     if (value !== '') merged[name] = value;
   });
-  return Object.entries(merged);
+  return merged;
+}
+
+function lookupVar(name) {
+  if (Object.prototype.hasOwnProperty.call(runtimeOverrides, name)) {
+    const v = runtimeOverrides[name];
+    if (v !== undefined && v !== '') return v;
+  }
+  if (activeEnvVars && activeEnvVars.length > 0) {
+    const hit = activeEnvVars.find(([k]) => k === name);
+    if (hit && hit[1] !== '') return hit[1];
+  }
+  for (const f of loadedFiles) {
+    if (!f.suite || !f.suite.variables) continue;
+    const v = f.suite.variables.find(([k]) => k === name);
+    if (v && v[1] !== '') return v[1];
+  }
+  return undefined;
 }
 
 // ── Environment (.env file list) ─────────────────────────────────────────
 // Loaded .env files with exactly one active at a time. The full list + active
 // index live in a persisted env config (managed by Rust; see core/env_config).
-// `activeEnvVars` is the resolved vars of the active entry and is merged into
-// variable resolution at the lowest precedence (below file vars and in-app
-// edits, but can still be overridden at runtime by `@@extract`).
+// Per-card UI state (expanded, dirty edit drafts, lazily-loaded vars for
+// inactive cards) lives alongside the persisted config in `envCardState`.
 let envConfig = { entries: [], active_index: null };
-let activeEnvVars = []; // [[name, value], ...]
+let activeEnvVars = []; // [[name, value], ...] for the active entry only
+let envCardState = []; // parallel array: { vars: [[k,v]]?, draftVars: [[k,v]]?, expanded: bool, dirty: bool, loading: bool }
 
-async function reloadEnvList() {
+async function reloadEnvList(preserveCardState = true) {
   try {
     const cfg = await invoke('env_list');
     envConfig = normalizeEnvConfig(cfg);
     activeEnvVars = await invoke('env_resolve_active');
-    renderEnvPicker();
+    syncEnvCardState(preserveCardState);
+    seedActiveCardVars();
+    renderEnvPanel();
   } catch (err) {
     rpLog('error', 'reloadEnvList failed', { error: String(err) });
   }
@@ -1134,6 +1147,52 @@ function normalizeEnvConfig(cfg) {
     // serde serializes None as null; ensure we coerce undefined -> null too
     active_index: (cfg && cfg.active_index != null) ? cfg.active_index : null,
   };
+}
+
+function defaultCardState() {
+  return { vars: null, draftVars: null, expanded: false, dirty: false, loading: false };
+}
+
+// Rebuild envCardState to match current entries; preserve expanded/draft per
+// path (entries can be reordered after add/remove).
+function syncEnvCardState(preserve) {
+  const byPath = new Map();
+  if (preserve) {
+    envCardState.forEach((s, i) => {
+      const e = envConfig.entries[i];
+      if (e) byPath.set(e.path, s);
+    });
+  }
+  envCardState = envConfig.entries.map((e) => {
+    return byPath.get(e.path) || defaultCardState();
+  });
+}
+
+// When the active entry changes, ensure its card has up-to-date vars without a
+// separate fetch (we already loaded them via env_resolve_active).
+function seedActiveCardVars() {
+  const i = envConfig.active_index;
+  if (i == null) return;
+  if (!envCardState[i]) envCardState[i] = defaultCardState();
+  envCardState[i].vars = activeEnvVars.map(([k, v]) => [k, v]);
+  if (!envCardState[i].dirty) {
+    envCardState[i].draftVars = null;
+  }
+}
+
+async function ensureCardVarsLoaded(index) {
+  const state = envCardState[index];
+  if (!state || state.vars || state.loading) return;
+  state.loading = true;
+  try {
+    const vars = await invoke('env_resolve_entry', { index });
+    state.vars = vars || [];
+  } catch (err) {
+    rpLog('error', 'env_resolve_entry failed', { index, error: String(err) });
+    state.vars = [];
+  } finally {
+    state.loading = false;
+  }
 }
 
 async function envPickerLoadFile() {
@@ -1153,13 +1212,22 @@ async function envPickerLoadFile() {
     const res = await invoke('env_add', { path });
     envConfig = normalizeEnvConfig(res.config);
     activeEnvVars = res.active_vars || [];
-    renderEnvPicker();
-    if (typeof renderVariablesPanel === 'function') renderVariablesPanel();
-    const added = envConfig.entries[envConfig.entries.length - 1];
-    if (added) setToast(`Loaded env: ${added.name}`);
+    syncEnvCardState(true);
+    // Seed the just-added entry's vars from the loaded_vars payload so the
+    // user can expand it immediately without an extra round-trip.
+    const addedIdx = envConfig.entries.length - 1;
+    if (addedIdx >= 0) {
+      if (!envCardState[addedIdx]) envCardState[addedIdx] = defaultCardState();
+      envCardState[addedIdx].vars = (res.loaded_vars || []).map(([k, v]) => [k, v]);
+      envCardState[addedIdx].expanded = true;
+    }
+    seedActiveCardVars();
+    renderEnvPanel();
+    const added = envConfig.entries[addedIdx];
+    if (added) showToast(`Loaded env: ${added.name}`, 'success');
   } catch (err) {
     rpLog('error', 'env_add failed', { error: String(err) });
-    alert('Failed to load .env: ' + String(err));
+    showToast('Failed to load .env: ' + String(err), 'error');
   }
 }
 
@@ -1168,10 +1236,12 @@ async function activateEnvIndex(index) {
     const res = await invoke('env_set_active', { index });
     envConfig = normalizeEnvConfig(res.config);
     activeEnvVars = res.active_vars || [];
-    renderEnvPicker();
-    if (typeof renderVariablesPanel === 'function') renderVariablesPanel();
+    syncEnvCardState(true);
+    seedActiveCardVars();
+    renderEnvPanel();
   } catch (err) {
     rpLog('error', 'env_set_active failed', { error: String(err) });
+    showToast('Failed to activate env: ' + String(err), 'error');
   }
 }
 
@@ -1180,69 +1250,33 @@ async function removeEnvIndex(index) {
     const res = await invoke('env_remove', { index });
     envConfig = normalizeEnvConfig(res.config);
     activeEnvVars = res.active_vars || [];
-    renderEnvPicker();
-    if (typeof renderVariablesPanel === 'function') renderVariablesPanel();
+    syncEnvCardState(true);
+    seedActiveCardVars();
+    renderEnvPanel();
   } catch (err) {
     rpLog('error', 'env_remove failed', { error: String(err) });
+    showToast('Failed to remove env: ' + String(err), 'error');
   }
 }
 
-function renderEnvPicker() {
-  const label = document.getElementById('envPickerLabel');
-  const btn = document.getElementById('envPickerBtn');
-  const list = document.getElementById('envPickerList');
-  if (!label || !btn || !list) return;
-
-  const entries = envConfig.entries;
-  const activeIdx = envConfig.active_index;
-  const active = (activeIdx != null) ? entries[activeIdx] : null;
-  label.textContent = active ? active.name : 'no env';
-  btn.classList.toggle('active', !!active);
-
-  list.innerHTML = '';
-
-  // "(none)" row — deactivates current env
-  const noneRow = document.createElement('div');
-  noneRow.className = 'env-picker-item' + (active ? '' : ' active current');
-  const noneMain = document.createElement('button');
-  noneMain.className = 'env-picker-item-main';
-  noneMain.innerHTML = '<span class="env-picker-item-dot"></span><span class="env-picker-item-label">(none)</span>';
-  noneMain.addEventListener('click', () => {
-    activateEnvIndex(null);
-    document.getElementById('envPickerPanel').classList.add('hidden');
-  });
-  noneRow.appendChild(noneMain);
-  list.appendChild(noneRow);
-
-  entries.forEach((e, i) => {
-    const isActive = i === activeIdx;
-    const row = document.createElement('div');
-    row.className = 'env-picker-item' + (isActive ? ' active current' : '');
-    const main = document.createElement('button');
-    main.className = 'env-picker-item-main';
-    main.innerHTML =
-      '<span class="env-picker-item-dot"></span>' +
-      '<span class="env-picker-item-label">' + escapeHtml(e.name) + '</span>' +
-      '<span class="env-picker-item-path" title="' + escapeHtml(e.path) + '">' + escapeHtml(shortenPath(e.path)) + '</span>';
-    main.addEventListener('click', () => {
-      activateEnvIndex(i);
-      document.getElementById('envPickerPanel').classList.add('hidden');
-    });
-    const rm = document.createElement('button');
-    rm.className = 'env-picker-item-remove';
-    rm.innerHTML = '✕';
-    rm.title = 'Remove from list';
-    rm.addEventListener('click', (ev) => { ev.stopPropagation(); removeEnvIndex(i); });
-    row.appendChild(main);
-    row.appendChild(rm);
-    list.appendChild(row);
-  });
-
-  if (entries.length === 0) {
-    const hint = document.createElement('div');
-    hint.style.cssText = 'font-size:11px;color:var(--text-muted);padding:6px 4px;';
-    hint.textContent = 'No .env files loaded yet. Click "+ Load .env file" below.';
-    list.appendChild(hint);
+async function saveEnvIndex(index) {
+  const state = envCardState[index];
+  if (!state || !state.dirty) return;
+  const vars = state.draftVars || state.vars || [];
+  try {
+    const res = await invoke('env_save', { index, vars });
+    envConfig = normalizeEnvConfig(res.config);
+    activeEnvVars = res.active_vars || [];
+    state.vars = vars.map(([k, v]) => [k, v]);
+    state.draftVars = null;
+    state.dirty = false;
+    seedActiveCardVars();
+    renderEnvPanel();
+    const entry = envConfig.entries[index];
+    if (entry) showToast(`Saved ${entry.name}`, 'success');
+  } catch (err) {
+    rpLog('error', 'env_save failed', { index, error: String(err) });
+    showToast('Failed to save .env: ' + String(err), 'error');
   }
 }
 
@@ -1252,30 +1286,6 @@ function shortenPath(p) {
   const parts = norm.split('/');
   if (parts.length <= 2) return norm;
   return '…/' + parts.slice(-2).join('/');
-}
-
-function setupEnvPickerUI() {
-  const btn = document.getElementById('envPickerBtn');
-  const panel = document.getElementById('envPickerPanel');
-  const loadBtn = document.getElementById('envPickerLoadBtn');
-  if (!btn || !panel) return;
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    panel.classList.toggle('hidden');
-  });
-  document.addEventListener('click', (e) => {
-    if (!panel.classList.contains('hidden') && !panel.contains(e.target) && e.target !== btn) {
-      panel.classList.add('hidden');
-    }
-  });
-  if (loadBtn) {
-    loadBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      envPickerLoadFile();
-    });
-  }
-  renderEnvPicker();
-  reloadEnvList();
 }
 
 function setToast(msg) {
@@ -2171,22 +2181,11 @@ async function loadFile(file) {
       setAutoRun(suite.auto_run);
     }
 
-    // Populate envVars from .http file variable values (non-placeholders)
-    if (suite.variables) {
-      suite.variables.forEach(([name, value]) => {
-        if (envVars[name] === undefined || envVars[name] === '') {
-          if (value && !value.startsWith('your-') && !value.includes('your-')) {
-            envVars[name] = value;
-          }
-        }
-      });
-    }
-
     // Sync disabled state from parsed # @disabled directives
     syncDisabledFromSuite(fileIdx);
 
     renderFileTree();
-    renderEnvVars();
+    renderEnvPanel();
 
     // Auto-select first request block
     if (suite.blocks && suite.blocks.length > 0) {
@@ -4213,6 +4212,9 @@ async function runAllTests() {
   abortRunController = new AbortController();
   const signal = abortRunController.signal;
   setRunning(true);
+  // Each Run All starts with a clean runtime override slate so stale @@extract
+  // values from previous runs don't leak into this one.
+  runtimeOverrides = {};
   rpLog('info', 'Run All started', { fileCount: loadedFiles.length, azureAuth: azureAuthState });
 
   // Reset telemetry stats for this run
@@ -4325,7 +4327,7 @@ async function runAllTests() {
         // Carry extracted variables forward to next files
         if (results.final_variables) {
           Object.entries(results.final_variables).forEach(([name, value]) => {
-            envVars[name] = value;
+            runtimeOverrides[name] = value;
           });
         }
 
@@ -4469,13 +4471,13 @@ async function runSingleBlock(fileIdx, blockIdx) {
       // Carry extracted variables to env
       if (results.final_variables) {
         Object.entries(results.final_variables).forEach(([name, value]) => {
-          envVars[name] = value;
+          runtimeOverrides[name] = value;
         });
       }
     }
 
     updateBlockStatuses();
-    renderEnvVars();
+    renderEnvPanel();
 
     if (br?.response) {
       lastResponse = br.response;
@@ -4591,7 +4593,7 @@ async function runCompareStep(fileIdx, blockIdx, stepIdx) {
 
       if (results.final_variables) {
         Object.entries(results.final_variables).forEach(([name, value]) => {
-          envVars[name] = value;
+          runtimeOverrides[name] = value;
         });
       }
       invalidateDiffCacheEntry(fileIdx, blockIdx);
@@ -4599,7 +4601,7 @@ async function runCompareStep(fileIdx, blockIdx, stepIdx) {
 
     updateBlockStatuses();
     renderFileTree();
-    renderEnvVars();
+    renderEnvPanel();
 
     if (br?.response) {
       lastResponse = br.response;
@@ -4978,244 +4980,250 @@ testResultsSummary.addEventListener('click', () => {
   testResultsDetails.classList.toggle('hidden');
 });
 
-// --- Env File Management ---
+// --- Env File Management (collapsible cards in left sidebar) ---
 
-function renderEnvVars() {
-  // Collect all variables defined across all loaded .http files
-  const definedVars = {};
-  loadedFiles.forEach(file => {
-    if (file.suite.variables) {
-      file.suite.variables.forEach(([name, value]) => {
-        definedVars[name] = value;
-      });
-    }
-  });
+// Public alias kept so the many existing `renderEnvVars()` call sites keep
+// working without churn — they all need to redraw the env panel.
+function renderEnvVars() { renderEnvPanel(); }
 
-  // Merge with env vars (env overrides .http defaults)
-  const merged = {};
-  Object.entries(definedVars).forEach(([name, httpDefault]) => {
-    const envVal = envVars[name];
-    if (envVal !== undefined && envVal !== '') {
-      merged[name] = { value: envVal, source: 'env', status: 'set' };
-    } else {
-      const isPlaceholder = httpDefault.startsWith('your-') || httpDefault === '' || httpDefault.includes('your-');
-      merged[name] = { value: httpDefault, source: 'http', status: isPlaceholder ? 'empty' : 'set' };
-    }
-  });
+function renderEnvPanel() {
+  if (!envList) return;
+  envList.innerHTML = '';
 
-  // Also show env vars not in any .http file
-  Object.entries(envVars).forEach(([name, value]) => {
-    if (!merged[name]) {
-      merged[name] = { value, source: 'env', status: value ? 'set' : 'empty' };
-    }
-  });
-
-  const entries = Object.entries(merged);
-
+  const entries = envConfig.entries || [];
   if (entries.length === 0) {
-    envList.innerHTML = '<div class="sidebar-empty">No .env file loaded</div>';
+    envList.innerHTML = '<div class="sidebar-empty">No .env file loaded · click 📂 above to load one.</div>';
     return;
   }
 
-  // Show env file path if loaded
-  let html = '';
-  if (envFilePath) {
-    const shortPath = envFilePath.split(/[/\\]/).pop();
-    html += `<div class="env-file-path" title="${escapeAttr(envFilePath)}">\uD83D\uDCC4 ${escapeHtml(shortPath)}</div>`;
-  }
+  entries.forEach((entry, i) => {
+    const isActive = i === envConfig.active_index;
+    const state = envCardState[i] || (envCardState[i] = defaultCardState());
 
-  envList.innerHTML = html;
+    const card = document.createElement('div');
+    card.className = 'env-card' + (isActive ? ' active' : '') + (state.expanded ? ' expanded' : '') + (state.dirty ? ' dirty' : '');
 
-  entries.forEach(([name, v]) => {
-    const row = document.createElement('div');
-    row.className = 'var-row';
+    // ── Header ──
+    const header = document.createElement('div');
+    header.className = 'env-card-header';
+    const chevron = document.createElement('span');
+    chevron.className = 'env-card-chevron';
+    chevron.textContent = '▸';
+    const radio = document.createElement('span');
+    radio.className = 'env-card-radio';
+    radio.title = isActive ? 'Active env (click to deactivate)' : 'Click to activate this env';
+    const name = document.createElement('span');
+    name.className = 'env-card-name';
+    name.textContent = entry.name || 'env';
+    const path = document.createElement('span');
+    path.className = 'env-card-path';
+    path.textContent = shortenPath(entry.path);
+    path.title = entry.path;
+    const dirty = document.createElement('span');
+    dirty.className = 'env-card-dirty';
+    dirty.title = 'Unsaved edits';
+    const save = document.createElement('button');
+    save.className = 'env-card-action save';
+    save.textContent = '💾';
+    save.title = state.dirty ? 'Save edits to disk' : 'No unsaved edits';
+    save.disabled = !state.dirty;
+    const remove = document.createElement('button');
+    remove.className = 'env-card-action remove';
+    remove.textContent = '✕';
+    remove.title = 'Remove from list';
 
-    const statusColor = v.status === 'set' ? 'var(--green)' : 'var(--red)';
-    const statusTitle = v.status === 'set' ? 'Value set' : 'Value not set';
-    const sourceIcon = v.source === 'env' ? '\uD83D\uDD10' : '\uD83D\uDCC4';
-    const sourceTitle = v.source === 'env' ? 'From .env file' : 'Default from .http file';
+    header.appendChild(chevron);
+    header.appendChild(radio);
+    header.appendChild(name);
+    header.appendChild(path);
+    header.appendChild(dirty);
+    header.appendChild(save);
+    header.appendChild(remove);
+    card.appendChild(header);
 
-    row.innerHTML = `
-      <span class="var-status" style="color:${statusColor}" title="${statusTitle}">\u25CF</span>
-      <span class="var-icon" title="${sourceTitle}">${sourceIcon}</span>
-      <input class="var-name" value="${escapeAttr(name)}" spellcheck="false" data-old-name="${escapeAttr(name)}">
-      <span class="var-sep">=</span>
-      <input class="var-value" value="${escapeAttr(v.value)}" spellcheck="false" placeholder="enter value..." data-var-name="${escapeAttr(name)}">
-      <button class="var-delete" title="Delete variable">\u2715</button>
-    `;
+    // ── Body ──
+    const body = document.createElement('div');
+    body.className = 'env-card-body' + (isActive ? '' : ' readonly');
+    card.appendChild(body);
 
-    const nameInput = row.querySelector('.var-name');
-    const valueInput = row.querySelector('.var-value');
-    const deleteBtn = row.querySelector('.var-delete');
+    // ── Wire up handlers ──
+    chevron.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      state.expanded = !state.expanded;
+      if (state.expanded && !state.vars) {
+        await ensureCardVarsLoaded(i);
+      }
+      renderEnvPanel();
+    });
 
-    nameInput.addEventListener('change', () => {
-      const oldName = nameInput.dataset.oldName;
-      const newName = nameInput.value.trim();
-      if (newName && newName !== oldName) {
-        envVars[newName] = envVars[oldName] !== undefined ? envVars[oldName] : v.value;
-        delete envVars[oldName];
-        renderEnvVars();
+    radio.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      if (isActive) {
+        await activateEnvIndex(null);
+      } else {
+        await activateEnvIndex(i);
       }
     });
 
-    valueInput.addEventListener('change', () => {
-      envVars[name] = valueInput.value;
-      renderEnvVars();
+    // Header click (anywhere except buttons) toggles expand
+    header.addEventListener('click', async (ev) => {
+      if (ev.target === radio || ev.target === save || ev.target === remove) return;
+      if (ev.target === chevron) return;
+      state.expanded = !state.expanded;
+      if (state.expanded && !state.vars) {
+        await ensureCardVarsLoaded(i);
+      }
+      renderEnvPanel();
     });
 
-    deleteBtn.addEventListener('click', () => {
-      delete envVars[name];
-      renderEnvVars();
+    save.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      if (state.dirty) await saveEnvIndex(i);
     });
 
-    // Variable hover tooltip
-    row.addEventListener('mouseenter', () => {
-      const varValue = v.value || '';
-      if (!varValue) return;
-      clearTimeout(showTooltipTimer);
-      clearTimeout(hideTooltipTimer);
-      showTooltipTimer = setTimeout(() => {
-        blockTooltip.innerHTML = buildVarTooltipHtml(name, varValue);
-        blockTooltip.classList.remove('hidden');
-        blockTooltip.style.display = 'block';
-        positionBlockTooltip(row);
-      }, 300);
+    remove.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      if (state.dirty) {
+        if (!confirm(`Discard unsaved edits to ${entry.name}?`)) return;
+      }
+      await removeEnvIndex(i);
     });
 
-    row.addEventListener('mouseleave', () => {
-      hideBlockTooltip();
-    });
+    // ── Body content ──
+    if (state.expanded) {
+      renderEnvCardBody(body, i, entry, isActive, state);
+    }
 
-    envList.appendChild(row);
+    envList.appendChild(card);
   });
 
-  // Add built-in variables at bottom
-  const builtins = ['$timestamp', '$uuid', '$randomInt'];
-  builtins.forEach(name => {
+  // Footer: built-ins reminder
+  const builtins = document.createElement('div');
+  builtins.className = 'env-builtins-hint';
+  builtins.style.cssText = 'font-size:10px;color:var(--text-muted);padding:6px 4px 0 4px;border-top:1px dashed var(--border);margin-top:6px;';
+  builtins.innerHTML = 'Built-ins: <code>{{$timestamp}}</code> <code>{{$uuid}}</code> <code>{{$randomInt}}</code>';
+  envList.appendChild(builtins);
+}
+
+function renderEnvCardBody(body, index, entry, isActive, state) {
+  body.innerHTML = '';
+  if (state.loading) {
+    const loading = document.createElement('div');
+    loading.className = 'env-card-loading';
+    loading.textContent = 'Loading…';
+    body.appendChild(loading);
+    return;
+  }
+
+  // Edits live on draftVars when active+dirty; fall back to vars
+  const source = (isActive && state.draftVars) ? state.draftVars : (state.vars || []);
+
+  if (source.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'env-card-loading';
+    empty.textContent = '(no variables in this file)';
+    body.appendChild(empty);
+  }
+
+  source.forEach(([varName, varValue], rowIdx) => {
     const row = document.createElement('div');
-    row.className = 'var-row builtin';
+    row.className = 'var-row';
+    const valueSet = varValue !== undefined && varValue !== '';
+    const isPlaceholder = typeof varValue === 'string' && (varValue.startsWith('your-') || varValue.includes('your-'));
+    const statusColor = valueSet && !isPlaceholder ? 'var(--green)' : 'var(--red)';
+
     row.innerHTML = `
-      <span class="var-status" style="color:var(--text-muted)">\u25CF</span>
-      <span class="var-icon">\u2699</span>
-      <span class="var-name" style="cursor:default;border:none">${name}</span>
+      <span class="var-status" style="color:${statusColor}">●</span>
+      <span class="var-icon" title=".env variable">🔐</span>
+      <input class="var-name" value="${escapeAttr(varName)}" spellcheck="false" ${isActive ? '' : 'disabled'}>
       <span class="var-sep">=</span>
-      <span class="var-value" style="cursor:default;border:none;font-style:italic">(auto)</span>
+      <input class="var-value" value="${escapeAttr(varValue || '')}" spellcheck="false" placeholder="value" ${isActive ? '' : 'disabled'}>
+      <button class="var-delete" title="Delete variable" ${isActive ? '' : 'disabled'}>✕</button>
     `;
-    envList.appendChild(row);
+
+    if (isActive) {
+      const nameInput = row.querySelector('.var-name');
+      const valueInput = row.querySelector('.var-value');
+      const deleteBtn = row.querySelector('.var-delete');
+      nameInput.addEventListener('change', () => {
+        const draft = ensureDraft(state);
+        const newName = nameInput.value.trim();
+        if (newName) {
+          draft[rowIdx][0] = newName;
+          markDirty(state);
+          renderEnvPanel();
+        }
+      });
+      valueInput.addEventListener('input', () => {
+        const draft = ensureDraft(state);
+        draft[rowIdx][1] = valueInput.value;
+        markDirty(state);
+        // Update header dirty indicator without full rerender (keeps focus)
+        const headerEl = body.parentElement && body.parentElement.querySelector('.env-card-header');
+        if (headerEl) {
+          body.parentElement.classList.add('dirty');
+          const saveBtn = headerEl.querySelector('.env-card-action.save');
+          if (saveBtn) saveBtn.disabled = false;
+        }
+      });
+      deleteBtn.addEventListener('click', () => {
+        const draft = ensureDraft(state);
+        draft.splice(rowIdx, 1);
+        markDirty(state);
+        renderEnvPanel();
+      });
+    }
+
+    body.appendChild(row);
+  });
+
+  if (isActive) {
+    const addBtn = document.createElement('button');
+    addBtn.className = 'env-card-add';
+    addBtn.textContent = '+ Add variable';
+    addBtn.addEventListener('click', () => {
+      const draft = ensureDraft(state);
+      draft.push(['', '']);
+      markDirty(state);
+      renderEnvPanel();
+      // focus the new name input
+      setTimeout(() => {
+        const inputs = envList.querySelectorAll('.env-card.active .var-row .var-name');
+        const last = inputs[inputs.length - 1];
+        if (last) { last.focus(); last.select(); }
+      }, 0);
+    });
+    body.appendChild(addBtn);
+  } else {
+    const hint = document.createElement('div');
+    hint.className = 'env-card-loading';
+    hint.style.cssText = 'text-align:center;cursor:pointer;color:var(--text-muted);';
+    hint.textContent = 'Click ○ to activate · these values are read-only preview';
+    hint.addEventListener('click', () => activateEnvIndex(index));
+    body.appendChild(hint);
+  }
+}
+
+function ensureDraft(state) {
+  if (!state.draftVars) {
+    state.draftVars = (state.vars || []).map(([k, v]) => [k, v]);
+  }
+  return state.draftVars;
+}
+
+function markDirty(state) {
+  state.dirty = true;
+}
+
+// --- Load .env file (header button) ---
+if (loadEnvBtn) {
+  loadEnvBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    await envPickerLoadFile();
   });
 }
 
-// --- Load .env file ---
-loadEnvBtn.addEventListener('click', (e) => {
-  e.stopPropagation();
-  envFileInput.click();
-});
 
-envFileInput.addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-
-  const content = await file.text();
-  try {
-    envVars = {};
-    content.split('\n').forEach(line => {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) return;
-      const eqIdx = trimmed.indexOf('=');
-      if (eqIdx > 0) {
-        const key = trimmed.substring(0, eqIdx).trim();
-        let value = trimmed.substring(eqIdx + 1).trim();
-        // Strip quotes
-        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-          value = value.slice(1, -1);
-        }
-        envVars[key] = value;
-      }
-    });
-    envFilePath = file.name;
-    renderEnvVars();
-    showToast(`Loaded ${Object.keys(envVars).length} variables from ${file.name}`, 'success');
-    rpLog('info', 'Env file loaded: ' + file.name, { varCount: Object.keys(envVars).length });
-  } catch (err) {
-    showToast(`Failed to load .env: ${err}`, 'error');
-    rpLog('error', 'Env file load failed', String(err));
-  }
-  envFileInput.value = '';
-});
-
-// --- Save .env file ---
-saveEnvBtn.addEventListener('click', async (e) => {
-  e.stopPropagation();
-
-  // Collect all variables: from .http files + env overrides + manually added
-  const allVars = {};
-  loadedFiles.forEach(file => {
-    if (file.suite.variables) {
-      file.suite.variables.forEach(([name, value]) => {
-        allVars[name] = envVars[name] !== undefined ? envVars[name] : value;
-      });
-    }
-  });
-  // Include any env-only vars (manually added or from .env file)
-  Object.entries(envVars).forEach(([name, value]) => {
-    allVars[name] = value;
-  });
-
-  // Generate .env content
-  let content = '# Request Pilot environment variables\n# Edit values below and save\n\n';
-  Object.entries(allVars).sort(([a], [b]) => a.localeCompare(b)).forEach(([key, value]) => {
-    if (value.includes(' ') || value.includes('#') || value.includes('=')) {
-      content += `${key}="${value}"\n`;
-    } else {
-      content += `${key}=${value}\n`;
-    }
-  });
-
-  // Save via native dialog
-  try {
-    const defaultName = (envFilePath && envFilePath.endsWith('.env'))
-      ? envFilePath.split(/[\\/]/).pop()
-      : '.env';
-    const path = await invoke('save_file_with_dialog', {
-      defaultName,
-      content,
-      title: 'Save Environment File',
-      filters: [['Env Files', 'env']],
-    });
-    if (!path) return; // cancelled
-    envFilePath = path;
-    showToast(`Saved to ${path.split(/[\\/]/).pop()}`, 'success');
-  } catch (err) {
-    showToast('Save failed: ' + err, 'error');
-  }
-});
-
-addEnvVarBtn.addEventListener('click', (e) => {
-  e.stopPropagation();
-  const name = `NEW_VAR_${Object.keys(envVars).length + 1}`;
-  envVars[name] = '';
-  renderEnvVars();
-  $('#envSection').classList.add('expanded');
-  // Focus the newly added name input
-  const inputs = envList.querySelectorAll('.var-name');
-  const lastInput = inputs[inputs.length - 1];
-  if (lastInput && lastInput.tagName === 'INPUT') {
-    lastInput.focus();
-    lastInput.select();
-  }
-});
-
-clearEnvBtn.addEventListener('click', (e) => {
-  e.stopPropagation();
-  if (Object.keys(envVars).length === 0) {
-    showToast('No variables to clear', 'info');
-    return;
-  }
-  envVars = {};
-  envFilePath = '';
-  renderEnvVars();
-  showToast('All variables cleared', 'success');
-});
 
 // --- Run Group ---
 async function runGroup(fileIdx, groupName) {
@@ -5304,11 +5312,11 @@ async function runGroup(fileIdx, groupName) {
     });
 
     if (results.final_variables) {
-      Object.entries(results.final_variables).forEach(([name, value]) => { envVars[name] = value; });
+      Object.entries(results.final_variables).forEach(([name, value]) => { runtimeOverrides[name] = value; });
     }
 
     updateBlockStatuses();
-    renderEnvVars();
+    renderEnvPanel();
 
     const blockResultsForDisplay = [];
     groupBlockIndices.forEach(origIdx => {
@@ -5398,12 +5406,12 @@ async function runSingleFile(fileIdx) {
     // Carry extracted variables forward
     if (results.final_variables) {
       Object.entries(results.final_variables).forEach(([name, value]) => {
-        envVars[name] = value;
+        runtimeOverrides[name] = value;
       });
     }
 
     updateBlockStatuses();
-    renderEnvVars();
+    renderEnvPanel();
 
     // Final reconciliation — rebuild results bar with full data
     const blockResultsForDisplay = [];
@@ -5449,14 +5457,7 @@ function promptForVariables(unresolved) {
 
   // Highlight the env section and scroll to it
   $('#envSection').classList.add('expanded');
-
-  // Add the missing variables to envVars with empty values so they show up red
-  unresolved.forEach(name => {
-    if (envVars[name] === undefined) {
-      envVars[name] = '';
-    }
-  });
-  renderEnvVars();
+  renderEnvPanel();
 }
 
 // --- Toast ---
@@ -5504,8 +5505,12 @@ function collectAllVarNames() {
       file.suite.variables.forEach(([name, value]) => vars.set(name, value));
     }
   });
-  // Env vars
-  Object.entries(envVars).forEach(([name, value]) => {
+  // Active .env vars
+  (activeEnvVars || []).forEach(([name, value]) => {
+    if (value !== '') vars.set(name, value);
+  });
+  // Runtime overrides (from @@extract)
+  Object.entries(runtimeOverrides).forEach(([name, value]) => {
     if (value !== '') vars.set(name, value);
   });
   // Built-ins
@@ -9081,11 +9086,8 @@ async function handleAzureAuthClick() {
   let fileClientId = null;
   
   const resolveVar = (name) => {
-    if (envVars[name] && !envVars[name].startsWith('your-')) return envVars[name];
-    for (const f of loadedFiles) {
-      const v = f.suite.variables.find(([k]) => k === name);
-      if (v?.[1] && !v[1].startsWith('your-')) return v[1];
-    }
+    const v = lookupVar(name);
+    if (v && !v.startsWith('your-')) return v;
     return null;
   };
   
@@ -9722,9 +9724,9 @@ function escHtml(s) {
 }
 
 // --- Initialize ---
-renderEnvVars();
+renderEnvPanel();
 initAzureAuth();
-setupEnvPickerUI();
+reloadEnvList();
 
 // Telemetry tooltip: stay open when hovering from button into tooltip
 {

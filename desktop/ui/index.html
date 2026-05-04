@@ -39,17 +39,6 @@
       </div>
     </div>
     <div class="toolbar-right">
-      <div class="env-picker-wrapper" id="envPickerWrapper">
-        <button class="btn-icon-sm env-picker-btn" id="envPickerBtn" title="Active .env file">
-          🌐 <span id="envPickerLabel">no env</span>
-        </button>
-        <div class="env-picker-panel hidden" id="envPickerPanel">
-          <div class="env-picker-title">Environments <span class="env-picker-subtitle">(only one active at a time)</span></div>
-          <div class="env-picker-list" id="envPickerList"></div>
-          <button class="btn btn-ghost btn-xs" id="envPickerLoadBtn">+ Load .env file</button>
-          <div class="env-picker-help">Name the file with <code># @@name staging</code> at the top (optional; falls back to filename).</div>
-        </div>
-      </div>
       <div class="extra-headers-wrapper">
         <button class="btn-icon-sm extra-headers-btn" id="extraHeadersBtn" title="Extra headers injected into all test requests">
           📋 <span class="extra-headers-count" id="extraHeadersCount"></span>
@@ -151,10 +140,7 @@
           <span class="section-chevron">▸</span>
           <span class="section-icon">🔐</span>
           <span class="section-title">ENVIRONMENT</span>
-          <button class="btn-icon-sm sidebar-action" id="addEnvVarBtn" title="Add variable">+</button>
-          <button class="btn-icon-sm sidebar-action" id="clearEnvBtn" title="Clear all variables">🗑</button>
           <button class="btn-icon-sm sidebar-action" id="loadEnvBtn" title="Load .env file">📂</button>
-          <button class="btn-icon-sm sidebar-action" id="saveEnvBtn" title="Save .env file">💾</button>
         </div>
         <div class="sidebar-section-body" id="envList">
           <div class="sidebar-empty">No .env file loaded</div>
@@ -576,7 +562,6 @@
 
   <!-- Hidden file input for .http files -->
   <input type="file" id="fileInput" accept=".http,.rest,.txt" multiple style="display:none">
-  <input type="file" id="envFileInput" style="display:none">
 
   <!-- Comparison overlay -->
   <div id="compareOverlay" class="compare-overlay hidden">

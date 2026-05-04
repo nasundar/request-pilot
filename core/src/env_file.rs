@@ -105,6 +105,45 @@ pub fn write_env_to_path(path: &str, vars: &HashMap<String, String>) -> Result<(
     Ok(())
 }
 
+/// Generate `.env` content from an ordered key-value list, preserving the
+/// caller-supplied order (no alphabetical sort). When `name` is supplied,
+/// emits a leading `# @@name <name>` directive comment so reloading the
+/// file restores the user-given display name.
+pub fn generate_env_ordered(name: Option<&str>, vars: &[(String, String)]) -> String {
+    let mut output = String::new();
+    if let Some(n) = name {
+        let trimmed = n.trim();
+        if !trimmed.is_empty() {
+            output.push_str(&format!("# @@name {}\n", trimmed));
+        }
+    }
+    output.push_str("# Request Pilot environment variables\n");
+    output.push_str("# Edit values below and save\n\n");
+    for (key, value) in vars {
+        if key.is_empty() {
+            continue;
+        }
+        if value.contains(' ') || value.contains('#') || value.contains('=') {
+            output.push_str(&format!("{}=\"{}\"\n", key, value));
+        } else {
+            output.push_str(&format!("{}={}\n", key, value));
+        }
+    }
+    output
+}
+
+/// Write an ordered `.env` to disk, optionally embedding `# @@name` so the
+/// file's display name survives a round-trip.
+pub fn write_env_ordered_to_path(
+    path: &str,
+    name: Option<&str>,
+    vars: &[(String, String)],
+) -> Result<(), String> {
+    let content = generate_env_ordered(name, vars);
+    std::fs::write(path, content).map_err(|e| format!("Failed to write {}: {}", path, e))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +292,81 @@ mod tests {
         let plain_map = parse_env(content);
         assert_eq!(plain_map.len(), 1);
         assert_eq!(plain_map.get("FOO").unwrap(), "bar");
+    }
+
+    #[test]
+    fn ordered_writer_preserves_order() {
+        let vars = vec![
+            ("ZEBRA".to_string(), "z".to_string()),
+            ("ALPHA".to_string(), "a".to_string()),
+            ("MIDDLE".to_string(), "m".to_string()),
+        ];
+        let out = generate_env_ordered(None, &vars);
+        let kv_lines: Vec<&str> = out
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .collect();
+        assert_eq!(kv_lines, vec!["ZEBRA=z", "ALPHA=a", "MIDDLE=m"]);
+    }
+
+    #[test]
+    fn ordered_writer_embeds_name_directive() {
+        let vars = vec![("K".to_string(), "v".to_string())];
+        let out = generate_env_ordered(Some("staging"), &vars);
+        assert!(out.starts_with("# @@name staging\n"));
+        let (parsed_name, _) = parse_env_named(&out);
+        assert_eq!(parsed_name.as_deref(), Some("staging"));
+    }
+
+    #[test]
+    fn ordered_writer_skips_empty_name() {
+        let vars = vec![("K".to_string(), "v".to_string())];
+        let out = generate_env_ordered(Some("   "), &vars);
+        assert!(!out.contains("@@name"));
+    }
+
+    #[test]
+    fn ordered_writer_quotes_special_values() {
+        let vars = vec![
+            ("URL".to_string(), "https://x?a=1&b=2".to_string()),
+            ("MSG".to_string(), "hello world".to_string()),
+            ("HASH".to_string(), "a#b".to_string()),
+            ("PLAIN".to_string(), "simple".to_string()),
+        ];
+        let out = generate_env_ordered(None, &vars);
+        assert!(out.contains("URL=\"https://x?a=1&b=2\""));
+        assert!(out.contains("MSG=\"hello world\""));
+        assert!(out.contains("HASH=\"a#b\""));
+        assert!(out.contains("PLAIN=simple"));
+    }
+
+    #[test]
+    fn ordered_writer_skips_empty_keys() {
+        let vars = vec![
+            ("".to_string(), "ignored".to_string()),
+            ("K".to_string(), "v".to_string()),
+        ];
+        let out = generate_env_ordered(None, &vars);
+        let kv: Vec<&str> = out
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .collect();
+        assert_eq!(kv, vec!["K=v"]);
+    }
+
+    #[test]
+    fn ordered_round_trip_preserves_name_and_values() {
+        let vars = vec![
+            ("BASE_URL".to_string(), "https://api.dev".to_string()),
+            ("TOKEN".to_string(), "abc def".to_string()),
+        ];
+        let path = std::env::temp_dir().join("rp-env-ordered-roundtrip.env");
+        write_env_ordered_to_path(path.to_str().unwrap(), Some("dev"), &vars).unwrap();
+        let (name, parsed) =
+            read_env_named_from_path(path.to_str().unwrap()).unwrap();
+        assert_eq!(name.as_deref(), Some("dev"));
+        assert_eq!(parsed.get("BASE_URL").unwrap(), "https://api.dev");
+        assert_eq!(parsed.get("TOKEN").unwrap(), "abc def");
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -346,6 +346,39 @@ fn env_resolve_active() -> Result<Vec<(String, String)>, String> {
     resolve_active_vars(&cfg)
 }
 
+/// Read and parse the `.env` file for `entries[index]` without changing the
+/// active state. Used by the desktop UI to populate the body of any expanded
+/// env card (active or not).
+#[tauri::command]
+fn env_resolve_entry(index: usize) -> Result<Vec<(String, String)>, String> {
+    let cfg = env_config::load()?;
+    let entry = cfg
+        .entries
+        .get(index)
+        .ok_or_else(|| format!("env entry index {} out of range", index))?;
+    let (_name, map) = env_file::read_env_named_from_path(&entry.path)?;
+    let mut v: Vec<(String, String)> = map.into_iter().collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(v)
+}
+
+/// Persist the supplied `vars` to `entries[index].path`, embedding the
+/// entry's display name as `# @@name <name>` so it round-trips on reload.
+/// Returns the (unchanged) config plus the resolved vars for whatever is
+/// currently active.
+#[tauri::command]
+fn env_save(index: usize, vars: Vec<(String, String)>) -> Result<EnvListResult, String> {
+    let cfg = env_config::load()?;
+    let entry = cfg
+        .entries
+        .get(index)
+        .ok_or_else(|| format!("env entry index {} out of range", index))?
+        .clone();
+    env_file::write_env_ordered_to_path(&entry.path, Some(&entry.name), &vars)?;
+    let active_vars = resolve_active_vars(&cfg)?;
+    Ok(EnvListResult { config: cfg, active_vars })
+}
+
 #[derive(serde::Serialize)]
 struct EnvListResult {
     config: env_config::EnvConfig,
@@ -638,6 +671,8 @@ pub fn run() {
             env_remove,
             env_set_active,
             env_resolve_active,
+            env_resolve_entry,
+            env_save,
             fetch_azure_token,
             check_azure_cli,
             start_device_code,
