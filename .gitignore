@@ -33,3 +33,4 @@ coverage/
 
 # Tauri debug
 WixTools/
+.commit-msg.tmp
