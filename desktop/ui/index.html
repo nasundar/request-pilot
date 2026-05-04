@@ -140,7 +140,8 @@
           <span class="section-chevron">▸</span>
           <span class="section-icon">🔐</span>
           <span class="section-title">ENVIRONMENT</span>
-          <button class="btn-icon-sm sidebar-action" id="loadEnvBtn" title="Load .env file">📂</button>
+          <button class="btn-icon-sm sidebar-action" id="newEnvBtn" title="Create new .env file">➕</button>
+          <button class="btn-icon-sm sidebar-action" id="loadEnvBtn" title="Load existing .env file">📂</button>
         </div>
         <div class="sidebar-section-body" id="envList">
           <div class="sidebar-empty">No .env file loaded</div>
@@ -562,7 +563,6 @@
 
   <!-- Hidden file input for .http files -->
   <input type="file" id="fileInput" accept=".http,.rest,.txt" multiple style="display:none">
-  <input type="file" id="envFileInputHidden" accept=".env,.txt,*" style="display:none">
 
   <!-- Comparison overlay -->
   <div id="compareOverlay" class="compare-overlay hidden">

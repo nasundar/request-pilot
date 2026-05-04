@@ -21,7 +21,19 @@ impl test_runner::ProgressHandler for TauriProgress {
     fn on_block_complete(&self, progress: &test_runner::BlockProgress) {
         let _ = self.0.emit("block-progress", progress);
     }
+    fn on_block_result(&self, result: &test_runner::BlockResult) {
+        // Carry the full result (response body, assertion details, extracts)
+        // so the UI can populate file.results.block_results live as each
+        // block finishes — enabling click-to-inspect during in-flight runs.
+        let _ = self.0.emit("block-result", result);
+    }
 }
+
+/// Shared cancel token for the currently running test suite. Set by
+/// `request_run_abort` from the UI; polled by `run_suite_with_cancel` between
+/// blocks. Reset at the start of each new run.
+#[derive(Default)]
+struct CurrentRunCancel(std::sync::Mutex<Option<test_runner::CancelToken>>);
 
 /// Execute a single HTTP request and record it in history.
 #[tauri::command]
@@ -97,18 +109,33 @@ async fn run_test_suite(
     run_mode: Option<String>,
     file_name: Option<String>,
     store: State<'_, Mutex<HistoryStore>>,
+    cancel_state: State<'_, CurrentRunCancel>,
     app: tauri::AppHandle,
 ) -> Result<test_runner::TestRunResults, String> {
     let run_id = request_pilot_core::uuid::Uuid::new_v4().to_string();
     let progress = Arc::new(TauriProgress(app.clone()));
     let headers = extra_headers.unwrap_or_default();
-    let mut results = test_runner::run_suite_with_headers(
+
+    // Install a fresh cancel token for this run. Stop button will toggle it.
+    let cancel = test_runner::CancelToken::new();
+    if let Ok(mut guard) = cancel_state.0.lock() {
+        *guard = Some(cancel.clone());
+    }
+
+    let mut results = test_runner::run_suite_with_cancel(
         &suite,
         &extra_variables,
         &headers,
         Some(progress),
         run_mode.as_deref(),
-    ).await;
+        Some(cancel.clone()),
+    )
+    .await;
+
+    // Clear the cancel token now that this run is done.
+    if let Ok(mut guard) = cancel_state.0.lock() {
+        *guard = None;
+    }
 
     // Add each executed request to history with seq numbers
     let mut s = store.lock().map_err(|e| e.to_string())?;
@@ -481,6 +508,44 @@ fn pick_file_with_dialog(
     Ok(dialog.pick_file().map(|p| p.to_string_lossy().to_string()))
 }
 
+/// Signal the currently running test suite to abort. Setup/test blocks remaining
+/// after the current in-flight one will be skipped with reason "Cancelled by
+/// user"; teardown still runs to ensure cleanup.
+#[tauri::command]
+fn request_run_abort(cancel_state: State<'_, CurrentRunCancel>) -> Result<bool, String> {
+    let guard = cancel_state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(token) = guard.as_ref() {
+        token.cancel();
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Create a new empty `.env` file at the given path with an optional
+/// `# @@name <display>` directive header. Used by the "+ New env file" UI
+/// flow. Returns the canonical path written.
+#[tauri::command]
+fn env_create_file(path: String, display_name: Option<String>) -> Result<String, String> {
+    use std::io::Write;
+    let p = std::path::Path::new(&path);
+    if !p.is_absolute() {
+        return Err("env_create_file requires an absolute path".into());
+    }
+    if p.exists() {
+        return Err(format!("File already exists: {}", path));
+    }
+    let mut content = String::new();
+    if let Some(name) = display_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        content.push_str(&format!("# @@name {}\n", name));
+    }
+    content.push_str("# Add KEY=VALUE pairs below.\n");
+    let mut f = std::fs::File::create(p).map_err(|e| format!("Failed to create {}: {}", path, e))?;
+    f.write_all(content.as_bytes())
+        .map_err(|e| format!("Failed to write {}: {}", path, e))?;
+    Ok(path)
+}
+
 /// Write content to a known file path (for files already saved once).
 /// Only allows writing to .http files to limit surface area.
 #[tauri::command]
@@ -687,6 +752,7 @@ pub fn run() {
         .manage(Mutex::new(HistoryStore::new()))
         .manage(Arc::new(live_capture::LiveCaptureState::new()))
         .manage(Mutex::new(sessions_state))
+        .manage(CurrentRunCancel::default())
         .invoke_handler(tauri::generate_handler![
             send_request,
             parse_http_file,
@@ -695,6 +761,7 @@ pub fn run() {
             parse_duration,
             generate_http,
             run_test_suite,
+            request_run_abort,
             resolve_variables,
             get_history,
             get_history_summary,
@@ -713,6 +780,7 @@ pub fn run() {
             env_resolve_active,
             env_resolve_entry,
             env_save,
+            env_create_file,
             fetch_azure_token,
             check_azure_cli,
             start_device_code,

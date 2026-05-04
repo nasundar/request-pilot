@@ -348,6 +348,19 @@ html, body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.env-card-order {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+  margin-right: 2px;
+  font-family: var(--font-mono, monospace);
+  cursor: help;
+}
+.env-card.active .env-card-order {
+  color: var(--accent, #3b82f6);
+}
 .env-card-path {
   flex: 1;
   font-size: 10px;

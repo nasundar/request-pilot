@@ -1,7 +1,37 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::task::JoinSet;
+
+/// Shared cancellation flag passed into `run_suite_with_cancel`. The runner
+/// polls this between blocks and at phase boundaries; setting it stops new
+/// work from starting. Teardown still runs so cleanup happens even after a
+/// user-initiated stop.
+#[derive(Clone, Default, Debug)]
+pub struct CancelToken {
+    flag: Arc<AtomicBool>,
+}
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+
+    pub fn cancel(&self) {
+        self.flag.store(true, Ordering::Relaxed);
+    }
+
+    /// Reset to the not-cancelled state. Allows reusing a single token across
+    /// runs.
+    pub fn reset(&self) {
+        self.flag.store(false, Ordering::Relaxed);
+    }
+}
 
 use crate::assertions::{self, AssertionResult};
 use crate::http_client;
@@ -65,6 +95,11 @@ pub struct BlockProgress {
 pub trait ProgressHandler: Send + Sync {
     fn on_block_start(&self, progress: &BlockProgress);
     fn on_block_complete(&self, progress: &BlockProgress);
+    /// Emitted right after each block's `BlockResult` is finalized, carrying
+    /// the full result (including response body, assertion details, etc).
+    /// Default impl is a no-op so consumers that only care about lightweight
+    /// progress (TUI, CLI) don't need to implement it.
+    fn on_block_result(&self, _result: &BlockResult) {}
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -180,9 +215,30 @@ fn emit_completed(handler: &Option<Arc<dyn ProgressHandler>>, result: &BlockResu
             result.error.as_deref(),
         );
         h.on_block_complete(&progress);
+        h.on_block_result(result);
     }
 }
 
+fn emit_skipped_result(handler: &Option<Arc<dyn ProgressHandler>>, result: &BlockResult) {
+    if let Some(ref h) = handler {
+        let progress = make_progress(
+            &result.name,
+            &result.block_type,
+            &result.status,
+            result.time_ms,
+            0,
+            0,
+            0,
+            0,
+            None,
+            result.error.as_deref(),
+        );
+        h.on_block_complete(&progress);
+        h.on_block_result(result);
+    }
+}
+
+#[allow(dead_code)]
 fn emit_skipped(
     handler: &Option<Arc<dyn ProgressHandler>>,
     name: &str,
@@ -193,6 +249,18 @@ fn emit_skipped(
         let progress = make_progress(name, block_type, "skipped", 0, 0, 0, 0, 0, None, Some(reason));
         h.on_block_complete(&progress);
     }
+}
+
+/// Emit a skipped block to the handler, including a synthesized BlockResult
+/// so live consumers (desktop UI) can display the skip reason immediately.
+fn emit_skipped_with_result(
+    handler: &Option<Arc<dyn ProgressHandler>>,
+    block: &TestBlock,
+    reason: &str,
+) -> BlockResult {
+    let result = make_skipped_result(block, reason);
+    emit_skipped_result(handler, &result);
+    result
 }
 
 fn make_skipped_result(block: &TestBlock, reason: &str) -> BlockResult {
@@ -642,6 +710,7 @@ async fn run_tests_with_groups(
     var_store: &mut VariableStore,
     handler: &Option<Arc<dyn ProgressHandler>>,
     extra_headers: &[(String, String)],
+    cancel: Option<&CancelToken>,
 ) -> Vec<BlockResult> {
     // Assign each block to a group (blocks without @group get unique pseudo-groups)
     let mut group_blocks: HashMap<String, Vec<(usize, TestBlock)>> = HashMap::new();
@@ -677,6 +746,25 @@ async fn run_tests_with_groups(
 
     // Execute in topological waves
     loop {
+        // ── Cancellation check at wave boundary ──
+        if cancel.is_some_and(|c| c.is_cancelled()) {
+            // Skip every remaining block in remaining groups (graph order
+            // unspecified; all get the same reason).
+            let remaining_groups: Vec<String> = all_group_names
+                .difference(&completed_groups)
+                .cloned()
+                .collect();
+            for group_name in &remaining_groups {
+                if let Some(blocks) = group_blocks.remove(group_name) {
+                    for (idx, block) in blocks {
+                        let result = emit_skipped_with_result(handler, &block, "Cancelled by user");
+                        all_results.push((idx, result));
+                    }
+                }
+            }
+            break;
+        }
+
         // Find groups that are ready: not completed AND all deps satisfied
         let ready: Vec<String> = all_group_names
             .iter()
@@ -698,16 +786,12 @@ async fn run_tests_with_groups(
             for group_name in &remaining {
                 if let Some(blocks) = group_blocks.remove(group_name) {
                     for (idx, block) in blocks {
-                        emit_skipped(
+                        let result = emit_skipped_with_result(
                             handler,
-                            &block.name,
-                            &block.block_type,
+                            &block,
                             "Skipped due to circular dependency",
                         );
-                        all_results.push((
-                            idx,
-                            make_skipped_result(&block, "Skipped due to circular dependency"),
-                        ));
+                        all_results.push((idx, result));
                     }
                 }
             }
@@ -721,6 +805,15 @@ async fn run_tests_with_groups(
         for group_name in &ready {
             if let Some(blocks) = group_blocks.remove(group_name) {
                 for (idx, block) in blocks {
+                    // Per-block cancel check at spawn time — if cancelled,
+                    // synthesize a skipped result instead of dispatching the
+                    // request.
+                    if cancel.is_some_and(|c| c.is_cancelled()) {
+                        let result =
+                            emit_skipped_with_result(handler, &block, "Cancelled by user");
+                        all_results.push((idx, result));
+                        continue;
+                    }
                     let vs = var_snapshot.clone();
                     let h = handler.clone();
                     let eh = extra_headers.to_vec();
@@ -776,7 +869,7 @@ pub async fn run_suite(
     progress: Option<Arc<dyn ProgressHandler>>,
     run_mode: Option<&str>,
 ) -> TestRunResults {
-    run_suite_inner(suite, extra_variables, &[], progress, run_mode).await
+    run_suite_inner(suite, extra_variables, &[], progress, run_mode, None).await
 }
 
 /// Run a test suite with additional headers injected into every request.
@@ -787,7 +880,21 @@ pub async fn run_suite_with_headers(
     progress: Option<Arc<dyn ProgressHandler>>,
     run_mode: Option<&str>,
 ) -> TestRunResults {
-    run_suite_inner(suite, extra_variables, extra_headers, progress, run_mode).await
+    run_suite_inner(suite, extra_variables, extra_headers, progress, run_mode, None).await
+}
+
+/// Run a test suite with optional cancellation. When the token is cancelled,
+/// remaining setup/test blocks are skipped (with reason "Cancelled by user");
+/// teardown still runs to ensure cleanup.
+pub async fn run_suite_with_cancel(
+    suite: &TestSuite,
+    extra_variables: &[(String, String)],
+    extra_headers: &[(String, String)],
+    progress: Option<Arc<dyn ProgressHandler>>,
+    run_mode: Option<&str>,
+    cancel: Option<CancelToken>,
+) -> TestRunResults {
+    run_suite_inner(suite, extra_variables, extra_headers, progress, run_mode, cancel).await
 }
 
 /// Inner implementation — emits block-progress events when handler is available.
@@ -797,6 +904,7 @@ async fn run_suite_inner(
     extra_headers: &[(String, String)],
     handler: Option<Arc<dyn ProgressHandler>>,
     run_mode: Option<&str>,
+    cancel: Option<CancelToken>,
 ) -> TestRunResults {
     // Resolve file-level `# @@request-id` into each block's effective header
     // (blocks without their own override inherit the file-level default;
@@ -853,10 +961,18 @@ async fn run_suite_inner(
 
     let mut block_results: Vec<BlockResult> = Vec::new();
     let mut setup_failed = false;
+    let mut cancelled = false;
     let total_start = std::time::Instant::now();
 
     // ── Phase 1: Setup — sequential ──
     for block in &setups {
+        if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+            cancelled = true;
+            let skip_result = emit_skipped_with_result(&handler, block, "Cancelled by user");
+            record_block_telemetry(&mut telemetry, &skip_result, block.group.as_deref());
+            block_results.push(skip_result);
+            continue;
+        }
         emit_start(&handler, &block.name, &block.block_type);
         let result = if block.compare && !block.steps.is_empty() {
             execute_compare_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
@@ -899,8 +1015,16 @@ async fn run_suite_inner(
     }
 
     // ── Phase 2: Tests — parallel with dependency graph ──
-    if !setup_failed {
-        let test_results = run_tests_with_groups(&tests, &mut var_store, &handler, extra_headers).await;
+    if cancelled || cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+        for block in &tests {
+            let skip_result = emit_skipped_with_result(&handler, block, "Cancelled by user");
+            record_block_telemetry(&mut telemetry, &skip_result, block.group.as_deref());
+            block_results.push(skip_result);
+        }
+    } else if !setup_failed {
+        let test_results =
+            run_tests_with_groups(&tests, &mut var_store, &handler, extra_headers, cancel.as_ref())
+                .await;
         for (result, block) in test_results.iter().zip(tests.iter()) {
             record_block_telemetry(&mut telemetry, result, block.group.as_deref());
         }
@@ -908,19 +1032,14 @@ async fn run_suite_inner(
     } else {
         // Skip all tests
         for block in &tests {
-            emit_skipped(
-                &handler,
-                &block.name,
-                &block.block_type,
-                "Skipped due to setup failure",
-            );
-            let skip_result = make_skipped_result(block, "Skipped due to setup failure");
+            let skip_result =
+                emit_skipped_with_result(&handler, block, "Skipped due to setup failure");
             record_block_telemetry(&mut telemetry, &skip_result, block.group.as_deref());
             block_results.push(skip_result);
         }
     }
 
-    // ── Phase 3: Teardown — sequential (always runs) ──
+    // ── Phase 3: Teardown — sequential (always runs, even on cancel) ──
     for block in &teardowns {
         emit_start(&handler, &block.name, &block.block_type);
         let result = if block.compare && !block.steps.is_empty() {
@@ -1390,7 +1509,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], &[], None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None, None).await;
         assert_eq!(results.block_results.len(), 3);
         for r in &results.block_results {
             assert_ne!(r.status, "skipped");
@@ -1414,7 +1533,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], &[], None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None, None).await;
         assert_eq!(results.block_results.len(), 2);
         for r in &results.block_results {
             assert_ne!(r.status, "skipped");
@@ -1433,7 +1552,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], &[], None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None, None).await;
         assert_eq!(results.block_results.len(), 3);
     }
 
@@ -1449,7 +1568,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], &[], None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None, None).await;
         // Setup fails (unreachable addr) → tests skipped, but teardown always runs
         assert_eq!(results.block_results.len(), 4);
     }
@@ -1477,7 +1596,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], &[], None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None, None).await;
         assert_eq!(results.block_results.len(), 2);
         for r in &results.block_results {
             assert_eq!(r.status, "skipped");
@@ -1495,7 +1614,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], &[], None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None, None).await;
         assert_eq!(results.block_results.len(), 3);
         // Setup errors (connection refused)
         assert_eq!(results.block_results[0].status, "error");
@@ -1516,7 +1635,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], &[], None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None, None).await;
         assert_eq!(results.block_results[0].name, "First");
         assert_eq!(results.block_results[1].name, "Second");
         assert_eq!(results.block_results[2].name, "Third");

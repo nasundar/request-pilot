@@ -1195,45 +1195,6 @@ async function ensureCardVarsLoaded(index) {
   }
 }
 
-async function envPickerLoadFile() {
-  // Use the lightweight HTML <input type="file"> picker (same as the .http
-  // file open flow). On Tauri WebView2 the File object exposes `.path`,
-  // which we forward to the Rust `env_add` command for persistence.
-  const input = document.getElementById('envFileInputHidden');
-  if (!input) return;
-  // Reset value so picking the same file twice still fires `change`.
-  input.value = '';
-  input.click();
-}
-
-async function _handleEnvFilePicked(file) {
-  if (!file) return;
-  const path = file.path || file.name; // Tauri exposes absolute path; bare name is a fallback.
-  if (!path) {
-    showToast('Could not determine file path', 'error');
-    return;
-  }
-  try {
-    const res = await invoke('env_add', { path });
-    envConfig = normalizeEnvConfig(res.config);
-    activeEnvVars = res.active_vars || [];
-    syncEnvCardState(true);
-    const addedIdx = envConfig.entries.length - 1;
-    if (addedIdx >= 0) {
-      if (!envCardState[addedIdx]) envCardState[addedIdx] = defaultCardState();
-      envCardState[addedIdx].vars = (res.loaded_vars || []).map(([k, v]) => [k, v]);
-      envCardState[addedIdx].expanded = true;
-    }
-    seedActiveCardVars();
-    renderEnvPanel();
-    const added = envConfig.entries[addedIdx];
-    if (added) showToast(`Loaded env: ${added.name}`, 'success');
-  } catch (err) {
-    rpLog('error', 'env_add failed', { error: String(err) });
-    showToast('Failed to load .env: ' + String(err), 'error');
-  }
-}
-
 async function activateEnvIndex(index) {
   try {
     const res = await invoke('env_set_active', { index });
@@ -2480,6 +2441,33 @@ if (blockTooltip) {
     blockTooltip.classList.add('hidden');
     blockTooltip.style.display = '';
   });
+}
+
+/**
+ * Attach hover-to-preview tooltip handlers to a `.var-row` element. The
+ * `getVar` callback is invoked on each hover and should return [name, value]
+ * — this lets the tooltip read the *current* input values for active rows
+ * (which the user may be editing) rather than a stale closure capture.
+ */
+function attachVarRowTooltip(row, getVar) {
+  if (!row || !blockTooltip) return;
+  row.addEventListener('mouseenter', () => {
+    const [name, value] = getVar() || [];
+    if (!value) return;
+    clearTimeout(showTooltipTimer);
+    clearTimeout(hideTooltipTimer);
+    showTooltipTimer = setTimeout(() => {
+      try {
+        blockTooltip.innerHTML = buildVarTooltipHtml(name || '', String(value));
+        blockTooltip.classList.remove('hidden');
+        blockTooltip.style.display = 'block';
+        positionBlockTooltip(row);
+      } catch (e) {
+        console.error('[Tooltip] var hover error:', e);
+      }
+    }, 300);
+  });
+  row.addEventListener('mouseleave', () => hideBlockTooltip());
 }
 
 function extractFileHeader(content) {
@@ -4179,9 +4167,16 @@ function renderAssertions(fileIdx, blockIdx) {
 
 // --- Run All Tests ---
 async function runAllTests() {
-  // If already running, abort
+  // If already running, signal Rust to abort so the in-flight file stops
+  // ASAP (skips remaining setup/test blocks; teardown still runs to clean up).
   if (isRunning) {
     if (abortRunController) abortRunController.abort();
+    try {
+      await invoke('request_run_abort');
+    } catch (err) {
+      rpLog('warn', 'request_run_abort failed', { error: String(err) });
+    }
+    showToast('Stopping… (current block will finish, then cleanup runs)', 'info');
     return;
   }
 
@@ -4280,6 +4275,7 @@ async function runAllTests() {
 
   // Start listening for per-block progress events from Rust
   await startBlockProgressListener();
+  await startBlockResultListener();
 
   try {
     for (let fi = 0; fi < loadedFiles.length; fi++) {
@@ -4291,6 +4287,9 @@ async function runAllTests() {
       const file = loadedFiles[fi];
       const suite = getEnabledSuite(fi);
       if (!suite || suite.blocks.length === 0) continue;
+      // Initialize live-streaming results for this file so per-block updates
+      // populate file.results.block_results as each block completes.
+      prepareLiveResults(fi);
       try {
         const fileExtraVars = [...collectVariablesArray(), ...azureExtraVars];
         // Prompt user for @prompt variables, if any
@@ -4317,7 +4316,9 @@ async function runAllTests() {
         });
         recordSessionRun(file, suiteCopy, file.content, results, fileExtraVars, runMode, __sessions_started).catch(()=>{});
 
-        // Remap results to align with original block indices
+        // Remap results to align with original block indices (this also
+        // overwrites the live-streamed block_results with the canonical final
+        // copy from Rust — same data, just guaranteed-complete).
         file.results = remapResults(fi, results);
         invalidateDiffCacheForFile(fi);
         pushRunHistory(file.name, results);
@@ -4976,6 +4977,73 @@ function stopBlockProgressListener() {
     blockProgressUnlisten();
     blockProgressUnlisten = null;
   }
+  if (blockResultUnlisten) {
+    blockResultUnlisten();
+    blockResultUnlisten = null;
+  }
+  liveResultPendingByFile.clear();
+}
+
+// --- Block Result Streaming ---
+// `block-result` carries the FULL BlockResult (response, assertions, extracts)
+// per block as it completes. We stitch results into `file.results.block_results`
+// live so the sidebar status dots, group rollups, and click-to-inspect work
+// during an in-flight run — instead of waiting for the whole file to finish.
+let blockResultUnlisten = null;
+
+// Maps fileIdx → array of *unmatched* original block indices for the current
+// run. Each block-result event consumes the first matching name, ensuring
+// correct order even with duplicate block names. Set up by `prepareLiveResults`.
+const liveResultPendingByFile = new Map();
+
+/**
+ * Register a file as participating in the live streaming results. Initializes
+ * the file's results skeleton and pushes its enabled-block original indices
+ * into `liveResultPendingByFile`. Call before invoking `run_test_suite`.
+ */
+function prepareLiveResults(fileIdx) {
+  const file = loadedFiles[fileIdx];
+  if (!file) return;
+  const enabledMap = getEnabledIndexMap(fileIdx);
+  // Reset the file's results to an empty skeleton so getBlockStatus() returns
+  // '' for unfinished blocks (rather than the stale prior-run status).
+  file.results = {
+    passed: 0,
+    failed: 0,
+    skipped: 0,
+    total_time_ms: 0,
+    block_results: new Array(file.suite.blocks.length).fill(null),
+    final_variables: {},
+  };
+  liveResultPendingByFile.set(fileIdx, [...enabledMap]);
+  invalidateDiffCacheForFile(fileIdx);
+}
+
+async function startBlockResultListener() {
+  blockResultUnlisten = await listen('block-result', (event) => {
+    const br = event.payload;
+    if (!br || !br.name) return;
+    // Find which file this block belongs to. Match by name within the
+    // unmatched-set for each running file (first match wins, then consume).
+    for (const [fIdx, indices] of liveResultPendingByFile.entries()) {
+      const f = loadedFiles[fIdx];
+      if (!f || !f.suite) continue;
+      const matchPos = indices.findIndex(i => f.suite.blocks[i] && f.suite.blocks[i].name === br.name);
+      if (matchPos >= 0) {
+        const origIdx = indices[matchPos];
+        f.results.block_results[origIdx] = br;
+        indices.splice(matchPos, 1);
+        // Repaint sidebar status dots + group rollups
+        updateBlockStatuses();
+        // If user is currently viewing this exact block, refresh the response
+        // panel so they see the just-arrived data without a manual click.
+        if (activeFileIndex === fIdx && activeBlockIndex === origIdx) {
+          selectBlock(fIdx, origIdx);
+        }
+        break;
+      }
+    }
+  });
 }
 
 // Toggle test results details
@@ -5049,6 +5117,10 @@ function renderEnvPanel() {
     const radio = document.createElement('span');
     radio.className = 'env-card-radio';
     radio.title = isActive ? 'Active env (click to deactivate)' : 'Click to activate this env';
+    const order = document.createElement('span');
+    order.className = 'env-card-order';
+    order.textContent = `${i + 1}.`;
+    order.title = 'Load order — variables defined later override earlier ones when this env is active.';
     const name = document.createElement('span');
     name.className = 'env-card-name';
     name.textContent = entry.name || 'env';
@@ -5071,6 +5143,7 @@ function renderEnvPanel() {
 
     header.appendChild(chevron);
     header.appendChild(radio);
+    header.appendChild(order);
     header.appendChild(name);
     header.appendChild(path);
     header.appendChild(dirty);
@@ -5201,6 +5274,7 @@ function buildHttpFileVarCard(file) {
           <input class="var-value" value="${escapeAttr(varValue || '')}" disabled placeholder="${isPlaceholder ? 'placeholder — override in .env' : 'unset'}">
           <button class="var-delete" disabled style="visibility:hidden;">✕</button>
         `;
+        attachVarRowTooltip(row, () => [varName, varValue || '']);
         body.appendChild(row);
       });
     }
@@ -5255,6 +5329,13 @@ function renderEnvCardBody(body, index, entry, isActive, state) {
       <input class="var-value" value="${escapeAttr(varValue || '')}" spellcheck="false" placeholder="value" ${isActive ? '' : 'disabled'}>
       <button class="var-delete" title="Delete variable" ${isActive ? '' : 'disabled'}>✕</button>
     `;
+
+    // Hover tooltip — shows decoded JWT, base64, etc. for the value.
+    attachVarRowTooltip(row, () => {
+      const currentName = row.querySelector('.var-name')?.value || varName;
+      const currentVal = row.querySelector('.var-value')?.value || varValue || '';
+      return [currentName, currentVal];
+    });
 
     if (isActive) {
       const nameInput = row.querySelector('.var-name');
@@ -5330,6 +5411,92 @@ function markDirty(state) {
   state.dirty = true;
 }
 
+async function envPickerLoadFile() {
+  // Use the native rfd file dialog (via Rust). The HTML <input type="file">
+  // approach doesn't work here because Tauri 2's WebView2 does not reliably
+  // populate `File.path` — and we need the absolute path for env_add to read
+  // the file's contents and persist its location across sessions.
+  let path;
+  try {
+    path = await invoke('pick_file_with_dialog', {
+      title: 'Load .env file',
+      filters: [['Env Files', 'env'], ['All Files', '*']],
+    });
+  } catch (err) {
+    rpLog('error', 'pick_file_with_dialog failed', { error: String(err) });
+    showToast('Failed to open file picker: ' + String(err), 'error');
+    return;
+  }
+  if (!path) return;
+  await _handleEnvFilePicked({ path });
+}
+
+async function _handleEnvFilePicked(file) {
+  if (!file) return;
+  const path = file.path || file.name;
+  if (!path) {
+    showToast('Could not determine file path', 'error');
+    return;
+  }
+  try {
+    const res = await invoke('env_add', { path });
+    envConfig = normalizeEnvConfig(res.config);
+    activeEnvVars = res.active_vars || [];
+    syncEnvCardState(true);
+    const addedIdx = envConfig.entries.length - 1;
+    if (addedIdx >= 0) {
+      if (!envCardState[addedIdx]) envCardState[addedIdx] = defaultCardState();
+      envCardState[addedIdx].vars = (res.loaded_vars || []).map(([k, v]) => [k, v]);
+      envCardState[addedIdx].expanded = true;
+    }
+    seedActiveCardVars();
+    renderEnvPanel();
+    const added = envConfig.entries[addedIdx];
+    if (added) showToast(`Loaded env: ${added.name}`, 'success');
+  } catch (err) {
+    rpLog('error', 'env_add failed', { error: String(err) });
+    showToast('Failed to load .env: ' + String(err), 'error');
+  }
+}
+
+/**
+ * Author a new .env file via the system save-file dialog.
+ * Workflow: prompt for a friendly display name → save dialog → write empty
+ * file with `# @@name <display>` directive header → env_add → activate.
+ */
+async function envCreateNewFile() {
+  const displayName = prompt('Display name for this env (e.g. "dev", "staging", "prod"):', '');
+  if (displayName === null) return;
+  const name = (displayName || '').trim();
+  // Suggest a filename based on the display name; default to `.env` if empty.
+  const suggested = name ? `${name.toLowerCase().replace(/[^a-z0-9._-]+/g, '-')}.env` : '.env';
+  let path;
+  try {
+    path = await invoke('save_file_with_dialog', {
+      title: 'Create new .env file',
+      defaultName: suggested,
+      content: '',
+      filters: [['Env Files', 'env'], ['All Files', '*']],
+    });
+  } catch (err) {
+    rpLog('error', 'save_file_with_dialog failed', { error: String(err) });
+    showToast('Failed to open save dialog: ' + String(err), 'error');
+    return;
+  }
+  if (!path) return;
+  // The save dialog already wrote an empty file. Replace it with our header.
+  try {
+    await invoke('env_create_file', { path, displayName: name || null });
+  } catch (err) {
+    // env_create_file fails if the file already exists (save_file_with_dialog
+    // wrote it). Fallback: write the directive directly via env_save.
+    rpLog('warn', 'env_create_file rejected (already exists), falling back', { error: String(err) });
+  }
+  // Add to env config and activate. env_add will read whatever's on disk —
+  // which may be empty. That's fine; user will fill in vars via the card UI.
+  await _handleEnvFilePicked({ path });
+}
+
 // --- Load .env file (header button) ---
 if (loadEnvBtn) {
   loadEnvBtn.addEventListener('click', async (e) => {
@@ -5338,22 +5505,33 @@ if (loadEnvBtn) {
   });
 }
 
-// Hidden HTML file input → forwards picked file to Rust env_add.
-{
-  const envFileInputHidden = document.getElementById('envFileInputHidden');
-  if (envFileInputHidden) {
-    envFileInputHidden.addEventListener('change', async (e) => {
-      const file = e.target.files && e.target.files[0];
-      e.target.value = '';
-      if (file) await _handleEnvFilePicked(file);
-    });
-  }
+const newEnvBtnEl = document.getElementById('newEnvBtn');
+if (newEnvBtnEl) {
+  newEnvBtnEl.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    await envCreateNewFile();
+  });
 }
+
+// (Hidden HTML <input type="file"> for env was removed because Tauri 2's
+// WebView2 doesn't reliably expose File.path. We use the rfd-backed
+// `pick_file_with_dialog` command instead — see envPickerLoadFile().)
 
 
 
 // --- Run Group ---
 async function runGroup(fileIdx, groupName) {
+  // If already running, abort.
+  if (isRunning) {
+    try {
+      await invoke('request_run_abort');
+    } catch (err) {
+      rpLog('warn', 'request_run_abort failed', { error: String(err) });
+    }
+    showToast('Stopping… (current block will finish, then cleanup runs)', 'info');
+    return;
+  }
+
   const file = loadedFiles[fileIdx];
   if (!file) return;
 
@@ -5393,6 +5571,10 @@ async function runGroup(fileIdx, groupName) {
   }
   updateBlockStatuses();
 
+  // Register only the group's blocks for live result streaming so we don't
+  // accidentally overwrite prior runs of OTHER groups in this file.
+  liveResultPendingByFile.set(fileIdx, [...groupBlockIndices]);
+
   // Show group blocks as pending in results panel
   const pendingBlocks = groupBlockIndices.map(origIdx => {
     const block = file.suite.blocks[origIdx];
@@ -5408,6 +5590,7 @@ async function runGroup(fileIdx, groupName) {
   testResultsDetails.classList.remove('hidden');
 
   await startBlockProgressListener();
+  await startBlockResultListener();
 
   try {
     let extraVars = collectVariablesArray();
@@ -5462,6 +5645,17 @@ async function runGroup(fileIdx, groupName) {
 
 // --- Run Single File ---
 async function runSingleFile(fileIdx) {
+  // If already running, abort the in-flight run.
+  if (isRunning) {
+    try {
+      await invoke('request_run_abort');
+    } catch (err) {
+      rpLog('warn', 'request_run_abort failed', { error: String(err) });
+    }
+    showToast('Stopping… (current block will finish, then cleanup runs)', 'info');
+    return;
+  }
+
   const file = loadedFiles[fileIdx];
   if (!file) return;
 
@@ -5504,8 +5698,13 @@ async function runSingleFile(fileIdx) {
   showTestResults(0, 0, 0, 0, [], pendingBlocks);
   testResultsDetails.classList.remove('hidden');
 
+  // Initialize live-streaming results so per-block updates land in
+  // file.results.block_results as each block finishes.
+  prepareLiveResults(fileIdx);
+
   // Start listening for per-block progress
   await startBlockProgressListener();
+  await startBlockResultListener();
 
   try {
     let extraVars = collectVariablesArray();
