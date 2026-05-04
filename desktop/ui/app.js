@@ -1257,6 +1257,213 @@ function setToast(msg) {
   rpLog('info', msg);
 }
 
+// =================================================================
+// Themed modal dialogs (replaces window.alert / confirm / prompt)
+// =================================================================
+//
+// All three return Promises and use the same styling system so any popup in
+// the app feels native to Request Pilot rather than the OS default.
+//
+//   showModalAlert({ title, message, type, okLabel })            → Promise<true>
+//   showModalConfirm({ title, message, type, okLabel, cancelLabel, danger })
+//                                                               → Promise<boolean>
+//   showModalPrompt({ title, message, defaultValue, placeholder,
+//                     okLabel, cancelLabel, hint })             → Promise<string|null>
+//
+// `type` controls the icon color: 'info' (default), 'success', 'warn', 'danger'.
+// `danger: true` on confirm makes the OK button red.
+// Esc cancels. Enter confirms (in prompts: only when input has focus).
+// Click outside closes as cancel.
+
+function _rpModalShow(opts) {
+  const {
+    title = '',
+    message = '',
+    type = 'info',
+    icon: customIcon = null,
+    inputDefault = null, // when string, render an <input> seeded with this
+    placeholder = '',
+    hint = '',
+    okLabel = 'OK',
+    cancelLabel = null, // when null, no Cancel button (alert mode)
+    danger = false,
+    details = null, // optional preformatted block (e.g. error stack)
+  } = opts;
+
+  const icons = { info: 'ℹ', success: '✓', warn: '⚠', danger: '⚠' };
+  const iconChar = customIcon || icons[type] || icons.info;
+
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'rp-modal-overlay';
+
+    const modal = document.createElement('div');
+    modal.className = 'rp-modal';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+
+    // ── Header ──
+    const header = document.createElement('div');
+    header.className = 'rp-modal-header';
+    const iconEl = document.createElement('span');
+    iconEl.className = `rp-modal-icon ${type}`;
+    iconEl.textContent = iconChar;
+    const titleEl = document.createElement('div');
+    titleEl.className = 'rp-modal-title';
+    titleEl.textContent = title;
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'rp-modal-close';
+    closeBtn.type = 'button';
+    closeBtn.title = 'Close';
+    closeBtn.setAttribute('aria-label', 'Close');
+    closeBtn.textContent = '✕';
+    header.appendChild(iconEl);
+    header.appendChild(titleEl);
+    header.appendChild(closeBtn);
+
+    // ── Body ──
+    const body = document.createElement('div');
+    body.className = 'rp-modal-body';
+    if (message) {
+      const msg = document.createElement('div');
+      msg.className = 'rp-modal-message';
+      msg.textContent = message;
+      body.appendChild(msg);
+    }
+    let input = null;
+    if (typeof inputDefault === 'string') {
+      input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'rp-modal-input';
+      input.value = inputDefault;
+      input.placeholder = placeholder || '';
+      input.setAttribute('autocomplete', 'off');
+      input.setAttribute('spellcheck', 'false');
+      body.appendChild(input);
+      if (hint) {
+        const hintEl = document.createElement('div');
+        hintEl.className = 'rp-modal-hint';
+        hintEl.textContent = hint;
+        body.appendChild(hintEl);
+      }
+    }
+    if (details) {
+      const det = document.createElement('div');
+      det.className = 'rp-modal-details';
+      det.textContent = details;
+      body.appendChild(det);
+    }
+
+    // ── Footer ──
+    const footer = document.createElement('div');
+    footer.className = 'rp-modal-footer';
+    let cancelBtn = null;
+    if (cancelLabel !== null) {
+      cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'btn btn-sm';
+      cancelBtn.textContent = cancelLabel || 'Cancel';
+      footer.appendChild(cancelBtn);
+    }
+    const okBtn = document.createElement('button');
+    okBtn.type = 'button';
+    okBtn.className = `btn btn-sm ${danger ? 'btn-danger' : 'btn-primary'}`;
+    okBtn.textContent = okLabel;
+    footer.appendChild(okBtn);
+
+    modal.appendChild(header);
+    modal.appendChild(body);
+    modal.appendChild(footer);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    const close = (result) => {
+      document.removeEventListener('keydown', onKey);
+      try { document.body.removeChild(overlay); } catch (_) { /* already gone */ }
+      resolve(result);
+    };
+
+    const isPrompt = input !== null;
+    const cancelResult = isPrompt ? null : false;
+    const okResult = isPrompt ? () => input.value : true;
+    const fireOk = () => close(typeof okResult === 'function' ? okResult() : okResult);
+    const fireCancel = () => close(cancelResult);
+
+    closeBtn.addEventListener('click', fireCancel);
+    if (cancelBtn) cancelBtn.addEventListener('click', fireCancel);
+    okBtn.addEventListener('click', fireOk);
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) fireCancel(); });
+
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        fireCancel();
+      } else if (e.key === 'Enter') {
+        // For prompts, fire OK on Enter only when input is focused (so users
+        // can still tab to Cancel and press Enter on it). For non-prompts,
+        // any Enter confirms.
+        if (!isPrompt || document.activeElement === input) {
+          e.preventDefault();
+          fireOk();
+        }
+      }
+    };
+    document.addEventListener('keydown', onKey);
+
+    // Auto-focus: input first if present, else the OK button.
+    setTimeout(() => {
+      if (input) {
+        input.focus();
+        input.select();
+      } else {
+        okBtn.focus();
+      }
+    }, 0);
+  });
+}
+
+function showModalAlert(opts = {}) {
+  const o = (typeof opts === 'string') ? { message: opts } : opts;
+  return _rpModalShow({
+    title: o.title || 'Notice',
+    message: o.message || '',
+    type: o.type || 'info',
+    icon: o.icon,
+    okLabel: o.okLabel || 'OK',
+    cancelLabel: null,
+    details: o.details || null,
+  });
+}
+
+function showModalConfirm(opts = {}) {
+  const o = (typeof opts === 'string') ? { message: opts } : opts;
+  return _rpModalShow({
+    title: o.title || 'Confirm',
+    message: o.message || '',
+    type: o.type || (o.danger ? 'warn' : 'info'),
+    icon: o.icon,
+    okLabel: o.okLabel || 'OK',
+    cancelLabel: o.cancelLabel || 'Cancel',
+    danger: !!o.danger,
+    details: o.details || null,
+  }).then(v => v === true);
+}
+
+function showModalPrompt(opts = {}) {
+  const o = (typeof opts === 'string') ? { message: opts } : opts;
+  return _rpModalShow({
+    title: o.title || 'Input',
+    message: o.message || '',
+    type: o.type || 'info',
+    icon: o.icon,
+    inputDefault: typeof o.defaultValue === 'string' ? o.defaultValue : '',
+    placeholder: o.placeholder || '',
+    hint: o.hint || '',
+    okLabel: o.okLabel || 'OK',
+    cancelLabel: o.cancelLabel || 'Cancel',
+  }).then(v => (v === null || v === false) ? null : v);
+}
+
 // Session-scoped cache of @prompt values: Map<fileName, Map<varName, value>>
 const promptValueCache = new Map();
 
@@ -1274,19 +1481,24 @@ async function collectPromptVariables(suite, fileName) {
 
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    overlay.className = 'rp-modal-overlay';
     const modal = document.createElement('div');
-    modal.style.cssText = 'background:var(--bg-primary,#1e1e1e);color:var(--text-primary,#eee);border:1px solid var(--border,#444);border-radius:6px;padding:20px;min-width:420px;max-width:600px;max-height:80vh;overflow:auto;box-shadow:0 4px 20px rgba(0,0,0,0.5);';
+    modal.className = 'rp-modal';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
     modal.innerHTML = `
-      <h3 style="margin:0 0 12px 0;font-size:15px;">Supply runtime values</h3>
-      <p style="margin:0 0 16px 0;opacity:0.8;font-size:12px;">
-        ${fileName} declares <code>@prompt</code> variables. Provide values before the suite runs.
-      </p>
-      <form id="pilot-prompt-form"></form>
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
-        <button type="button" id="pilot-prompt-cancel" class="btn btn-secondary">Cancel</button>
-        <button type="submit" form="pilot-prompt-form" class="btn btn-primary">Run</button>
+      <div class="rp-modal-header">
+        <span class="rp-modal-icon info">?</span>
+        <div class="rp-modal-title">Supply runtime values</div>
+        <button type="button" class="rp-modal-close" id="pilot-prompt-x" title="Cancel" aria-label="Cancel">✕</button>
+      </div>
+      <div class="rp-modal-body">
+        <div class="rp-modal-message"><strong>${fileName}</strong> declares <code>@prompt</code> variables. Provide values before the suite runs.</div>
+        <form id="pilot-prompt-form" style="margin-top:12px;"></form>
+      </div>
+      <div class="rp-modal-footer">
+        <button type="button" id="pilot-prompt-cancel" class="btn btn-sm">Cancel</button>
+        <button type="submit" form="pilot-prompt-form" class="btn btn-sm btn-primary">Run</button>
       </div>
     `;
     const form = modal.querySelector('#pilot-prompt-form');
@@ -1295,12 +1507,13 @@ async function collectPromptVariables(suite, fileName) {
       row.style.cssText = 'margin-bottom:12px;';
       const label = document.createElement('label');
       label.textContent = p.name + (p.description ? ' — ' + p.description : '');
-      label.style.cssText = 'display:block;font-size:12px;margin-bottom:4px;font-weight:500;';
+      label.style.cssText = 'display:block;font-size:12px;margin-bottom:4px;font-weight:500;color:var(--text-primary);';
       const input = document.createElement('input');
       input.type = 'text';
       input.name = p.name;
       input.value = cache.get(p.name) || existing.get(p.name) || '';
-      input.style.cssText = 'width:100%;padding:6px 8px;background:var(--bg-secondary,#2a2a2a);color:inherit;border:1px solid var(--border,#444);border-radius:3px;font-family:var(--font-mono,monospace);font-size:12px;box-sizing:border-box;';
+      input.className = 'rp-modal-input';
+      input.style.marginTop = '0';
       row.appendChild(label);
       row.appendChild(input);
       form.appendChild(row);
@@ -1310,11 +1523,15 @@ async function collectPromptVariables(suite, fileName) {
     setTimeout(() => { const first = form.querySelector('input'); if (first) first.focus(); }, 0);
 
     const close = (result) => {
-      document.body.removeChild(overlay);
+      document.removeEventListener('keydown', onKey);
+      try { document.body.removeChild(overlay); } catch (_) { /* already gone */ }
       resolve(result);
     };
+    const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(null); } };
+    document.addEventListener('keydown', onKey);
     modal.querySelector('#pilot-prompt-cancel').addEventListener('click', () => close(null));
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(null); });
+    modal.querySelector('#pilot-prompt-x').addEventListener('click', () => close(null));
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(null); });
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       const values = [];
@@ -5194,7 +5411,14 @@ function renderEnvPanel() {
     remove.addEventListener('click', async (ev) => {
       ev.stopPropagation();
       if (state.dirty) {
-        if (!confirm(`Discard unsaved edits to ${entry.name}?`)) return;
+        const ok = await showModalConfirm({
+          title: 'Discard unsaved edits?',
+          message: `${entry.name} has unsaved changes. Removing will discard them.`,
+          okLabel: 'Discard & Remove',
+          cancelLabel: 'Keep',
+          danger: true,
+        });
+        if (!ok) return;
       }
       await removeEnvIndex(i);
     });
@@ -5480,7 +5704,14 @@ async function _handleEnvFilePicked(file) {
  * file with `# @@name <display>` directive header → env_add → activate.
  */
 async function envCreateNewFile() {
-  const displayName = prompt('Display name for this env (e.g. "dev", "staging", "prod"):', '');
+  const displayName = await showModalPrompt({
+    title: 'New environment file',
+    message: 'Pick a friendly display name for this env. You can change it later by editing the file header.',
+    defaultValue: '',
+    placeholder: 'dev, staging, prod, …',
+    hint: 'The name appears on the env card. Leave blank to use the filename.',
+    okLabel: 'Continue',
+  });
   if (displayName === null) return;
   const name = (displayName || '').trim();
   // Suggest a filename based on the display name; default to `.env` if empty.
@@ -9422,7 +9653,13 @@ async function handleAzureAuthClick() {
   if (azureAuthBtn.classList.contains('loading')) return; // Prevent double-click
   
   if (azureAuthState === 'authenticated') {
-    if (!confirm('You are already authenticated. Re-authenticate?')) return;
+    const ok = await showModalConfirm({
+      title: 'Re-authenticate Azure?',
+      message: 'You\'re already signed in. Re-authenticating will start the device-code flow again and refresh your tokens.',
+      okLabel: 'Re-authenticate',
+      cancelLabel: 'Stay signed in',
+    });
+    if (!ok) return;
   }
   
   // Show loading state
@@ -11515,13 +11752,16 @@ function removeSnapshotBanner() {
   if (b) b.remove();
 }
 
-function detachSnapshotFlow() {
+async function detachSnapshotFlow() {
   const f = loadedFiles[activeFileIndex];
   if (!f || !f.snapshot) return;
-  const ok = window.confirm(
-    'Detach snapshot?\n\nThis will unlock the editor so you can edit. ' +
-    'The original snapshot stays in Sessions and is unaffected. Continue?'
-  );
+  const ok = await showModalConfirm({
+    title: 'Detach snapshot?',
+    message:
+      'This unlocks the editor so you can edit the file. The original snapshot stays in Sessions and is unaffected.',
+    okLabel: 'Detach & Edit',
+    cancelLabel: 'Keep locked',
+  });
   if (!ok) return;
   delete f.snapshot;
   applySnapshotLockUI();
@@ -11534,14 +11774,18 @@ async function replaySnapshotFlow() {
   // Best-effort host extraction for confirmation
   const firstBlock = f.suite?.blocks?.[0];
   const targetHost = firstBlock?.url?.match(/^https?:\/\/([^\/]+)/)?.[1] || '(varies by block)';
-  const ok = window.confirm(
-    `Replay all ${f.suite?.blocks?.length || '?'} blocks?\n\n` +
-    `Mode: ${f.snapshot.mode || '—'}\n` +
-    `Env file: ${f.snapshot.envFile || '— (current env will be used)'}\n` +
-    `First target host: ${targetHost}\n\n` +
-    `This will fire real network requests using the current environment ` +
-    `and create a new session. The snapshot you're viewing is not modified.`
-  );
+  const ok = await showModalConfirm({
+    title: `Replay ${f.suite?.blocks?.length || '?'} block(s)?`,
+    message:
+      `Mode: ${f.snapshot.mode || '—'}\n` +
+      `Env file: ${f.snapshot.envFile || '— (current env will be used)'}\n` +
+      `First target host: ${targetHost}\n\n` +
+      `This fires real network requests against the current environment and creates a new session. ` +
+      `The snapshot you're viewing is not modified.`,
+    okLabel: '▶ Replay all',
+    cancelLabel: 'Cancel',
+    type: 'warn',
+  });
   if (!ok) return;
   // Trigger the standard run flow — code path differs slightly between modes.
   // Use the existing "Run all" affordance when present.
