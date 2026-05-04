@@ -1878,6 +1878,55 @@ html, body {
 .compare-step-tab .step-status.failed { background: var(--red); }
 .compare-step-tab .step-status.pending { background: var(--text-muted); }
 
+/* ---------- Response panel — per-step tabs (compare blocks) ---------- */
+/* Mirrors .compare-steps-tabs but lives inside the response panel so the
+   user can flip between baseline/canary/eastus responses. */
+.response-step-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+  overflow-x: auto;
+  padding: 0 6px;
+}
+.response-step-tabs.hidden {
+  display: none;
+}
+.response-step-tab {
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.response-step-tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+.response-step-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.response-step-tab .step-status {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+.response-step-tab .step-status.passed { background: var(--green); }
+.response-step-tab .step-status.failed { background: var(--red); }
+.response-step-tab .step-status.pending { background: var(--text-muted); }
+
 .compare-steps-content {
   flex: 1;
   overflow: auto;

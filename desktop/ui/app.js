@@ -435,6 +435,7 @@ const formFieldsList  = $('#formFieldsList');
 const addFormFieldBtn = $('#addFormFieldBtn');
 const toggleFormRawBtn = $('#toggleFormRawBtn');
 const responseEmpty   = $('#responseEmpty');
+const responseStepTabs = $('#responseStepTabs');
 const responseContent = $('#responseContent');
 const responseMeta    = $('#responseMeta');
 const statusBadge     = $('#responseStatusBadge');
@@ -2748,6 +2749,138 @@ function displayResponse(resp) {
   });
 }
 
+// --- Response Step Tabs (compare blocks) ---
+//
+// State: `activeResponseStepIdx` is the index (0..n-1) of the step whose
+// response is currently shown in the response panel. -1 means the most
+// recent show was for a non-compare block.
+//
+// Why a separate state from `activeCompareStepIdx`: the request side has
+// its own tab state (and a "Comparison" pseudo-tab at index N). The
+// response side doesn't have a Comparison view — comparison summaries
+// live in the Assertions sub-tab today — so sharing one variable would
+// crash on the comparison index. Keeping them independent also lets the
+// user flip through responses without disturbing their request-edit tab.
+let activeResponseStepIdx = 0;
+
+/**
+ * Render the per-step tabs above the response panel's sub-tabs. Hidden
+ * for non-compare blocks. Click on a step tab triggers
+ * `showResponseForBlock` to swap the displayed step.
+ */
+function renderResponseStepTabs(fileIdx, blockIdx) {
+  if (!responseStepTabs) return;
+  const file = loadedFiles[fileIdx];
+  const block = file?.suite?.blocks?.[blockIdx];
+  const br = file?.results?.block_results?.[blockIdx];
+
+  if (!block || !block.compare || !block.steps || block.steps.length === 0) {
+    responseStepTabs.classList.add('hidden');
+    responseStepTabs.innerHTML = '';
+    return;
+  }
+
+  let html = '';
+  block.steps.forEach((step, si) => {
+    const sr = br?.step_results?.[si];
+    let dot = '';
+    if (sr) {
+      const cls = sr.error ? 'failed' : 'passed';
+      dot = `<span class="step-status ${cls}"></span>`;
+    } else if (br) {
+      dot = `<span class="step-status pending"></span>`;
+    }
+    const active = si === activeResponseStepIdx ? ' active' : '';
+    html += `<button class="response-step-tab${active}" data-step-idx="${si}">${escapeHtml(step.name)}${dot}</button>`;
+  });
+  responseStepTabs.innerHTML = html;
+  responseStepTabs.classList.remove('hidden');
+
+  responseStepTabs.querySelectorAll('.response-step-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const idx = parseInt(tab.dataset.stepIdx, 10);
+      if (Number.isNaN(idx)) return;
+      activeResponseStepIdx = idx;
+      showResponseForBlock(fileIdx, blockIdx, idx);
+    });
+  });
+}
+
+/**
+ * Central response renderer for a block's results. Replaces ad-hoc
+ * `displayResponse(br.step_results[0].response)` calls scattered across
+ * selectBlock / runAllTests / runSingleBlock / runCompareStep /
+ * viewCompareStep — those previously only showed step 0 (or
+ * `br.response`, which compare blocks don't have), hiding the other
+ * steps' bodies/headers.
+ *
+ * For compare blocks: renders the step-tabs strip and shows the
+ * preferred step's response (falling back to existing
+ * `activeResponseStepIdx`, then step 0 if neither is set/valid).
+ * For non-compare blocks: hides the step-tabs strip and shows
+ * `br.response` directly.
+ *
+ * Returns the response object that was displayed (so callers can update
+ * `lastResponse`), or null if there was nothing to show.
+ */
+function showResponseForBlock(fileIdx, blockIdx, preferredStepIdx) {
+  const file = loadedFiles[fileIdx];
+  const block = file?.suite?.blocks?.[blockIdx];
+  const br = file?.results?.block_results?.[blockIdx];
+  if (!block || !br) {
+    renderResponseStepTabs(fileIdx, blockIdx);
+    return null;
+  }
+
+  const isCompare = !!(block.compare && block.steps && block.steps.length > 0);
+
+  if (!isCompare) {
+    if (responseStepTabs) {
+      responseStepTabs.classList.add('hidden');
+      responseStepTabs.innerHTML = '';
+    }
+    if (br.response) {
+      displayResponse(br.response);
+      return br.response;
+    }
+    if (br.error) {
+      displayError(br.error);
+      return null;
+    }
+    return null;
+  }
+
+  // ── Compare block ──
+  const stepCount = block.steps.length;
+
+  // Pick which step to display. Caller-preferred wins, then current
+  // state, then 0. Clamp to a valid step index.
+  let pick = (typeof preferredStepIdx === 'number' && preferredStepIdx >= 0)
+    ? preferredStepIdx
+    : (activeResponseStepIdx >= 0 ? activeResponseStepIdx : 0);
+  if (pick >= stepCount) pick = 0;
+  if (pick < 0) pick = 0;
+  activeResponseStepIdx = pick;
+
+  renderResponseStepTabs(fileIdx, blockIdx);
+
+  const sr = br.step_results?.[pick];
+  if (sr?.response) {
+    displayResponse(sr.response);
+    return sr.response;
+  }
+  if (sr?.error) {
+    displayError(sr.error);
+    return null;
+  }
+  // No result yet for this step — show a hint instead of stale content.
+  responseEmpty.classList.remove('hidden');
+  responseContent.classList.add('hidden');
+  responseContent.classList.remove('visible');
+  responseMeta.classList.add('hidden');
+  return null;
+}
+
 // --- JSON Tree Renderer ---
 function renderJsonTree(data) {
   const container = document.createElement('div');
@@ -4648,6 +4781,12 @@ function wireBuilderDirectiveEvents(fileIdx, blockIdx) {
 
 // --- Block Selection ---
 function selectBlock(fileIdx, blockIdx) {
+  // Reset the per-step response tab when the active block changes so a
+  // freshly selected compare block opens on its first step instead of
+  // inheriting whatever index the previous block was on.
+  if (fileIdx !== activeFileIndex || blockIdx !== activeBlockIndex) {
+    activeResponseStepIdx = 0;
+  }
   activeFileIndex = fileIdx;
   activeBlockIndex = blockIdx;
 
@@ -4712,22 +4851,14 @@ function selectBlock(fileIdx, blockIdx) {
   // Sync the Params tab to whatever URL just got loaded.
   renderParamsFromUrl();
 
-  // Show response if block has been run
+  // Show response if block has been run. Compare blocks have per-step
+  // responses (br.step_results[i].response); non-compare blocks have a
+  // single br.response. Both paths flow through showResponseForBlock so
+  // the response panel's step-tabs strip stays in sync.
   const br = file.results?.block_results?.[blockIdx];
-  if (isCompare && br?.step_results?.length > 0) {
-    const firstStepResp = br.step_results[0].response;
-    if (firstStepResp) {
-      displayResponse(firstStepResp);
-      lastResponse = firstStepResp;
-    }
-  } else if (br) {
-    if (br.response) {
-      displayResponse(br.response);
-      lastResponse = br.response;
-    } else if (br.error) {
-      displayError(br.error);
-      lastResponse = null;
-    }
+  if (br) {
+    const shown = showResponseForBlock(fileIdx, blockIdx);
+    lastResponse = shown || null;
   }
 
   // Show assertions tab if block has assertions, extracts, or run results
@@ -5167,9 +5298,9 @@ async function runAllTests() {
     if (activeFileIndex >= 0 && activeBlockIndex >= 0) {
       renderAssertions(activeFileIndex, activeBlockIndex);
       const br = loadedFiles[activeFileIndex]?.results?.block_results?.[activeBlockIndex];
-      if (br?.response) {
-        displayResponse(br.response);
-        lastResponse = br.response;
+      if (br) {
+        const shown = showResponseForBlock(activeFileIndex, activeBlockIndex);
+        if (shown) lastResponse = shown;
       }
     }
 
@@ -5264,9 +5395,9 @@ async function runSingleBlock(fileIdx, blockIdx) {
     updateBlockStatuses();
     renderEnvPanel();
 
-    if (br?.response) {
-      lastResponse = br.response;
-      displayResponse(br.response);
+    if (br) {
+      const shown = showResponseForBlock(fileIdx, blockIdx);
+      if (shown) lastResponse = shown;
     } else if (br?.error) {
       displayError(br.error);
     }
@@ -5388,9 +5519,12 @@ async function runCompareStep(fileIdx, blockIdx, stepIdx) {
     renderFileTree();
     renderEnvPanel();
 
-    if (br?.response) {
-      lastResponse = br.response;
-      displayResponse(br.response);
+    if (br) {
+      // After running an individual compare step, surface that step's
+      // response in the panel (the user's intent is to inspect what just
+      // ran, not whatever step they had selected before).
+      const shown = showResponseForBlock(fileIdx, blockIdx, stepIdx);
+      if (shown) lastResponse = shown;
     } else if (br?.error) {
       displayError(br.error);
     }
@@ -5443,11 +5577,14 @@ function viewCompareStep(fileIdx, blockIdx, stepIdx) {
     bodyType.dispatchEvent(new Event('change'));
   }
 
+  // viewCompareStep is the explicit "show step N's response" entry
+  // point (called when the user clicks a Comparison-tab "view step" or
+  // similar action). Pass the requested stepIdx through so the response
+  // panel's per-step tabs activate the right tab.
   const br = file.results?.block_results?.[blockIdx];
-  const sr = br?.step_results?.[stepIdx];
-  if (sr?.response) {
-    displayResponse(sr.response);
-    lastResponse = sr.response;
+  if (br) {
+    const shown = showResponseForBlock(fileIdx, blockIdx, stepIdx);
+    if (shown) lastResponse = shown;
   }
 
   assertionsTab.style.display = '';
