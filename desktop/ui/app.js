@@ -675,6 +675,17 @@ document.addEventListener('click', (e) => {
   parent.querySelectorAll(':scope > .sub-content').forEach(sc => sc.classList.remove('active'));
   const target = parent.querySelector(`#subtab-${subTab.dataset.subtab}`);
   if (target) target.classList.add('active');
+
+  // If the user just revealed the Body sub-tab and the form-table view is
+  // showing, auto-size all value textareas. They may have been created while
+  // the panel was display:none (scrollHeight == 0) and need a re-grow now
+  // that they have a layout box.
+  if (subTab.dataset.subtab === 'req-body' &&
+      typeof bodyFormEditor !== 'undefined' && bodyFormEditor &&
+      !bodyFormEditor.classList.contains('hidden') &&
+      typeof growAllFormFieldRows === 'function') {
+    requestAnimationFrame(() => growAllFormFieldRows());
+  }
 });
 
 // --- Method select color ---
@@ -1188,9 +1199,23 @@ function flushFormTableToBody() {
 }
 
 function autoGrowTextarea(ta) {
+  // If the textarea has no layout box yet (e.g. its sub-tab is display:none
+  // because the user is on a different sub-tab), scrollHeight will be 0 and
+  // we'd collapse it. Bail out — growAllFormFieldRows() will re-run when
+  // the panel becomes visible.
+  if (!ta || !ta.isConnected) return;
+  if (ta.offsetParent === null && ta.getClientRects().length === 0) return;
   ta.style.height = 'auto';
   // Cap height so a giant PromQL query doesn't push the action buttons off-screen
   ta.style.height = Math.min(ta.scrollHeight, 280) + 'px';
+}
+
+// Re-grow every value cell in the form editor. Called whenever the form
+// editor becomes visible (sub-tab switch, dropdown change, etc.) so that
+// rows created while the panel was hidden get sized correctly.
+function growAllFormFieldRows() {
+  if (!formFieldsList) return;
+  formFieldsList.querySelectorAll('.kv-value-area').forEach(ta => autoGrowTextarea(ta));
 }
 
 function createFormFieldRow(key = '', value = '', enabled = true) {
@@ -1237,6 +1262,10 @@ function showFormEditor() {
   bodyEditorWrap.classList.add('hidden');
   bodyFormEditor.classList.remove('hidden');
   renderFormTableFromBody();
+  // Defer the grow until the next frame so layout has been computed for
+  // the newly-visible panel (and so any sibling textareas get correct
+  // scrollHeight values).
+  requestAnimationFrame(() => growAllFormFieldRows());
 }
 
 function hideFormEditor() {
