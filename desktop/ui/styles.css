@@ -254,12 +254,32 @@ html, body {
 }
 
 /* ---------- Env Cards (left sidebar) ---------- */
+.env-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 6px 4px 4px 4px;
+  margin-top: 4px;
+}
+.env-section-label:first-child {
+  margin-top: 0;
+}
 .env-card {
   border: 1px solid var(--border);
   border-radius: 6px;
   margin-bottom: 6px;
   background: var(--bg-secondary);
   overflow: hidden;
+}
+.env-card.http-file-card {
+  border-style: dashed;
+  background: var(--bg-primary, var(--bg-secondary));
+}
+.env-card.http-file-card .env-card-name {
+  color: var(--text-muted);
+  font-style: italic;
 }
 .env-card.active {
   border-color: var(--success, #22c55e);

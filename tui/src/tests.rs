@@ -35,6 +35,21 @@ mod tests {
 
     static NEXT_ARTIFACT_ID: AtomicU64 = AtomicU64::new(0);
 
+    /// Point `env_config::default_config_path()` at a per-process temp file so
+    /// tests that call `env_config::save()` (e.g. the load-env test below) do
+    /// not pollute the user's real `~/.config/request-pilot/env_config.json`.
+    fn sandbox_env_config() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let mut p = std::env::temp_dir();
+            p.push(format!("rp-test-env-config-{}.json", std::process::id()));
+            std::env::set_var("RP_ENV_CONFIG_PATH", &p);
+            // Best-effort: start clean.
+            let _ = fs::remove_file(&p);
+        });
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -391,6 +406,7 @@ GET https://example.com/third
 
     #[test]
     fn submit_input_load_env_reads_variables() {
+        sandbox_env_config();
         let artifact = TestArtifact::new("load-env", "env", "TOKEN=abc\nHOST=example.com\n");
         let mut app = App::new();
 

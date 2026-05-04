@@ -288,10 +288,27 @@ fn read_env_file(path: String) -> Result<std::collections::HashMap<String, Strin
 
 // ─── Multi-env (.env file list) commands ──────────────────────────────────
 
+/// Remove entries whose `path` no longer exists on disk. Returns the number
+/// of pruned entries. Idempotent — safe to call from `env_list` so stale test
+/// artifacts (or files the user manually deleted) don't pile up indefinitely.
+fn prune_missing(cfg: &mut env_config::EnvConfig) -> usize {
+    let before = cfg.entries.len();
+    let active_path = cfg.active_entry().map(|e| e.path.clone());
+    cfg.entries.retain(|e| std::path::Path::new(&e.path).exists());
+    // Recompute active_index against the new entry positions.
+    cfg.active_index = active_path.and_then(|p| cfg.entries.iter().position(|e| e.path == p));
+    before - cfg.entries.len()
+}
+
 /// Returns the persisted env config (list of `.env` entries + active index).
+/// Auto-prunes entries whose backing files no longer exist.
 #[tauri::command]
 fn env_list() -> Result<env_config::EnvConfig, String> {
-    env_config::load()
+    let mut cfg = env_config::load()?;
+    if prune_missing(&mut cfg) > 0 {
+        env_config::save(&cfg)?;
+    }
+    Ok(cfg)
 }
 
 /// Load the `.env` at `path`, derive a name (from `# @@name` directive or
@@ -439,6 +456,29 @@ fn save_file_with_dialog(
         }
         None => Ok(None),
     }
+}
+
+/// Open a native file-picker dialog and return the chosen path (or null if
+/// cancelled). Pure picker — no file I/O performed here.
+#[tauri::command]
+fn pick_file_with_dialog(
+    title: Option<String>,
+    filters: Option<Vec<(String, String)>>,
+) -> Result<Option<String>, String> {
+    let mut dialog = rfd::FileDialog::new();
+    if let Some(t) = title {
+        dialog = dialog.set_title(t);
+    }
+    if let Some(ref f) = filters {
+        for (name, ext) in f {
+            // `ext` may be a comma-separated list ("env,*"); split for rfd.
+            let exts: Vec<&str> = ext.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+            if !exts.is_empty() {
+                dialog = dialog.add_filter(name, &exts);
+            }
+        }
+    }
+    Ok(dialog.pick_file().map(|p| p.to_string_lossy().to_string()))
 }
 
 /// Write content to a known file path (for files already saved once).
@@ -679,6 +719,7 @@ pub fn run() {
             poll_device_code,
             check_variables,
             save_file_with_dialog,
+            pick_file_with_dialog,
             write_file,
             add_history_entry,
             update_history_entry,

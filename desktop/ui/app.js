@@ -1197,17 +1197,13 @@ async function ensureCardVarsLoaded(index) {
 
 async function envPickerLoadFile() {
   try {
-    // Prefer Tauri's native picker; fall back to a simple prompt if missing.
-    let path = null;
-    if (window.__TAURI__ && window.__TAURI__.dialog && window.__TAURI__.dialog.open) {
-      path = await window.__TAURI__.dialog.open({
-        title: 'Load .env file',
-        multiple: false,
-        filters: [{ name: 'Env files', extensions: ['env', '*'] }],
-      });
-    } else {
-      path = prompt('Path to .env file:');
-    }
+    // Use the Rust-side native picker (rfd via `pick_file_with_dialog`); the
+    // Tauri v2 dialog plugin is not enabled in this app, so we don't try the
+    // window.__TAURI__.dialog path.
+    const path = await invoke('pick_file_with_dialog', {
+      title: 'Load .env file',
+      filters: [['Env Files', 'env'], ['All Files', '*']],
+    });
     if (!path || typeof path !== 'string') return;
     const res = await invoke('env_add', { path });
     envConfig = normalizeEnvConfig(res.config);
@@ -4982,6 +4978,10 @@ testResultsSummary.addEventListener('click', () => {
 
 // --- Env File Management (collapsible cards in left sidebar) ---
 
+// Per-loaded-file UI state for the read-only ".http variables" cards we
+// render at the top of the env panel: { expanded: bool } keyed by file path.
+let httpFileVarCardState = {};
+
 // Public alias kept so the many existing `renderEnvVars()` call sites keep
 // working without churn — they all need to redraw the env panel.
 function renderEnvVars() { renderEnvPanel(); }
@@ -4990,10 +4990,40 @@ function renderEnvPanel() {
   if (!envList) return;
   envList.innerHTML = '';
 
+  // ── Section 1: collapsed read-only card per loaded .http file with @variables ──
+  // This shows the user "where their variables came from" without unrolling
+  // 25 individual rows in the sidebar.
+  const httpFilesWithVars = (loadedFiles || []).filter(f => f.suite && f.suite.variables && f.suite.variables.length > 0);
+  if (httpFilesWithVars.length > 0) {
+    const sectionLabel = document.createElement('div');
+    sectionLabel.className = 'env-section-label';
+    sectionLabel.textContent = 'From loaded .http files';
+    envList.appendChild(sectionLabel);
+    httpFilesWithVars.forEach((file) => {
+      envList.appendChild(buildHttpFileVarCard(file));
+    });
+  }
+
   const entries = envConfig.entries || [];
-  if (entries.length === 0) {
+
+  if (entries.length > 0) {
+    const sectionLabel = document.createElement('div');
+    sectionLabel.className = 'env-section-label';
+    sectionLabel.textContent = '.env files';
+    envList.appendChild(sectionLabel);
+  }
+
+  if (entries.length === 0 && httpFilesWithVars.length === 0) {
     envList.innerHTML = '<div class="sidebar-empty">No .env file loaded · click 📂 above to load one.</div>';
     return;
+  }
+
+  if (entries.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'sidebar-empty';
+    empty.style.cssText = 'padding:6px 4px;font-size:11px;';
+    empty.textContent = 'No .env file loaded · click 📂 above to load one.';
+    envList.appendChild(empty);
   }
 
   entries.forEach((entry, i) => {
@@ -5103,6 +5133,84 @@ function renderEnvPanel() {
   builtins.style.cssText = 'font-size:10px;color:var(--text-muted);padding:6px 4px 0 4px;border-top:1px dashed var(--border);margin-top:6px;';
   builtins.innerHTML = 'Built-ins: <code>{{$timestamp}}</code> <code>{{$uuid}}</code> <code>{{$randomInt}}</code>';
   envList.appendChild(builtins);
+}
+
+function buildHttpFileVarCard(file) {
+  const key = file.path || file.name || '';
+  if (!httpFileVarCardState[key]) httpFileVarCardState[key] = { expanded: false };
+  const state = httpFileVarCardState[key];
+  const vars = file.suite.variables || [];
+
+  const card = document.createElement('div');
+  card.className = 'env-card http-file-card readonly' + (state.expanded ? ' expanded' : '');
+
+  const header = document.createElement('div');
+  header.className = 'env-card-header';
+  const chevron = document.createElement('span');
+  chevron.className = 'env-card-chevron';
+  chevron.textContent = '▸';
+  const icon = document.createElement('span');
+  icon.className = 'env-card-radio';
+  icon.style.cssText = 'border:none;background:transparent;color:var(--text-muted);font-size:12px;';
+  icon.textContent = '📄';
+  icon.title = '.http file variables (read-only)';
+  const name = document.createElement('span');
+  name.className = 'env-card-name';
+  name.textContent = file.name || key.split(/[\\/]/).pop();
+  const count = document.createElement('span');
+  count.className = 'env-card-path';
+  count.textContent = `${vars.length} var${vars.length === 1 ? '' : 's'}`;
+  count.title = key;
+
+  header.appendChild(chevron);
+  header.appendChild(icon);
+  header.appendChild(name);
+  header.appendChild(count);
+  card.appendChild(header);
+
+  const body = document.createElement('div');
+  body.className = 'env-card-body readonly';
+  card.appendChild(body);
+
+  if (state.expanded) {
+    if (vars.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'env-card-loading';
+      empty.textContent = '(no variables)';
+      body.appendChild(empty);
+    } else {
+      vars.forEach(([varName, varValue]) => {
+        const isPlaceholder = typeof varValue === 'string'
+          && (varValue.startsWith('your-') || varValue.includes('your-'));
+        const valueSet = varValue !== undefined && varValue !== '' && !isPlaceholder;
+        const statusColor = valueSet ? 'var(--green)' : 'var(--red)';
+        const row = document.createElement('div');
+        row.className = 'var-row';
+        row.innerHTML = `
+          <span class="var-status" style="color:${statusColor}">●</span>
+          <span class="var-icon" title=".http variable">📄</span>
+          <input class="var-name" value="${escapeAttr(varName)}" disabled>
+          <span class="var-sep">=</span>
+          <input class="var-value" value="${escapeAttr(varValue || '')}" disabled placeholder="${isPlaceholder ? 'placeholder — override in .env' : 'unset'}">
+          <button class="var-delete" disabled style="visibility:hidden;">✕</button>
+        `;
+        body.appendChild(row);
+      });
+    }
+  }
+
+  const toggle = (ev) => {
+    ev.stopPropagation();
+    state.expanded = !state.expanded;
+    renderEnvPanel();
+  };
+  chevron.addEventListener('click', toggle);
+  header.addEventListener('click', (ev) => {
+    if (ev.target === chevron) return;
+    toggle(ev);
+  });
+
+  return card;
 }
 
 function renderEnvCardBody(body, index, entry, isActive, state) {

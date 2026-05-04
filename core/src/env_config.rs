@@ -89,9 +89,15 @@ fn canonical_key(path: &str) -> String {
         .unwrap_or_else(|_| path.to_string())
 }
 
-/// Return the default on-disk path for the persisted env config
-/// (`<config_dir>/request-pilot/env_config.json`).
+/// Return the on-disk path for the persisted env config. Honors the
+/// `RP_ENV_CONFIG_PATH` env var (used by tests to sandbox to a temp dir),
+/// otherwise defaults to `<config_dir>/request-pilot/env_config.json`.
 pub fn default_config_path() -> PathBuf {
+    if let Ok(p) = std::env::var("RP_ENV_CONFIG_PATH") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
     config_dir().join("request-pilot").join("env_config.json")
 }
 
