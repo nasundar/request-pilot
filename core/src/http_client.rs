@@ -36,41 +36,100 @@ fn form_encode_byte(b: u8, out: &mut String) {
     }
 }
 
+/// Form-encode a string, preserving any valid `%XX` escape sequences
+/// already present in the input. This is what makes the runtime
+/// auto-encoder idempotent on mixed-encoding source bodies — e.g.
+/// authors can write `query=sum(a) %2B sum(b)` (literal parens and
+/// spaces, but `%2B` for the literal `+` operator) and we won't
+/// double-encode the `%2B` to `%252B`.
+///
+/// Hex digits inside preserved escapes are uppercased to match the
+/// canonical wire form.
 fn form_encode_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for &b in s.as_bytes() {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'%'
+            && i + 2 < bytes.len()
+            && bytes[i + 1].is_ascii_hexdigit()
+            && bytes[i + 2].is_ascii_hexdigit()
+        {
+            out.push('%');
+            out.push(bytes[i + 1].to_ascii_uppercase() as char);
+            out.push(bytes[i + 2].to_ascii_uppercase() as char);
+            i += 3;
+            continue;
+        }
         form_encode_byte(b, &mut out);
+        i += 1;
     }
     out
 }
 
 /// Heuristic: should this `application/x-www-form-urlencoded` body be
-/// re-encoded? A correctly-encoded form body contains only printable ASCII
-/// with no raw whitespace (space → `+`, newlines → `%0A`, etc.). Any of
-/// those signals indicates a human-authored / hand-typed body that the
-/// runtime needs to encode for the wire.
+/// re-encoded? A correctly-encoded body contains ONLY chars from the
+/// form-urlencoded "safe set":
 ///
-/// Bodies that are already encoded (no raw whitespace, all non-ASCII
-/// percent-encoded) pass through unchanged — i.e. this function is
-/// idempotent on already-encoded input.
+/// - Unreserved (`A-Z a-z 0-9 - _ . ~ *`)
+/// - Structural delimiters `&` and `=`
+/// - `+` (RFC 1866 convention: encoded space)
+/// - `%` followed by two hex digits (escape sequence)
+///
+/// Any byte outside this set indicates a human-authored / partially-
+/// decoded body that needs encoding before going on the wire.
+/// `%` not followed by two hex digits is a stray escape char and must
+/// also be encoded (as `%25`) to produce a valid body.
+///
+/// Bodies that are already fully-encoded (only safe-set chars) pass
+/// through unchanged — i.e. this function returns `false` for any body
+/// that is already wire-format compliant.
 fn body_needs_form_encoding(body: &str) -> bool {
-    body.bytes().any(|b| {
-        // Raw whitespace (LF, CR, TAB, SPACE) is never valid in a wire
-        // form-urlencoded body — it must be encoded.
-        b == b'\n' || b == b'\r' || b == b'\t' || b == b' '
-            // Other control chars (< 0x20 except those above) — not valid raw.
-            || b < 0x20
-            // Non-ASCII — must be percent-encoded as UTF-8 bytes.
-            || b > 0x7E
-    })
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'%' {
+            if i + 2 < bytes.len()
+                && bytes[i + 1].is_ascii_hexdigit()
+                && bytes[i + 2].is_ascii_hexdigit()
+            {
+                i += 3;
+                continue;
+            }
+            // Stray `%` (not a valid escape) — must be encoded as `%25`.
+            return true;
+        }
+        match b {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~'
+            | b'*'
+            | b'&'
+            | b'='
+            | b'+' => {
+                i += 1;
+            }
+            _ => return true,
+        }
+    }
+    false
 }
 
 /// Re-encode a form-urlencoded body. Treats `&` as pair delimiter and the
 /// FIRST `=` in each pair as key/value delimiter; everything else within
 /// a value is treated as raw content and form-encoded.
 ///
-/// This means literal `+` characters in the input (e.g. PromQL operators)
-/// are encoded as `%2B`, raw newlines as `%0A`, and spaces as `+`.
+/// `form_encode_str` preserves any already-encoded `%XX` sequences in the
+/// input, so literal `+` characters (e.g. PromQL operators) authored as
+/// `%2B` in the source stay `%2B` rather than being double-encoded.
+/// Raw newlines become `%0A`, raw spaces become `+`, parens become
+/// `%28`/`%29`, and so on.
 fn reencode_form_body(body: &str) -> String {
     let mut out = String::with_capacity(body.len() * 2);
     let mut first = true;
@@ -319,6 +378,35 @@ mod tests {
     }
 
     #[test]
+    fn body_needs_encoding_detects_parens() {
+        // After broadening: parens (and other non-safe-set chars) trigger
+        // re-encode even without raw whitespace, because the safe set is
+        // strictly form-urlencoded chars + `+ & = %XX`.
+        assert!(body_needs_form_encoding("query=sum(a)"));
+        assert!(body_needs_form_encoding("query=sum(rate(foo[5m]))"));
+        assert!(body_needs_form_encoding("data={\"a\":1}"));
+    }
+
+    #[test]
+    fn body_needs_encoding_detects_stray_percent() {
+        // `%` not followed by two hex digits is a stray escape char.
+        assert!(body_needs_form_encoding("key=100%complete"));
+        assert!(body_needs_form_encoding("key=foo%"));
+        assert!(body_needs_form_encoding("key=foo%G1bar"));
+        // But a valid `%XX` is fine.
+        assert!(!body_needs_form_encoding("key=foo%2Fbar"));
+    }
+
+    #[test]
+    fn body_needs_encoding_accepts_valid_escapes() {
+        // A body composed entirely of safe-set chars + valid %XX escapes
+        // does NOT need re-encoding.
+        assert!(!body_needs_form_encoding(
+            "query=sum%28foo%29+by+%28pod%29+%2B+1&time=1700000000"
+        ));
+    }
+
+    #[test]
     fn prepare_body_passthrough_when_already_encoded() {
         let body = "query=sum+by+%28pod%29+up&time=1700000000";
         assert_eq!(prepare_request_body(&ct_form(), body), body);
@@ -424,6 +512,83 @@ mod tests {
         let out = prepare_request_body(&ct_form(), body);
         // UTF-8 for é is 0xC3 0xA9 → %C3%A9
         assert_eq!(out, "name=caf%C3%A9");
+    }
+
+    #[test]
+    fn prepare_body_preserves_existing_escapes_when_re_encoding() {
+        // The headline new behavior: a body authored in "minimal-encoded"
+        // form (literal parens, spaces; `%2B` for the literal `+` operator)
+        // must NOT have its `%2B` double-encoded to `%252B` when the
+        // runtime re-encodes the rest of the value.
+        let body = "query=sum(a) %2B sum(b)";
+        let out = prepare_request_body(&ct_form(), body);
+        assert_eq!(out, "query=sum%28a%29+%2B+sum%28b%29");
+    }
+
+    #[test]
+    fn prepare_body_encodes_parens_without_whitespace() {
+        // Pre-fix this would have passed through (no whitespace) and the
+        // server would have received raw parens. Now we encode them.
+        let body = "query=sum(a)";
+        let out = prepare_request_body(&ct_form(), body);
+        assert_eq!(out, "query=sum%28a%29");
+    }
+
+    #[test]
+    fn prepare_body_encodes_json_form_value_without_whitespace() {
+        // From `tryJsonToFormString` in the desktop UI — JSON-shaped
+        // form values with `{"a":1}` and no whitespace must still be
+        // encoded.
+        let body = "payload={\"a\":1}";
+        let out = prepare_request_body(&ct_form(), body);
+        assert_eq!(out, "payload=%7B%22a%22%3A1%7D");
+    }
+
+    #[test]
+    fn prepare_body_encodes_stray_percent() {
+        // Stray `%` (not a valid escape) gets encoded as `%25`.
+        let body = "key=100%complete";
+        let out = prepare_request_body(&ct_form(), body);
+        assert_eq!(out, "key=100%25complete");
+    }
+
+    #[test]
+    fn prepare_body_uppercases_hex_in_preserved_escapes() {
+        // Any `%xx` lowercased hex digits get normalized to uppercase
+        // when the body is re-encoded.
+        let body = "query=a %2b b";
+        let out = prepare_request_body(&ct_form(), body);
+        assert_eq!(out, "query=a+%2B+b");
+    }
+
+    #[test]
+    fn prepare_body_decoded_promql_roundtrips_correctly() {
+        // The end-to-end story: a fully-decoded readable PromQL body
+        // (literal newlines, parens, commas, spaces; `%2B` for `+`)
+        // becomes a valid wire-format body after auto-encoding.
+        let body =
+            "query=quantile_over_time(0.90, (\n  sum(rate(foo[5m]))\n)) %2B 1&time=1700000000";
+        let out = prepare_request_body(&ct_form(), body);
+        // No raw whitespace in the output
+        assert!(!out.contains(' '), "spaces must be encoded: {}", out);
+        assert!(!out.contains('\n'), "newlines must be encoded: {}", out);
+        // Pre-existing `%2B` preserved (not double-encoded)
+        assert!(out.contains("%2B"), "literal + preserved as %2B: {}", out);
+        assert!(!out.contains("%252B"), "no double-encoding: {}", out);
+        // Pair delimiter and first `=` per pair preserved
+        assert!(out.contains("&time=1700000000"), "pair separator preserved: {}", out);
+        assert!(out.starts_with("query="), "kv separator preserved: {}", out);
+    }
+
+    #[test]
+    fn prepare_body_preserves_template_var_lookalike() {
+        // `{{var}}` patterns in form bodies are interpolated by the JS
+        // layer BEFORE the body reaches the runtime, so they should
+        // never appear here in practice. But if they ever do, the runtime
+        // encodes the braces correctly (it doesn't know about templates).
+        let body = "query={{var}}";
+        let out = prepare_request_body(&ct_form(), body);
+        assert_eq!(out, "query=%7B%7Bvar%7D%7D");
     }
 
     #[test]

@@ -1130,25 +1130,33 @@ function decodeFormValue(s) {
   catch { return String(s); }
 }
 
-// Encode a value for a form-urlencoded body. Template variables `{{name}}`
-// are passed through unencoded so variable interpolation still matches.
-// We split the input on `{{...}}` patterns, encode the literal segments,
-// and concatenate them back with the templates intact.
+// Encode a value for a form-urlencoded body in "human-readable" form.
 //
-// `encodeURIComponent` deliberately leaves a handful of "unreserved" chars
-// alone (`!'()~*`). RFC 3986 says they're safe in URI components, but tools
-// that scraped form bodies (e.g. browser DevTools, Azure portal) commonly
-// percent-encode `( ) ! ' ~` to stay on the safe side. We mirror that
-// behavior so values that round-trip (parse -> serialize) stay byte-stable
-// for hand-authored / scraped .http files.
+// Only the chars that have ambiguous semantics in form-urlencoded
+// source files get encoded:
+//   `&` (pair delimiter)  -> %26
+//   `=` (kv delimiter)    -> %3D
+//   `+` (means space)     -> %2B   (so literal `+` round-trips)
+//   `%` (escape start)    -> %25   (so stray `%` doesn't look like an escape)
+//
+// Everything else (spaces, parens, brackets, braces, quotes, commas,
+// newlines, etc.) stays LITERAL for readability. The Pilot runtime
+// auto-encoder (`prepare_request_body`) finishes the job at send time:
+// it preserves any `%XX` in the source and encodes the rest using the
+// `application/x-www-form-urlencoded` rules.
+//
+// Template variables `{{name}}` pass through unencoded so the existing
+// variable-interpolation step keeps matching them.
 function encodeFormValue(s) {
   if (s == null || s === '') return '';
   const parts = String(s).split(/(\{\{[^}]+\}\})/g);
   return parts.map(p => {
     if (p.startsWith('{{') && p.endsWith('}}')) return p;
-    return encodeURIComponent(p)
-      .replace(/%20/g, '+')
-      .replace(/[!'()~]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+    return p
+      .replace(/%/g, '%25')   // escape literal `%` first
+      .replace(/&/g, '%26')   // pair delimiter
+      .replace(/=/g, '%3D')   // kv delimiter
+      .replace(/\+/g, '%2B'); // disambiguate from "encoded space"
   }).join('');
 }
 

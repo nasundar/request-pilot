@@ -757,27 +757,23 @@ GET {{base_url}}/other
 
 **Solution:** Use POST with `Content-Type: application/x-www-form-urlencoded` and put the query in the body. Most query APIs (Prometheus, Grafana, etc.) support both GET and POST.
 
-> ⚠️ **Form-urlencoded bodies must be URL-encoded** — unlike JSON bodies, the wire format requires every value to be percent-encoded (spaces → `+`, newlines → `%0A`, literal `+` operators → `%2B`, parens/quotes/braces → `%XX`). See the **Form-urlencoded body encoding** pitfall below for full rules. Request Pilot will auto-encode raw bodies as a safety net, but you should still author them encoded for portability with other `.http` clients (REST Client, IntelliJ HTTP, curl).
+> 💡 **Authoring `application/x-www-form-urlencoded` bodies in Request Pilot:** prefer **human-readable form** — write spaces, parentheses, brackets, braces, quotes, commas, and newlines as literal characters. Pilot's runtime auto-encodes the body for the wire on send. You only need to encode four characters in your source (`%` `&` `=` `+`) — see the **Form-urlencoded body encoding** section below for the full rules. **Portability note:** decoded bodies require Pilot's runtime auto-encoder; if you also need the file to work in REST Client (VS Code), IntelliJ HTTP, or `curl --data`, you'll need to fully wire-encode the body instead.
 
 ### Form-urlencoded body encoding
-**Problem:** A `.http` body sent as `application/x-www-form-urlencoded` is wire-encoded — every value must be percent-encoded. The most common gotcha is **literal `+` characters** (e.g. PromQL operators between vector expressions): the server URL-decodes `+` → space, so the operator silently vanishes and the query fails to parse.
+**Recommended (Pilot-native):** Author form bodies in **human-readable form** — leave structurally-irrelevant characters (parens, braces, quotes, spaces, newlines, etc.) as literal characters. Pilot's runtime auto-encodes the body before sending: it preserves any `%XX` escape sequences you wrote and encodes everything else per `application/x-www-form-urlencoded` rules. The most common gotcha is **literal `+` characters** (e.g. PromQL operators between vector expressions): the server URL-decodes `+` → space, so the operator silently vanishes. Always write literal `+` as `%2B`.
 
-**Examples of values that MUST be encoded:**
+**Encoding rules for the source `.http` file:**
 
-| Raw character | Encoded |
-|---|---|
-| space | `+` (or `%20`) |
-| `+` (literal operator) | `%2B` |
-| newline (`\n`) | `%0A` |
-| carriage return (`\r`) | `%0D` |
-| `(` `)` | `%28` `%29` |
-| `,` | `%2C` |
-| `=` (inside a value) | `%3D` |
-| `&` (inside a value) | `%26` |
-| `"` | `%22` |
-| `!` | `%21` |
-| `{` `}` | `%7B` `%7D` |
-| non-ASCII (UTF-8) | `%XX%XX...` |
+| Source character | Write as | Why |
+|---|---|---|
+| space, newline, tab | literal | runtime encodes to `+` / `%0A` / `%09` |
+| `(` `)` `[` `]` `{` `}` | literal | runtime encodes to `%XX` |
+| `,` `:` `"` `'` `!` `*` `/` `<` `>` etc. | literal | runtime encodes to `%XX` (or passes through if unreserved) |
+| non-ASCII (e.g. `é`, `中`) | literal | runtime UTF-8 encodes to `%XX%XX...` |
+| `+` (literal `+` operator) | `%2B` | otherwise server decodes to space (silent bug) |
+| `%` (literal `%` character) | `%25` | otherwise looks like the start of an escape |
+| `&` (inside a value) | `%26` | otherwise splits the body into two pairs |
+| `=` (inside a value) | `%3D` | optional — only the FIRST `=` per pair is structural; the runtime preserves later `=` chars in values, but encoding them avoids ambiguity |
 
 Pair delimiters (`&` between pairs) and the FIRST `=` per pair stay unencoded — they're structural.
 
@@ -792,17 +788,33 @@ query=sum by (pod) (
     ({"down"} * 2)
 )&time={{time}}
 ```
-The literal `+` operators decode to spaces server-side → "parse error".
+The literal `+` operator decodes to space server-side → "parse error".
 
-**Correct:**
+**Correct (human-readable, Pilot auto-encodes on send):**
+```http
+POST {{endpoint}}/api/v1/query
+Content-Type: application/x-www-form-urlencoded
+
+query=sum by (pod) (
+    ({"up"} * 1)
+    %2B
+    ({"down"} * 2)
+)&time={{time}}
+```
+
+**Also correct (fully wire-encoded — portable to other `.http` clients):**
 ```http
 POST {{endpoint}}/api/v1/query
 Content-Type: application/x-www-form-urlencoded
 
 query=sum+by+%28pod%29+%28%0A++++%28%7B%22up%22%7D+*+1%29%0A++++%2B%0A++++%28%7B%22down%22%7D+*+2%29%0A%29&time={{time}}
 ```
+Use this form if the `.http` file must run in REST Client, IntelliJ HTTP, `curl`, etc. — those tools don't auto-encode and will send the raw bytes.
 
-**Authoring tip:** when capturing requests via the browser extension or HAR import, the body is captured already wire-encoded by the browser — preserve it verbatim, do NOT decode it for "readability" before writing to the `.http` file. If you're hand-authoring, use any URL-encoding helper (e.g. `encodeURIComponent` in browser devtools) on each value, or write it raw and rely on Request Pilot's runtime safety net (which detects raw whitespace/newlines and auto-encodes — but will only work in Pilot, not other `.http` clients).
+**Authoring tips:**
+- When capturing requests via the browser extension or HAR import, the body is captured already wire-encoded by the browser. **Decode it for readability before writing to the `.http` file** — you can paste it into any URL-decoding helper, then re-encode the four ambiguous chars (`%` `&` `=` `+` if they appear in values) per the table above. Pilot will re-encode on send.
+- When hand-authoring, just write the body the way it reads naturally. Only worry about encoding `+` (when used as a literal operator), `%`, `&`-inside-a-value, and `=`-inside-a-value.
+- `{{var}}` placeholders are interpolated BEFORE the body is encoded, so leave them literal.
 
 ### Variables with empty values
 **Problem:** Variables like `arm_token =` (empty value) are valid — they serve as placeholders that get populated by ``# @@extract` during setup. Don't remove them or add placeholder values that might accidentally be sent.
@@ -868,24 +880,24 @@ query=sum+by+%28pod%29+%28%0A++++%28%7B%22up%22%7D+*+1%29%0A++++%2B%0A++++%28%7B
   GET {{base_url}}/other
   ```
   Note the empty `###` separator before the section comment block — this ensures comments don't leak into the previous test's body.
-- **Use POST with form-urlencoded body for complex query parameters** — if a query value contains spaces, braces, parentheses, or other special characters (e.g., PromQL expressions), use a POST request with the parameters in the body instead of cramming them into the URL query string. **The body MUST be URL-encoded** (spaces → `+`, `+` operators → `%2B`, newlines → `%0A`, parens/quotes/braces → `%XX`) — see the "Form-urlencoded body encoding" pitfall above for full rules:
+- **Use POST with form-urlencoded body for complex query parameters** — if a query value contains spaces, braces, parentheses, or other special characters (e.g., PromQL expressions), use a POST request with the parameters in the body instead of cramming them into the URL query string. **Author the body in human-readable form** — leave structural characters (parens, braces, quotes, spaces, newlines) literal; encode only `%`, `&`-in-values, `=`-in-values, and `+`-as-literal-operator (see the "Form-urlencoded body encoding" section above for full rules). Pilot auto-encodes the body for the wire on send.
   ```http
   # ✗ BAD — spaces and braces in GET query cause issues
   GET {{endpoint}}/api/v1/query_range?query={"system.cpu.time"} * on() group_left up&start={{start}}
 
-  # ✗ BAD — POST with raw (unencoded) body. Server decodes `+` operator to space → parse error.
+  # ✗ BAD — POST with literal `+` operator decoded to space by the server. Parse error.
   POST {{endpoint}}/api/v1/query_range
   Content-Type: application/x-www-form-urlencoded
 
   query={"system.cpu.time"} * on() group_left up + 1&start={{start}}&end={{end}}&step={{step}}
 
-  # ✓ GOOD — POST with form-encoded body
+  # ✓ GOOD — POST with human-readable body. Pilot auto-encodes on send.
   POST {{endpoint}}/api/v1/query_range
   Content-Type: application/x-www-form-urlencoded
 
-  query=%7B%22system.cpu.time%22%7D+*+on%28%29+group_left+up+%2B+1&start={{start}}&end={{end}}&step={{step}}
+  query={"system.cpu.time"} * on() group_left up %2B 1&start={{start}}&end={{end}}&step={{step}}
   ```
-  Note: `{{var}}` placeholders are resolved BEFORE encoding — leave them unencoded in the source. Their resolved values typically contain no special chars in this position. If a variable's resolved value DOES contain special chars (rare), encode the surrounding context but the placeholder itself remains literal `{{var}}` in the source.
+  Note: `{{var}}` placeholders are resolved BEFORE encoding — leave them unencoded in the source. The literal `+` operator must be written `%2B` because `+` means space in form-urlencoded; everything else (spaces, parens, quotes, braces) stays literal.
 - **Body is terminated by trailing comments** — the parser strips trailing comment lines and empty lines from the request body. Do not rely on `#` comments being part of the body. If you need literal `#` content in a body, ensure it is not the last line (add actual body content after it).
 
 ## Example: Analyzing a Code Change
