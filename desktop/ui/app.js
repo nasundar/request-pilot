@@ -1196,21 +1196,28 @@ async function ensureCardVarsLoaded(index) {
 }
 
 async function envPickerLoadFile() {
+  // Use the lightweight HTML <input type="file"> picker (same as the .http
+  // file open flow). On Tauri WebView2 the File object exposes `.path`,
+  // which we forward to the Rust `env_add` command for persistence.
+  const input = document.getElementById('envFileInputHidden');
+  if (!input) return;
+  // Reset value so picking the same file twice still fires `change`.
+  input.value = '';
+  input.click();
+}
+
+async function _handleEnvFilePicked(file) {
+  if (!file) return;
+  const path = file.path || file.name; // Tauri exposes absolute path; bare name is a fallback.
+  if (!path) {
+    showToast('Could not determine file path', 'error');
+    return;
+  }
   try {
-    // Use the Rust-side native picker (rfd via `pick_file_with_dialog`); the
-    // Tauri v2 dialog plugin is not enabled in this app, so we don't try the
-    // window.__TAURI__.dialog path.
-    const path = await invoke('pick_file_with_dialog', {
-      title: 'Load .env file',
-      filters: [['Env Files', 'env'], ['All Files', '*']],
-    });
-    if (!path || typeof path !== 'string') return;
     const res = await invoke('env_add', { path });
     envConfig = normalizeEnvConfig(res.config);
     activeEnvVars = res.active_vars || [];
     syncEnvCardState(true);
-    // Seed the just-added entry's vars from the loaded_vars payload so the
-    // user can expand it immediately without an extra round-trip.
     const addedIdx = envConfig.entries.length - 1;
     if (addedIdx >= 0) {
       if (!envCardState[addedIdx]) envCardState[addedIdx] = defaultCardState();
@@ -5329,6 +5336,18 @@ if (loadEnvBtn) {
     e.stopPropagation();
     await envPickerLoadFile();
   });
+}
+
+// Hidden HTML file input → forwards picked file to Rust env_add.
+{
+  const envFileInputHidden = document.getElementById('envFileInputHidden');
+  if (envFileInputHidden) {
+    envFileInputHidden.addEventListener('change', async (e) => {
+      const file = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (file) await _handleEnvFilePicked(file);
+    });
+  }
 }
 
 

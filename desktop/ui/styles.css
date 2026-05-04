@@ -256,15 +256,30 @@ html, body {
 /* ---------- Env Cards (left sidebar) ---------- */
 .env-section-label {
   font-size: 10px;
-  font-weight: 600;
-  color: var(--text-muted);
+  font-weight: 700;
+  color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  padding: 6px 4px 4px 4px;
-  margin-top: 4px;
+  letter-spacing: 1px;
+  padding: 8px 6px 4px 6px;
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.env-section-label::before {
+  content: '';
+  display: inline-block;
+  width: 3px;
+  height: 10px;
+  background: var(--accent, var(--success, #22c55e));
+  border-radius: 2px;
+  opacity: 0.55;
 }
 .env-section-label:first-child {
   margin-top: 0;
+  border-top: none;
+  padding-top: 4px;
 }
 .env-card {
   border: 1px solid var(--border);
@@ -714,33 +729,41 @@ html, body {
 .sidebar-section-header {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
+  gap: 8px;
+  padding: 10px 12px;
   cursor: pointer;
   user-select: none;
   transition: background var(--transition);
   flex-shrink: 0;
+  background: var(--bg-tertiary, var(--bg-elevated));
+  border-left: 3px solid transparent;
+  border-bottom: 1px solid var(--border);
 }
-.sidebar-section-header:hover { background: var(--bg-tertiary); }
+.sidebar-section.expanded > .sidebar-section-header {
+  border-left-color: var(--accent, var(--success, #22c55e));
+  background: var(--bg-elevated, var(--bg-tertiary));
+}
+.sidebar-section-header:hover { background: var(--bg-hover, var(--bg-tertiary)); filter: brightness(1.08); }
 
 .section-chevron {
-  font-size: 10px;
-  color: var(--text-muted);
+  font-size: 11px;
+  color: var(--text-secondary);
   transition: transform var(--transition);
   width: 12px;
   text-align: center;
 }
 .sidebar-section.expanded > .sidebar-section-header .section-chevron {
   transform: rotate(90deg);
+  color: var(--accent, var(--success, #22c55e));
 }
 
-.section-icon { font-size: 13px; }
+.section-icon { font-size: 14px; }
 .section-title {
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: .8px;
-  color: var(--text-secondary);
+  letter-spacing: 1px;
+  color: var(--text-primary);
   flex: 1;
 }
 
