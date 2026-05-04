@@ -974,7 +974,124 @@ document.addEventListener('click', (e) => {
 extraHeadersList.appendChild(createExtraHeaderRow());
 
 // --- Body type toggle ---
-bodyType.addEventListener('change', () => {
+//
+// The dropdown is the user's authoritative declaration of body format.
+// When it changes (user-initiated), we:
+//   1. Update the Content-Type header to match (json -> application/json,
+//      form -> application/x-www-form-urlencoded). 'text' leaves any custom
+//      CT alone (could be text/xml, text/plain, etc.); 'none' strips the CT
+//      only if it was previously json/form so we don't clobber custom values.
+//   2. Best-effort transform the body (JSON pretty-print; convert between
+//      JSON and form-urlencoded when it makes sense).
+//   3. Re-highlight using the new format.
+// Synthetic events from `dispatchEvent(new Event('change'))` (e.g. during
+// loadBlock) skip the mutation steps and just sync visual state.
+function bodyTypeForContentType(ct) {
+  if (!ct) return null;
+  const v = String(ct).toLowerCase();
+  if (v.includes('application/json')) return 'json';
+  if (v.includes('application/x-www-form-urlencoded')) return 'form';
+  if (v.startsWith('text/') || v.includes('xml') || v.includes('plain')) return 'text';
+  return null;
+}
+
+function pickBodyType(headers, body) {
+  if (!body || !body.trim()) return 'none';
+  if (Array.isArray(headers)) {
+    for (const h of headers) {
+      const k = Array.isArray(h) ? h[0] : null;
+      const v = Array.isArray(h) ? h[1] : null;
+      if (k && k.toLowerCase() === 'content-type') {
+        const bt = bodyTypeForContentType(v);
+        if (bt) return bt;
+      }
+    }
+  }
+  const t = body.trim();
+  if (t.startsWith('{') || t.startsWith('[')) return 'json';
+  return 'text';
+}
+
+function findContentTypeRow() {
+  const rows = headersContainer.querySelectorAll('.kv-row');
+  for (const row of rows) {
+    const k = row.querySelector('.kv-key')?.value?.trim().toLowerCase();
+    if (k === 'content-type') return row;
+  }
+  return null;
+}
+
+function setContentTypeHeaderUI(value) {
+  const existing = findContentTypeRow();
+  if (existing) {
+    const valInput = existing.querySelector('.kv-value');
+    if (valInput && valInput.value !== value) valInput.value = value;
+    const toggle = existing.querySelector('.kv-toggle');
+    if (toggle && !toggle.checked) toggle.checked = true;
+    return;
+  }
+  // Reuse the first empty row if present, else append a new one.
+  const rows = headersContainer.querySelectorAll('.kv-row');
+  for (const r of rows) {
+    const key = r.querySelector('.kv-key')?.value?.trim();
+    const v = r.querySelector('.kv-value')?.value?.trim();
+    if (!key && !v) {
+      r.querySelector('.kv-key').value = 'Content-Type';
+      r.querySelector('.kv-value').value = value;
+      const toggle = r.querySelector('.kv-toggle');
+      if (toggle) toggle.checked = true;
+      return;
+    }
+  }
+  headersContainer.appendChild(createHeaderRow('Content-Type', value));
+}
+
+function removeJsonOrFormContentTypeUI() {
+  const row = findContentTypeRow();
+  if (!row) return;
+  const v = row.querySelector('.kv-value')?.value?.trim().toLowerCase();
+  if (!v) return;
+  if (v.includes('application/json') || v.includes('application/x-www-form-urlencoded')) {
+    row.remove();
+    if (headersContainer.children.length === 0) headersContainer.appendChild(createHeaderRow());
+  }
+}
+
+function tryFormToJsonString(text) {
+  if (!text || !text.includes('=')) return null;
+  const obj = {};
+  let count = 0;
+  for (const pair of text.split('&')) {
+    if (!pair) continue;
+    const idx = pair.indexOf('=');
+    const k = idx >= 0 ? pair.slice(0, idx) : pair;
+    const v = idx >= 0 ? pair.slice(idx + 1) : '';
+    let dk = k, dv = v;
+    try { dk = decodeURIComponent(k.replace(/\+/g, ' ')); } catch { /* keep raw */ }
+    try { dv = decodeURIComponent(v.replace(/\+/g, ' ')); } catch { /* keep raw */ }
+    if (!dk) continue;
+    obj[dk] = dv;
+    count++;
+  }
+  if (count === 0) return null;
+  return JSON.stringify(obj, null, 2);
+}
+
+function tryJsonToFormString(text) {
+  let obj;
+  try { obj = JSON.parse(text); } catch { return null; }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  const parts = [];
+  for (const [k, v] of Object.entries(obj)) {
+    const sv = (v === null || v === undefined) ? ''
+             : (typeof v === 'object') ? JSON.stringify(v)
+             : String(v);
+    parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(sv)}`);
+  }
+  return parts.join('&');
+}
+
+bodyType.addEventListener('change', (event) => {
   bodyInput.disabled = bodyType.value === 'none';
   if (bodyType.value === 'json') {
     bodyInput.placeholder = '{\n  "key": "value"\n}';
@@ -985,11 +1102,45 @@ bodyType.addEventListener('change', () => {
   } else {
     bodyInput.placeholder = 'Request body...';
   }
+
+  // Only mutate headers / body when the user actually flipped the dropdown.
+  // Synthetic events (during loadBlock / viewCompareStep) are visual-only.
+  if (event && event.isTrusted) {
+    const current = bodyInput.value.trim();
+    if (bodyType.value === 'json') {
+      setContentTypeHeaderUI('application/json');
+      if (current) {
+        try {
+          bodyInput.value = JSON.stringify(JSON.parse(current), null, 2);
+        } catch {
+          const asJson = tryFormToJsonString(current);
+          if (asJson) bodyInput.value = asJson;
+        }
+      }
+    } else if (bodyType.value === 'form') {
+      setContentTypeHeaderUI('application/x-www-form-urlencoded');
+      if (current && (current.startsWith('{') || current.startsWith('['))) {
+        const asForm = tryJsonToFormString(current);
+        if (asForm !== null) bodyInput.value = asForm;
+      }
+    } else if (bodyType.value === 'none') {
+      removeJsonOrFormContentTypeUI();
+    }
+    // 'text' leaves headers and body alone — user may want a custom CT.
+    scheduleLiveBuilderFlush();
+  }
+
   highlightBody();
 });
 
 // --- Body Syntax Highlighting ---
 function detectBodyLang(text) {
+  // The body-type dropdown is authoritative for json/form. For 'text' or
+  // 'none' we sniff from the body content (so SQL, XML, PromQL etc. still
+  // get nice highlighting even though they all share the "Raw Text" type).
+  const bt = (typeof bodyType !== 'undefined' && bodyType) ? bodyType.value : null;
+  if (bt === 'json') return 'json';
+  if (bt === 'form') return 'form';
   const t = text.trim();
   if (!t) return 'text';
   if (t.startsWith('{') || t.startsWith('[')) return 'json';
@@ -1041,6 +1192,25 @@ function hlPromQL(text) {
     .replace(/([{}[\]()])/g, '<span class="hl-bkt">$1</span>');
 }
 
+function hlForm(text) {
+  // Highlights `key=value&key=value` form-urlencoded bodies. `text` is
+  // already HTML-escaped so '&' is '&amp;', '"' is '&quot;', etc.
+  // Splitting on '&amp;' gives us per-pair fragments; each fragment is
+  // colored as: key (attr) `=` (punctuation) value (string).
+  const pairs = text.split('&amp;');
+  const colored = pairs.map(pair => {
+    const eqIdx = pair.indexOf('=');
+    if (eqIdx < 0) return `<span class="hl-attr">${pair}</span>`;
+    const key = pair.slice(0, eqIdx);
+    const val = pair.slice(eqIdx + 1);
+    return `<span class="hl-attr">${key}</span>` +
+           `<span class="hl-pct">=</span>` +
+           `<span class="hl-str">${val}</span>`;
+  }).join('<span class="hl-pct">&amp;</span>');
+  // Highlight {{template}} variables on top of the structural coloring.
+  return colored.replace(/(\{\{[^}]+\}\})/g, '<span class="hl-num">$1</span>');
+}
+
 function highlightBody() {
   const text = bodyInput.value;
   const codeEl = bodyHighlight.querySelector('code');
@@ -1062,6 +1232,7 @@ function highlightBody() {
     case 'xml':    codeEl.innerHTML = hlXML(escaped); break;
     case 'sql':    codeEl.innerHTML = hlSQL(escaped); break;
     case 'promql': codeEl.innerHTML = hlPromQL(escaped); break;
+    case 'form':   codeEl.innerHTML = hlForm(escaped); break;
     default:       codeEl.innerHTML = escaped;
   }
   bodyHighlight.scrollTop = bodyInput.scrollTop;
@@ -4140,8 +4311,7 @@ function selectBlock(fileIdx, blockIdx) {
       }
 
       if (req.body) {
-        const isJson = req.body.trim().startsWith('{') || req.body.trim().startsWith('[');
-        bodyType.value = isJson ? 'json' : 'text';
+        bodyType.value = pickBodyType(req.headers, req.body);
         bodyInput.value = req.body;
         bodyInput.disabled = false;
       } else {
@@ -4879,8 +5049,7 @@ function viewCompareStep(fileIdx, blockIdx, stepIdx) {
       headersContainer.appendChild(createHeaderRow());
     }
     if (step.request.body) {
-      const isJson = step.request.body.trim().startsWith('{') || step.request.body.trim().startsWith('[');
-      bodyType.value = isJson ? 'json' : 'text';
+      bodyType.value = pickBodyType(step.request.headers, step.request.body);
       bodyInput.value = step.request.body;
       bodyInput.disabled = false;
     } else {
