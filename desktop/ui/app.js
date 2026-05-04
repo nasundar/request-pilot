@@ -7468,12 +7468,14 @@ function highlightJsonLine(line) {
   return highlightVariables(result);
 }
 
-function highlightHttpCode(text) {
+function highlightHttpCode(text, activeBlockLineStart) {
   const lines = text.split('\n');
   let inJsonBody = false;
   let inVariablesBlock = false;
+  const wantActiveBlock = typeof activeBlockLineStart === 'number' && activeBlockLineStart >= 0;
 
-  return lines.map(line => {
+  return lines.map((line, idx) => {
+    let html;
     // Separator lines: ### or --- (line-anchored, followed by space or EOL)
     if (/^###(\s|$)/.test(line) || /^---(\s|$)/.test(line)) {
       inJsonBody = false;
@@ -7483,95 +7485,103 @@ function highlightHttpCode(text) {
       const btMatch = escaped.match(/(@@?(?:setup|test|teardown|variables))\b/);
       if (btMatch) {
         const highlighted = escaped.replace(btMatch[1], `<span class="hl-block-type">${btMatch[1]}</span>`);
-        return `<span class="hl-separator">${highlightVariables(highlighted)}</span>`;
+        html = `<span class="hl-separator">${highlightVariables(highlighted)}</span>`;
+      } else {
+        html = `<span class="hl-separator">${highlightVariables(escaped)}</span>`;
       }
-      return `<span class="hl-separator">${highlightVariables(escaped)}</span>`;
     }
-
     // @variables at start of line (legacy block header)
-    if (/^@variables\b/.test(line)) {
+    else if (/^@variables\b/.test(line)) {
       inJsonBody = false;
       inVariablesBlock = true;
       const escaped = escapeHtml(line);
-      return escaped.replace(/^(@variables)/, '<span class="hl-block-type">$1</span>');
+      html = escaped.replace(/^(@variables)/, '<span class="hl-block-type">$1</span>');
     }
-
     // Variable assignment lines inside legacy @variables block: "name = value"
-    if (inVariablesBlock && /^\w+\s*=/.test(line)) {
+    else if (inVariablesBlock && /^\w+\s*=/.test(line)) {
       const escaped = escapeHtml(line);
-      return highlightVariables(escaped.replace(/^(\w+)(\s*=\s*)(.*)$/, '<span class="hl-header-name">$1</span><span class="hl-operator">$2</span><span class="hl-header-value">$3</span>'));
+      html = highlightVariables(escaped.replace(/^(\w+)(\s*=\s*)(.*)$/, '<span class="hl-header-name">$1</span><span class="hl-operator">$2</span><span class="hl-header-value">$3</span>'));
     }
-
-    // Pilot directive comment lines: # @x, # @@x, // @x, // @@x
-    //   for any known Pilot directive. Accept both legacy and new @@ syntax.
-    const directiveRe = /^(?:#|\/\/)\s*@@?(assert|extract|name|description|note|group|depends|mode|dev_auth|disabled|type|compare|step|diff|auto_run|telemetry|telemetry_token|telemetry_service|prompt)\b/;
-    if (directiveRe.test(line)) {
+    // Pilot directive comment lines: # @x, # @@x, // @x, // @@x for any known
+    // Pilot directive. Accept both legacy and new @@ syntax.
+    else if (/^(?:#|\/\/)\s*@@?(assert|extract|name|description|note|group|depends|mode|dev_auth|disabled|type|compare|step|diff|auto_run|telemetry|telemetry_token|telemetry_service|prompt)\b/.test(line)) {
       inJsonBody = false;
       const escaped = escapeHtml(line);
       // @@disabled gets a distinct style
       if (/^(?:#|\/\/)\s*@@?disabled\s*$/.test(line)) {
-        return `<span class="hl-disabled">${escaped}</span>`;
+        html = `<span class="hl-disabled">${escaped}</span>`;
+      } else {
+        const withOps = escaped.replace(/(==|!=|&gt;=|&lt;=|&gt;|&lt;|contains|matches|exists|isType)/g, '<span class="hl-operator">$1</span>');
+        html = highlightVariables(`<span class="hl-directive">${withOps}</span>`);
       }
-      const withOps = escaped.replace(/(==|!=|&gt;=|&lt;=|&gt;|&lt;|contains|matches|exists|isType)/g, '<span class="hl-operator">$1</span>');
-      return highlightVariables(`<span class="hl-directive">${withOps}</span>`);
     }
-
     // Comment lines: # or // (non-directive)
-    if (/^#/.test(line) || /^\/\//.test(line)) {
+    else if (/^#/.test(line) || /^\/\//.test(line)) {
       inJsonBody = false;
-      return `<span class="hl-comment">${highlightVariables(escapeHtml(line))}</span>`;
+      html = `<span class="hl-comment">${highlightVariables(escapeHtml(line))}</span>`;
     }
-
     // Top-level variable assignment: @name = value  (REST Client native)
-    if (/^@\w+\s*=/.test(line)) {
+    else if (/^@\w+\s*=/.test(line)) {
       inJsonBody = false;
       const escaped = escapeHtml(line);
-      return highlightVariables(escaped.replace(/^(@\w+)(\s*=\s*)(.*)$/, '<span class="hl-header-name">$1</span><span class="hl-operator">$2</span><span class="hl-header-value">$3</span>'));
+      html = highlightVariables(escaped.replace(/^(@\w+)(\s*=\s*)(.*)$/, '<span class="hl-header-name">$1</span><span class="hl-operator">$2</span><span class="hl-header-value">$3</span>'));
     }
-
     // Bare REST Client directive: @name foo, @description ..., @note ..., @prompt VAR description (no '=')
-    if (/^@(name|description|note|prompt)\b/.test(line)) {
+    else if (/^@(name|description|note|prompt)\b/.test(line)) {
       inJsonBody = false;
-      return `<span class="hl-directive">${highlightVariables(escapeHtml(line))}</span>`;
+      html = `<span class="hl-directive">${highlightVariables(escapeHtml(line))}</span>`;
+    }
+    else {
+      // HTTP method lines: METHOD URL
+      const methodMatch = line.match(/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(.*)$/);
+      if (methodMatch) {
+        inJsonBody = false;
+        inVariablesBlock = false;
+        html = `<span class="hl-method">${escapeHtml(methodMatch[1])}</span> ${highlightVariables(escapeHtml(methodMatch[2]).replace(/^(\S+)/, '<span class="hl-url">$1</span>'))}`;
+      }
+      // Header lines: Name: value (only when not in JSON body)
+      else if (!inJsonBody && /^[A-Za-z][\w-]*\s*:/.test(line)) {
+        const colonIdx = line.indexOf(':');
+        const name = line.substring(0, colonIdx);
+        const value = line.substring(colonIdx + 1);
+        html = `<span class="hl-header-name">${escapeHtml(name)}</span>:${highlightVariables(`<span class="hl-header-value">${escapeHtml(value)}</span>`)}`;
+      }
+      else {
+        // Detect start of JSON body
+        if (/^\s*[\[{]/.test(line)) {
+          inJsonBody = true;
+        }
+        // JSON body or blank lines
+        if (inJsonBody) {
+          html = highlightJsonLine(line);
+        } else {
+          // Blank or unrecognized lines
+          if (line.trim() === '') {
+            inJsonBody = false;
+            if (inVariablesBlock) inVariablesBlock = false;
+          }
+          html = highlightVariables(escapeHtml(line));
+        }
+      }
     }
 
-    // HTTP method lines: METHOD URL
-    const methodMatch = line.match(/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(.*)$/);
-    if (methodMatch) {
-      inJsonBody = false;
-      inVariablesBlock = false;
-      return `<span class="hl-method">${escapeHtml(methodMatch[1])}</span> ${highlightVariables(escapeHtml(methodMatch[2]).replace(/^(\S+)/, '<span class="hl-url">$1</span>'))}`;
+    // Fold active-block marker into the same pass to avoid a second
+    // innerHTML rebuild later. Wraps the start-of-block separator line only.
+    if (wantActiveBlock && idx === activeBlockLineStart) {
+      html = `<span class="hl-active-block-start">${html}</span>`;
     }
-
-    // Header lines: Name: value (only when not in JSON body)
-    if (!inJsonBody && /^[A-Za-z][\w-]*\s*:/.test(line)) {
-      const colonIdx = line.indexOf(':');
-      const name = line.substring(0, colonIdx);
-      const value = line.substring(colonIdx + 1);
-      return `<span class="hl-header-name">${escapeHtml(name)}</span>:${highlightVariables(`<span class="hl-header-value">${escapeHtml(value)}</span>`)}`;
-    }
-
-    // Detect start of JSON body
-    if (/^\s*[\[{]/.test(line)) {
-      inJsonBody = true;
-    }
-
-    // JSON body or blank lines
-    if (inJsonBody) {
-      return highlightJsonLine(line);
-    }
-
-    // Blank or unrecognized lines
-    if (line.trim() === '') {
-      inJsonBody = false;
-      if (inVariablesBlock) inVariablesBlock = false;
-    }
-    return highlightVariables(escapeHtml(line));
+    return html;
   }).join('\n');
 }
 
+// Cached previous line count so we can skip rewriting the gutter when
+// keystrokes don't change the number of lines.
+let _lastLineNumberCount = -1;
+
 function updateLineNumbers(text) {
   const count = text.split('\n').length;
+  if (count === _lastLineNumberCount) return;
+  _lastLineNumberCount = count;
   const nums = [];
   for (let i = 1; i <= count; i++) nums.push(i);
   codeLineNumbers.textContent = nums.join('\n');
@@ -7579,10 +7589,24 @@ function updateLineNumbers(text) {
 
 function updateHighlight() {
   const text = codeEditor.value;
-  codeEditorHighlightCode.innerHTML = highlightHttpCode(text) + '\n';
-  applyBlockHighlight();
+  // Single innerHTML rebuild — active-block class is folded into the same pass.
+  codeEditorHighlightCode.innerHTML = highlightHttpCode(text, activeBlockLineStart) + '\n';
   updateLineNumbers(text);
   syncEditorScroll();
+}
+
+// rAF-coalesced highlight scheduler. Multiple keystrokes / undo ticks within
+// a single animation frame share one render. The textarea always reflects
+// the user's input synchronously (browser native); only the colored overlay
+// is deferred by at most one frame (~16ms — imperceptible).
+let _highlightRafPending = false;
+function requestHighlightUpdate() {
+  if (_highlightRafPending) return;
+  _highlightRafPending = true;
+  requestAnimationFrame(() => {
+    _highlightRafPending = false;
+    updateHighlight();
+  });
 }
 
 function syncEditorScroll() {
@@ -7628,7 +7652,7 @@ function scrollCodeEditorToActiveBlock() {
   if (activeBlockIndex < 0) {
     activeBlockLineStart = -1;
     activeBlockLineEnd = -1;
-    clearBlockHighlight();
+    updateHighlight();
     hideJumpBack();
     return;
   }
@@ -7639,7 +7663,7 @@ function scrollCodeEditorToActiveBlock() {
   if (!range) {
     activeBlockLineStart = -1;
     activeBlockLineEnd = -1;
-    clearBlockHighlight();
+    updateHighlight();
     hideJumpBack();
     return;
   }
@@ -7652,28 +7676,18 @@ function scrollCodeEditorToActiveBlock() {
   const padding = 16;
   const targetScroll = (range.start * lineHeight) + padding - 40; // 40px breathing room above
   codeEditor.scrollTop = Math.max(0, targetScroll);
-  syncEditorScroll();
 
-  applyBlockHighlight();
+  // Re-render with the new active-block class folded in. updateHighlight()
+  // also calls syncEditorScroll() internally, so the overlay scroll position
+  // tracks the textarea after the scrollTop assignment above.
+  updateHighlight();
 }
 
-function applyBlockHighlight() {
-  if (activeBlockLineStart < 0) return;
-  const codeEl = codeEditorHighlightCode;
-  const lines = codeEl.innerHTML.split('\n');
-  for (let i = activeBlockLineStart; i <= activeBlockLineEnd && i < lines.length; i++) {
-    // Wrap the line in a highlight span if it's the separator line
-    if (i === activeBlockLineStart) {
-      lines[i] = `<span class="hl-active-block-start">${lines[i]}</span>`;
-    }
-  }
-  codeEl.innerHTML = lines.join('\n');
-}
-
-function clearBlockHighlight() {
-  const codeEl = codeEditorHighlightCode;
-  codeEl.innerHTML = codeEl.innerHTML.replace(/<span class="hl-active-block-start">([\s\S]*?)<\/span>/g, '$1');
-}
+// Kept as compat aliases — the active-block class is now folded into
+// updateHighlight() so a single full re-render handles both apply and
+// clear cases via the activeBlockLineStart state.
+function applyBlockHighlight() { updateHighlight(); }
+function clearBlockHighlight() { updateHighlight(); }
 
 function updateJumpBackIndicator() {
   const indicator = document.getElementById('codeJumpBack');
@@ -7771,7 +7785,10 @@ function scheduleLiveCodeParse() {
 codeEditor.addEventListener('input', () => {
   codeEditorModified = codeEditor.value !== codeEditorContent;
   codeEditor.classList.toggle('modified', codeEditorModified);
-  updateHighlight();
+  // rAF-coalesced — keystrokes/undo bursts share one render per frame.
+  // The textarea always shows input synchronously (browser native);
+  // only the colored overlay defers by at most one frame.
+  requestHighlightUpdate();
   scheduleLiveCodeParse();
 });
 
