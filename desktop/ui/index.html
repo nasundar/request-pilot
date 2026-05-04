@@ -468,6 +468,13 @@
                 <pre class="body-highlight" id="bodyHighlight"><code></code></pre>
                 <textarea id="bodyInput" class="body-input" placeholder="Request body..." spellcheck="false" disabled></textarea>
               </div>
+              <div class="body-form-editor hidden" id="bodyFormEditor">
+                <div class="form-fields-list" id="formFieldsList"></div>
+                <div class="form-editor-actions">
+                  <button id="addFormFieldBtn" class="btn btn-ghost btn-sm add-row-btn" type="button">+ Add Field</button>
+                  <button id="toggleFormRawBtn" class="btn btn-ghost btn-sm form-raw-toggle" type="button" title="Show the URL-encoded wire-format string">Edit raw</button>
+                </div>
+              </div>
             </div>
             <div class="sub-content" id="subtab-req-directives">
               <div id="builderDirectivesContent" class="builder-directives-content"></div>

@@ -416,6 +416,10 @@ const bodyType        = $('#bodyType');
 const bodyInput       = $('#bodyInput');
 const bodyHighlight   = $('#bodyHighlight');
 const bodyEditorWrap  = $('#bodyEditorWrapper');
+const bodyFormEditor  = $('#bodyFormEditor');
+const formFieldsList  = $('#formFieldsList');
+const addFormFieldBtn = $('#addFormFieldBtn');
+const toggleFormRawBtn = $('#toggleFormRawBtn');
 const responseEmpty   = $('#responseEmpty');
 const responseContent = $('#responseContent');
 const responseMeta    = $('#responseMeta');
@@ -1086,9 +1090,184 @@ function tryJsonToFormString(text) {
     const sv = (v === null || v === undefined) ? ''
              : (typeof v === 'object') ? JSON.stringify(v)
              : String(v);
-    parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(sv)}`);
+    // Preserve {{var}} template patterns so variable interpolation still matches
+    parts.push(`${encodeFormValue(k)}=${encodeFormValue(sv)}`);
   }
   return parts.join('&');
+}
+
+// --- Form URL-Encoded body editor (key-value table view) ---
+//
+// Renders the body as a Postman-style kv-table when bodyType === 'form'.
+// The textarea (`bodyInput`) remains the source of truth for everything
+// else — send, save, variable interpolation, autosave. The table is just a
+// view that round-trips through it: parse the wire-format string into rows
+// on activation, serialize rows back into `bodyInput.value` on every edit.
+//
+// `{{var_name}}` template variables are exempted from URL-encoding so the
+// existing variable-interpolation step (which runs on the body string before
+// send) keeps matching them. They sit literally in the underlying body.
+
+let formRawMode = false; // when true, show textarea even though type === 'form'
+
+// Decode a URL-encoded form-urlencoded value (handles `+` as space).
+// Falls back to the raw string if it contains malformed sequences (rare,
+// only happens with hand-edited bodies that have stray `%` characters).
+function decodeFormValue(s) {
+  if (s == null) return '';
+  try { return decodeURIComponent(String(s).replace(/\+/g, ' ')); }
+  catch { return String(s); }
+}
+
+// Encode a value for a form-urlencoded body. Template variables `{{name}}`
+// are passed through unencoded so variable interpolation still matches.
+// We split the input on `{{...}}` patterns, encode the literal segments,
+// and concatenate them back with the templates intact.
+//
+// `encodeURIComponent` deliberately leaves a handful of "unreserved" chars
+// alone (`!'()~*`). RFC 3986 says they're safe in URI components, but tools
+// that scraped form bodies (e.g. browser DevTools, Azure portal) commonly
+// percent-encode `( ) ! ' ~` to stay on the safe side. We mirror that
+// behavior so values that round-trip (parse -> serialize) stay byte-stable
+// for hand-authored / scraped .http files.
+function encodeFormValue(s) {
+  if (s == null || s === '') return '';
+  const parts = String(s).split(/(\{\{[^}]+\}\})/g);
+  return parts.map(p => {
+    if (p.startsWith('{{') && p.endsWith('}}')) return p;
+    return encodeURIComponent(p)
+      .replace(/%20/g, '+')
+      .replace(/[!'()~]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+  }).join('');
+}
+
+// Parse a form-urlencoded body string into [{key, value, enabled}] rows.
+function parseFormBody(s) {
+  if (!s) return [];
+  const rows = [];
+  for (const pair of String(s).split('&')) {
+    if (!pair) continue;
+    const eq = pair.indexOf('=');
+    const k = eq >= 0 ? pair.slice(0, eq) : pair;
+    const v = eq >= 0 ? pair.slice(eq + 1) : '';
+    rows.push({ key: decodeFormValue(k), value: decodeFormValue(v), enabled: true });
+  }
+  return rows;
+}
+
+// Serialize [{key, value, enabled}] rows back into a form-urlencoded body.
+function serializeFormBody(rows) {
+  return rows
+    .filter(r => r && r.enabled !== false && (r.key || '').length > 0)
+    .map(r => `${encodeFormValue(r.key)}=${encodeFormValue(r.value)}`)
+    .join('&');
+}
+
+// Read all rows currently in the DOM into row objects.
+function readFormFieldRows() {
+  const rows = [];
+  formFieldsList.querySelectorAll('.kv-row').forEach(row => {
+    rows.push({
+      enabled: row.querySelector('.kv-toggle')?.checked ?? true,
+      key:     row.querySelector('.kv-key')?.value ?? '',
+      value:   row.querySelector('.kv-value-area')?.value ?? '',
+    });
+  });
+  return rows;
+}
+
+// Push the current table state back into bodyInput.value and the file model.
+function flushFormTableToBody() {
+  const serialized = serializeFormBody(readFormFieldRows());
+  if (bodyInput.value !== serialized) {
+    bodyInput.value = serialized;
+    // Don't re-highlight while user is typing in the table — the textarea is
+    // hidden anyway. We do flush to the .http file model.
+    scheduleLiveBuilderFlush();
+  }
+}
+
+function autoGrowTextarea(ta) {
+  ta.style.height = 'auto';
+  // Cap height so a giant PromQL query doesn't push the action buttons off-screen
+  ta.style.height = Math.min(ta.scrollHeight, 280) + 'px';
+}
+
+function createFormFieldRow(key = '', value = '', enabled = true) {
+  const row = document.createElement('div');
+  row.className = 'kv-row';
+  row.innerHTML = `
+    <input type="checkbox" class="kv-toggle" ${enabled ? 'checked' : ''} title="Enable this field">
+    <input type="text" class="kv-key" placeholder="Field name" value="${escapeAttr(key)}" spellcheck="false">
+    <textarea class="kv-value-area" placeholder="Field value" spellcheck="false" rows="1"></textarea>
+    <button class="btn-icon kv-remove" title="Remove">&times;</button>
+  `;
+  // Set textarea value via property (avoids HTML-escape gotchas with multi-line text)
+  row.querySelector('.kv-value-area').value = value;
+  row.querySelector('.kv-remove').addEventListener('click', () => {
+    row.remove();
+    if (formFieldsList.children.length === 0) formFieldsList.appendChild(createFormFieldRow());
+    flushFormTableToBody();
+  });
+  row.querySelector('.kv-toggle').addEventListener('change', flushFormTableToBody);
+  row.querySelector('.kv-key').addEventListener('input', flushFormTableToBody);
+  const valEl = row.querySelector('.kv-value-area');
+  valEl.addEventListener('input', () => { autoGrowTextarea(valEl); flushFormTableToBody(); });
+  // Initial grow once we know the value's height
+  requestAnimationFrame(() => autoGrowTextarea(valEl));
+  return row;
+}
+
+function renderFormTableFromBody() {
+  formFieldsList.innerHTML = '';
+  const rows = parseFormBody(bodyInput.value);
+  if (rows.length === 0) {
+    formFieldsList.appendChild(createFormFieldRow());
+  } else {
+    rows.forEach(r => formFieldsList.appendChild(createFormFieldRow(r.key, r.value, r.enabled)));
+  }
+}
+
+function showFormEditor() {
+  if (formRawMode) {
+    bodyEditorWrap.classList.remove('hidden');
+    bodyFormEditor.classList.add('hidden');
+    return;
+  }
+  bodyEditorWrap.classList.add('hidden');
+  bodyFormEditor.classList.remove('hidden');
+  renderFormTableFromBody();
+}
+
+function hideFormEditor() {
+  bodyFormEditor.classList.add('hidden');
+  bodyEditorWrap.classList.remove('hidden');
+}
+
+if (addFormFieldBtn) {
+  addFormFieldBtn.addEventListener('click', () => {
+    formFieldsList.appendChild(createFormFieldRow());
+    flushFormTableToBody();
+  });
+}
+if (toggleFormRawBtn) {
+  toggleFormRawBtn.addEventListener('click', () => {
+    if (bodyType.value !== 'form') return;
+    formRawMode = !formRawMode;
+    toggleFormRawBtn.classList.toggle('active', formRawMode);
+    toggleFormRawBtn.textContent = formRawMode ? 'Edit fields' : 'Edit raw';
+    if (formRawMode) {
+      // Switching to raw — body is already in sync from the table edits.
+      bodyFormEditor.classList.add('hidden');
+      bodyEditorWrap.classList.remove('hidden');
+      highlightBody();
+    } else {
+      // Switching back to table — re-parse the (possibly edited) raw body.
+      bodyEditorWrap.classList.add('hidden');
+      bodyFormEditor.classList.remove('hidden');
+      renderFormTableFromBody();
+    }
+  });
 }
 
 bodyType.addEventListener('change', (event) => {
@@ -1128,6 +1307,22 @@ bodyType.addEventListener('change', (event) => {
     }
     // 'text' leaves headers and body alone — user may want a custom CT.
     scheduleLiveBuilderFlush();
+  }
+
+  // Swap views: form-table for 'form' (unless raw mode is toggled), textarea otherwise.
+  if (bodyType.value === 'form') {
+    showFormEditor();
+  } else {
+    // Leaving form mode — reset the raw-toggle state so re-entering form
+    // mode lands on the table view by default.
+    if (formRawMode) {
+      formRawMode = false;
+      if (toggleFormRawBtn) {
+        toggleFormRawBtn.classList.remove('active');
+        toggleFormRawBtn.textContent = 'Edit raw';
+      }
+    }
+    hideFormEditor();
   }
 
   highlightBody();
