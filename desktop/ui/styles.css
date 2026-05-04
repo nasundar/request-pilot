@@ -2196,6 +2196,9 @@ html, body {
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
+  /* Allow clicks to reach descendants. The wrapper itself is invisible to
+     pointer events so it can never accidentally swallow them. */
+  pointer-events: none;
 }
 .var-overlay-wrapper > input,
 .var-overlay-wrapper > textarea {
@@ -2203,6 +2206,9 @@ html, body {
   min-width: 0;
   position: relative;
   z-index: 1;
+  /* Re-enable pointer events on the actual input — this is the only
+     element in the overlay tree the user can interact with. */
+  pointer-events: auto;
 }
 .var-overlay {
   position: absolute;
@@ -2222,6 +2228,7 @@ html, body {
   font-family: var(--font-mono);
   box-sizing: border-box;
   user-select: none;
+  pointer-events: none;
   /* Default: single-line. Auto-grow horizontally with content so overlay
      scroll-syncing works for long URLs. */
   width: max-content;
