@@ -2183,6 +2183,91 @@ html, body {
 .body-input:disabled { opacity: .4; cursor: not-allowed; }
 .body-input::placeholder { color: var(--text-muted); }
 
+/* ---------- {{variable}} reference highlighting ----------
+   Used in URL bar, header value cells, param value cells, and form-field
+   value textareas. A transparent-text mirror sits behind the input and
+   draws colored chips under each `{{var}}` reference. The input keeps
+   pointer-events; the chip is decoration only. The resolved variable
+   values are surfaced via the input's `title` attribute so the user can
+   hover the input to see them — that avoids blocking clicks on chips
+   for cursor positioning. */
+.var-overlay-wrapper {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.var-overlay-wrapper > input,
+.var-overlay-wrapper > textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  position: relative;
+  z-index: 1;
+}
+.var-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  border: 1px solid transparent;        /* match input border so padding aligns */
+  border-radius: var(--radius-xs);
+  box-sizing: border-box;
+}
+.var-mirror {
+  display: block;
+  height: 100%;
+  margin: 0;
+  white-space: pre;
+  color: transparent;
+  font-family: var(--font-mono);
+  box-sizing: border-box;
+  user-select: none;
+  /* Default: single-line. Auto-grow horizontally with content so overlay
+     scroll-syncing works for long URLs. */
+  width: max-content;
+  min-width: 100%;
+}
+.hl-var {
+  background: rgba(255, 165, 0, 0.20);
+  border-bottom: 1px dashed rgba(255, 165, 0, 0.55);
+  border-radius: 2px;
+  padding: 0 1px;
+  pointer-events: none;
+  color: transparent;
+}
+/* When the underlying variable can't be resolved, paint the chip red. */
+.hl-var.unresolved {
+  background: rgba(220, 80, 80, 0.22);
+  border-bottom-color: rgba(220, 80, 80, 0.65);
+}
+/* URL bar — input has 8px/12px padding, font-size 13px, border-radius sm */
+.var-overlay-wrapper.url-overlay .var-overlay { border-radius: var(--radius-sm); }
+.var-overlay-wrapper.url-overlay .var-mirror {
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: normal;
+}
+/* kv-value (header / param cells) — 6px/10px padding, font-size 12px */
+.var-overlay-wrapper.kv-overlay .var-mirror {
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: normal;
+}
+/* form value textarea — multi-line; padding 6px/10px, font-size 12px */
+.var-overlay-wrapper.form-overlay .var-mirror {
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  width: 100%;
+  min-width: auto;
+}
+/* The form value textarea is `flex: 2` while the key cell is `flex: 1`.
+   When wrapped, the wrapper inherits that flex sizing so the table layout
+   stays put. */
+.form-fields-list .var-overlay-wrapper.form-overlay { flex: 2 1 auto; }
+
 /* ---------- Form URL-Encoded body editor ---------- */
 /* Postman-style key-value table for form-urlencoded bodies. Values are
    shown URL-decoded; serialization back to the underlying body string

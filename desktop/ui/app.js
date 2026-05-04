@@ -772,6 +772,7 @@ function createHeaderRow(key = '', value = '', enabled = true) {
     scheduleLiveBuilderFlush();
   });
   row.querySelector('.kv-toggle').addEventListener('change', scheduleLiveBuilderFlush);
+  attachVariableOverlay(row.querySelector('.kv-value'));
   return row;
 }
 
@@ -867,6 +868,7 @@ function createParamRow(key = '', value = '', hasEquals = true) {
     rebuildUrlFromParams();
     scheduleLiveBuilderFlush();
   });
+  attachVariableOverlay(row.querySelector('.kv-value'));
   return row;
 }
 
@@ -1248,6 +1250,7 @@ function createFormFieldRow(key = '', value = '', enabled = true) {
   valEl.addEventListener('input', () => { autoGrowTextarea(valEl); flushFormTableToBody(); });
   // Initial grow once we know the value's height
   requestAnimationFrame(() => autoGrowTextarea(valEl));
+  attachVariableOverlay(valEl);
   return row;
 }
 
@@ -1491,6 +1494,134 @@ function interpolateVariables(str) {
     if (name === '$randomInt') return Math.floor(Math.random() * 10000).toString();
     return merged[name] !== undefined ? merged[name] : match;
   });
+}
+
+// --- Variable overlay highlighting ---
+//
+// Renders `{{var}}` references in URL/header/param/form-field input boxes
+// as colored chips. Implementation: a transparent-text mirror element is
+// positioned behind the input. When the user types, we re-render the
+// mirror with `<span class="hl-var">{{var}}</span>` chips. The user's
+// actual text continues to be drawn by the input on top, so the chip
+// backgrounds appear *underneath* the typed text. Each chip's `title`
+// attribute carries the resolved value so hovering shows it as a tooltip.
+//
+// `attachVariableOverlay(input)` is idempotent — calling it twice on the
+// same input is a no-op.
+
+function escapeOverlayHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Render a string as HTML where `{{var}}` references become hl-var chips.
+// Returns { html, varList } where varList is a deduped list of "name = value"
+// lines for use as a title-attribute tooltip on the input itself.
+function renderVariableChips(text) {
+  if (!text) return { html: '', varList: [] };
+  const merged = buildMergedVarsObject();
+  let html = '';
+  let i = 0;
+  const re = /\{\{([\w$]+)\}\}/g;
+  let m;
+  const seen = new Set();
+  const varList = [];
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > i) html += escapeOverlayHtml(text.slice(i, m.index));
+    const name = m[1];
+    let resolved;
+    let isResolved = true;
+    if (name === '$timestamp') resolved = '(generated at run time)';
+    else if (name === '$uuid') resolved = '(random UUID at run time)';
+    else if (name === '$randomInt') resolved = '(random int at run time)';
+    else if (Object.prototype.hasOwnProperty.call(merged, name)) resolved = merged[name];
+    else { resolved = '(undefined)'; isResolved = false; }
+    if (!seen.has(name)) {
+      seen.add(name);
+      varList.push(`{{${name}}} = ${resolved}`);
+    }
+    const cls = isResolved ? 'hl-var' : 'hl-var unresolved';
+    html += `<span class="${cls}">${escapeOverlayHtml(m[0])}</span>`;
+    i = m.index + m[0].length;
+  }
+  if (i < text.length) html += escapeOverlayHtml(text.slice(i));
+  return { html, varList };
+}
+
+// Tracks every input/textarea that has an overlay attached so we can
+// re-render their chips when the variable resolution changes (env file
+// loaded, override changed, etc.).
+const _variableOverlays = new WeakMap(); // input -> mirror element
+const _variableOverlaySet = new Set();   // strong refs for iteration
+
+function syncVariableOverlay(input) {
+  const mirror = _variableOverlays.get(input);
+  if (!mirror) return;
+  const { html, varList } = renderVariableChips(input.value || '');
+  mirror.innerHTML = html;
+  // Show resolved values via the input's native tooltip — keeps the input
+  // fully clickable (chips have pointer-events: none) and gives the user
+  // a one-stop view of every {{var}} the field references.
+  if (varList.length > 0) {
+    if (input.dataset.titleOriginal == null) {
+      input.dataset.titleOriginal = input.getAttribute('title') || '';
+    }
+    input.title = varList.join('\n');
+  } else if (input.dataset.titleOriginal != null) {
+    if (input.dataset.titleOriginal) input.title = input.dataset.titleOriginal;
+    else input.removeAttribute('title');
+  }
+  // Sync scroll position so chips align with text when input is scrolled.
+  const overlay = mirror.parentElement;
+  if (overlay) {
+    overlay.scrollLeft = input.scrollLeft;
+    overlay.scrollTop = input.scrollTop;
+  }
+}
+
+// Refresh ALL attached overlays. Cheap because each just re-runs the
+// regex on its current value. Call when merged vars change so tooltips
+// reflect the latest resolved values.
+function refreshAllVariableOverlays() {
+  _variableOverlaySet.forEach(input => {
+    if (!input.isConnected) {
+      _variableOverlaySet.delete(input);
+      return;
+    }
+    syncVariableOverlay(input);
+  });
+}
+
+function attachVariableOverlay(input) {
+  if (!input || _variableOverlays.has(input)) return;
+  // Build the overlay structure: insert a wrapper around the input and
+  // place a transparent-text mirror behind it.
+  const wrapper = document.createElement('span');
+  wrapper.className = 'var-overlay-wrapper';
+  // Preserve flex/sizing of the original input
+  if (input.classList.contains('url-input')) wrapper.classList.add('url-overlay');
+  else if (input.classList.contains('kv-key') || input.classList.contains('kv-value')) wrapper.classList.add('kv-overlay');
+  else if (input.classList.contains('kv-value-area')) wrapper.classList.add('form-overlay');
+  const parent = input.parentNode;
+  if (!parent) return;
+  parent.insertBefore(wrapper, input);
+  const overlay = document.createElement('div');
+  overlay.className = 'var-overlay';
+  overlay.setAttribute('aria-hidden', 'true');
+  const mirror = document.createElement('div');
+  mirror.className = 'var-mirror';
+  overlay.appendChild(mirror);
+  wrapper.appendChild(overlay);
+  wrapper.appendChild(input);
+  _variableOverlays.set(input, mirror);
+  _variableOverlaySet.add(input);
+  syncVariableOverlay(input);
+  input.addEventListener('input', () => syncVariableOverlay(input));
+  input.addEventListener('scroll', () => syncVariableOverlay(input));
 }
 
 function collectVariablesArray() {
@@ -2177,6 +2308,9 @@ urlInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey) sendRequest();
 });
 urlInput.addEventListener('input', scheduleLiveBuilderFlush);
+// Highlight `{{var}}` references in the URL bar with chip backgrounds
+// + tooltips showing each variable's resolved value.
+attachVariableOverlay(urlInput);
 
 // --- Content-Type Detection ---
 function detectContentType(body, headers) {
@@ -5849,6 +5983,11 @@ function renderEnvPanel() {
   builtins.style.cssText = 'font-size:10px;color:var(--text-muted);padding:6px 4px 0 4px;border-top:1px dashed var(--border);margin-top:6px;';
   builtins.innerHTML = 'Built-ins: <code>{{$timestamp}}</code> <code>{{$uuid}}</code> <code>{{$randomInt}}</code>';
   envList.appendChild(builtins);
+
+  // Env vars just changed — refresh tooltips on every {{var}} chip in URL,
+  // headers, params, and form-field cells so they show the new resolved
+  // values (and switch from `(undefined)` to a value, or vice versa).
+  refreshAllVariableOverlays();
 }
 
 function buildHttpFileVarCard(file) {
