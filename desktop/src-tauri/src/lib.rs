@@ -741,6 +741,20 @@ async fn get_live_capture_status(
     }))
 }
 
+/// Set the webview's zoom level. Uses the webview's native zoom (same
+/// mechanism as Chrome's Ctrl+/-), which scales rendering AND adjusts the
+/// layout viewport so 100vh always equals the visible window height. This
+/// is the only zoom approach that doesn't clip content at the bottom or
+/// break scrollable inner panels.
+///
+/// `scale` is a multiplier (1.0 = 100%, 1.7 = 170%). Range is clamped to
+/// [0.5, 3.0] to match the UI's exposed zoom range.
+#[tauri::command]
+fn set_webview_zoom(window: tauri::WebviewWindow, scale: f64) -> Result<(), String> {
+    let clamped = scale.clamp(0.5, 3.0);
+    window.set_zoom(clamped).map_err(|e| e.to_string())
+}
+
 pub fn run() {
     // All log output goes to a file — never to the console
     let log_path = std::env::temp_dir().join("request-pilot-desktop.log");
@@ -840,6 +854,7 @@ pub fn run() {
             stop_live_capture,
             set_live_capture_mode,
             get_live_capture_status,
+            set_webview_zoom,
             perf::format_body,
             perf::build_json_tree,
             perf::expand_json_node,

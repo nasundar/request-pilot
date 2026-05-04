@@ -105,9 +105,20 @@ let autoRunNextDue = null;       // Date when next run is due
 let autoRunCountdownId = null;   // countdown display interval
 
 function applyZoom() {
-  // Zoom on <html> so everything scales uniformly including the viewport.
-  document.documentElement.style.zoom = `${zoomLevel}%`;
-  // Clear any stale styles from previous implementations
+  // Use the webview's native zoom (same mechanism as Chrome's Ctrl+/-).
+  // This scales rendering AND adjusts the layout viewport so 100vh always
+  // equals the visible window height — content never gets clipped at the
+  // bottom and scrollable inner panels still scroll all the way to their
+  // end. CSS `zoom` on <html> does NOT do this correctly: it scales render
+  // size but leaves the layout viewport at its original size, so at 170%
+  // the bottom 70% of any 100vh-anchored layout falls outside the window.
+  invoke('set_webview_zoom', { scale: zoomLevel / 100 }).catch(e => {
+    rpLog && rpLog('warn', 'set_webview_zoom failed', String(e));
+  });
+  // Clear any stale styles from previous CSS-zoom implementation (idempotent
+  // on a fresh load — these properties may have been persisted on a prior
+  // version of the app).
+  document.documentElement.style.zoom = '';
   document.body.style.transform = '';
   document.body.style.transformOrigin = '';
   document.body.style.width = '';
