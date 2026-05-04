@@ -5,7 +5,7 @@ edition = "2021"
 description = "Request Pilot TUI — terminal interface for HTTP testing"
 
 [[bin]]
-name = "request-pilot"
+name = "request-pilot-tui"
 path = "src/main.rs"
 
 [dependencies]

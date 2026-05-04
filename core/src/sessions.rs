@@ -3037,7 +3037,7 @@ GET https://example.com/b
     fn redact_handles_invalid_json_gracefully() {
         // Content-Type is JSON but body is malformed — must NOT panic and
         // must leave the body unchanged.
-        let mut block = json_block(
+        let block = json_block(
             "t",
             Some("{not valid json"),
             "{also not valid",
