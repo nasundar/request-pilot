@@ -755,7 +755,54 @@ GET {{base_url}}/other
 ### Special characters in GET query strings
 **Problem:** PromQL and similar query languages use `{`, `}`, `*`, spaces, and parentheses that can break URL parsing.
 
-**Solution:** Use POST with `Content-Type: application/x-www-form-urlencoded` and put the query in the body. Most query APIs (Prometheus, Grafana, etc.) support both GET and POST. The body is sent as-is without URL encoding issues.
+**Solution:** Use POST with `Content-Type: application/x-www-form-urlencoded` and put the query in the body. Most query APIs (Prometheus, Grafana, etc.) support both GET and POST.
+
+> ⚠️ **Form-urlencoded bodies must be URL-encoded** — unlike JSON bodies, the wire format requires every value to be percent-encoded (spaces → `+`, newlines → `%0A`, literal `+` operators → `%2B`, parens/quotes/braces → `%XX`). See the **Form-urlencoded body encoding** pitfall below for full rules. Request Pilot will auto-encode raw bodies as a safety net, but you should still author them encoded for portability with other `.http` clients (REST Client, IntelliJ HTTP, curl).
+
+### Form-urlencoded body encoding
+**Problem:** A `.http` body sent as `application/x-www-form-urlencoded` is wire-encoded — every value must be percent-encoded. The most common gotcha is **literal `+` characters** (e.g. PromQL operators between vector expressions): the server URL-decodes `+` → space, so the operator silently vanishes and the query fails to parse.
+
+**Examples of values that MUST be encoded:**
+
+| Raw character | Encoded |
+|---|---|
+| space | `+` (or `%20`) |
+| `+` (literal operator) | `%2B` |
+| newline (`\n`) | `%0A` |
+| carriage return (`\r`) | `%0D` |
+| `(` `)` | `%28` `%29` |
+| `,` | `%2C` |
+| `=` (inside a value) | `%3D` |
+| `&` (inside a value) | `%26` |
+| `"` | `%22` |
+| `!` | `%21` |
+| `{` `}` | `%7B` `%7D` |
+| non-ASCII (UTF-8) | `%XX%XX...` |
+
+Pair delimiters (`&` between pairs) and the FIRST `=` per pair stay unencoded — they're structural.
+
+**Wrong (PromQL bug):**
+```http
+POST {{endpoint}}/api/v1/query
+Content-Type: application/x-www-form-urlencoded
+
+query=sum by (pod) (
+    ({"up"} * 1)
+    +
+    ({"down"} * 2)
+)&time={{time}}
+```
+The literal `+` operators decode to spaces server-side → "parse error".
+
+**Correct:**
+```http
+POST {{endpoint}}/api/v1/query
+Content-Type: application/x-www-form-urlencoded
+
+query=sum+by+%28pod%29+%28%0A++++%28%7B%22up%22%7D+*+1%29%0A++++%2B%0A++++%28%7B%22down%22%7D+*+2%29%0A%29&time={{time}}
+```
+
+**Authoring tip:** when capturing requests via the browser extension or HAR import, the body is captured already wire-encoded by the browser — preserve it verbatim, do NOT decode it for "readability" before writing to the `.http` file. If you're hand-authoring, use any URL-encoding helper (e.g. `encodeURIComponent` in browser devtools) on each value, or write it raw and rely on Request Pilot's runtime safety net (which detects raw whitespace/newlines and auto-encodes — but will only work in Pilot, not other `.http` clients).
 
 ### Variables with empty values
 **Problem:** Variables like `arm_token =` (empty value) are valid — they serve as placeholders that get populated by ``# @@extract` during setup. Don't remove them or add placeholder values that might accidentally be sent.
@@ -821,17 +868,24 @@ GET {{base_url}}/other
   GET {{base_url}}/other
   ```
   Note the empty `###` separator before the section comment block — this ensures comments don't leak into the previous test's body.
-- **Use POST with form-urlencoded body for complex query parameters** — if a query value contains spaces, braces, parentheses, or other special characters (e.g., PromQL expressions), use a POST request with the parameters in the body instead of cramming them into the URL query string:
+- **Use POST with form-urlencoded body for complex query parameters** — if a query value contains spaces, braces, parentheses, or other special characters (e.g., PromQL expressions), use a POST request with the parameters in the body instead of cramming them into the URL query string. **The body MUST be URL-encoded** (spaces → `+`, `+` operators → `%2B`, newlines → `%0A`, parens/quotes/braces → `%XX`) — see the "Form-urlencoded body encoding" pitfall above for full rules:
   ```http
   # ✗ BAD — spaces and braces in GET query cause issues
   GET {{endpoint}}/api/v1/query_range?query={"system.cpu.time"} * on() group_left up&start={{start}}
 
-  # ✓ GOOD — use POST with form-urlencoded body
+  # ✗ BAD — POST with raw (unencoded) body. Server decodes `+` operator to space → parse error.
   POST {{endpoint}}/api/v1/query_range
   Content-Type: application/x-www-form-urlencoded
 
-  query={"system.cpu.time"} * on() group_left up&start={{start}}&end={{end}}&step={{step}}
+  query={"system.cpu.time"} * on() group_left up + 1&start={{start}}&end={{end}}&step={{step}}
+
+  # ✓ GOOD — POST with form-encoded body
+  POST {{endpoint}}/api/v1/query_range
+  Content-Type: application/x-www-form-urlencoded
+
+  query=%7B%22system.cpu.time%22%7D+*+on%28%29+group_left+up+%2B+1&start={{start}}&end={{end}}&step={{step}}
   ```
+  Note: `{{var}}` placeholders are resolved BEFORE encoding — leave them unencoded in the source. Their resolved values typically contain no special chars in this position. If a variable's resolved value DOES contain special chars (rare), encode the surrounding context but the placeholder itself remains literal `{{var}}` in the source.
 - **Body is terminated by trailing comments** — the parser strips trailing comment lines and empty lines from the request body. Do not rely on `#` comments being part of the body. If you need literal `#` content in a body, ensure it is not the last line (add actual body content after it).
 
 ## Example: Analyzing a Code Change
