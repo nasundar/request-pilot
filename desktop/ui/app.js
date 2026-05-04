@@ -5412,32 +5412,47 @@ function markDirty(state) {
 }
 
 async function envPickerLoadFile() {
-  // Use the native rfd file dialog (via Rust). The HTML <input type="file">
-  // approach doesn't work here because Tauri 2's WebView2 does not reliably
-  // populate `File.path` — and we need the absolute path for env_add to read
-  // the file's contents and persist its location across sessions.
-  let path;
-  try {
-    path = await invoke('pick_file_with_dialog', {
-      title: 'Load .env file',
-      filters: [['Env Files', 'env'], ['All Files', '*']],
-    });
-  } catch (err) {
-    rpLog('error', 'pick_file_with_dialog failed', { error: String(err) });
-    showToast('Failed to open file picker: ' + String(err), 'error');
+  // Use the lightweight HTML <input type="file"> picker, same as the .http file
+  // open flow. On Tauri 2 / WebView2 this opens a smaller, native-feeling dialog
+  // (the rfd::FileDialog crate opens the heavier full-screen Explorer-style
+  // picker, which the user explicitly disliked).
+  //
+  // Tauri 2 augments the resulting File object with `.path` (absolute path) for
+  // most local files. When that's present we forward it to env_add directly.
+  // For the rare cases where `.path` is missing (e.g. files synthesized by other
+  // sources), we fall back to reading content via file.text() and persisting it
+  // to a managed location via the env_save_uploaded_content command — the entry
+  // still has a real, readable file backing it, so env_add never fails with the
+  // legacy "os error 2 — file not found".
+  const input = document.getElementById('envFileInputHidden');
+  if (!input) {
+    showToast('Env file picker unavailable', 'error');
     return;
   }
-  if (!path) return;
-  await _handleEnvFilePicked({ path });
+  // Reset value so picking the same file twice still fires `change`.
+  input.value = '';
+  input.click();
 }
 
 async function _handleEnvFilePicked(file) {
   if (!file) return;
-  const path = file.path || file.name;
+  let path = (file.path && typeof file.path === 'string' && file.path.trim()) || null;
+
+  // Fallback: if the picked File object didn't expose an absolute path,
+  // persist its content to a managed location and use that as the path.
   if (!path) {
-    showToast('Could not determine file path', 'error');
-    return;
+    try {
+      const content = (typeof file.text === 'function') ? await file.text() : '';
+      const name = file.name || 'uploaded.env';
+      path = await invoke('env_save_uploaded_content', { name, content });
+      rpLog('info', 'env file path unavailable; persisted content to managed location', { name, path });
+    } catch (err) {
+      rpLog('error', 'env_save_uploaded_content failed', { error: String(err) });
+      showToast('Failed to load .env: ' + String(err), 'error');
+      return;
+    }
   }
+
   try {
     const res = await invoke('env_add', { path });
     envConfig = normalizeEnvConfig(res.config);
@@ -5513,9 +5528,20 @@ if (newEnvBtnEl) {
   });
 }
 
-// (Hidden HTML <input type="file"> for env was removed because Tauri 2's
-// WebView2 doesn't reliably expose File.path. We use the rfd-backed
-// `pick_file_with_dialog` command instead — see envPickerLoadFile().)
+// Hidden HTML <input type="file"> for env files → forwards picked File to
+// _handleEnvFilePicked which trusts .path when set, otherwise falls back to
+// persisting file content via env_save_uploaded_content.
+{
+  const envFileInputHidden = document.getElementById('envFileInputHidden');
+  if (envFileInputHidden) {
+    envFileInputHidden.addEventListener('change', async (e) => {
+      const file = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (!file) return;
+      await _handleEnvFilePicked(file);
+    });
+  }
+}
 
 
 

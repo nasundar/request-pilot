@@ -546,6 +546,50 @@ fn env_create_file(path: String, display_name: Option<String>) -> Result<String,
     Ok(path)
 }
 
+/// Save the content of a user-picked `.env` file to a managed location and
+/// return its absolute path. Used as a fallback when the HTML `<input type=file>`
+/// File object does not expose `.path` (a known WebView2/Tauri 2 edge case);
+/// the caller can then pass the returned path to `env_add` so the entry has
+/// a stable, readable file backing it.
+#[tauri::command]
+fn env_save_uploaded_content(name: String, content: String) -> Result<String, String> {
+    // Resolve a per-user app-data directory using the same env-var fallback
+    // strategy as env_config::config_dir() so behavior matches across the app.
+    let base: std::path::PathBuf = if cfg!(windows) {
+        std::env::var("APPDATA")
+            .map(std::path::PathBuf::from)
+            .map_err(|_| "APPDATA not set".to_string())?
+    } else if cfg!(target_os = "macos") {
+        std::env::var("HOME")
+            .map(|h| std::path::PathBuf::from(h).join("Library").join("Application Support"))
+            .map_err(|_| "HOME not set".to_string())?
+    } else if let Ok(p) = std::env::var("XDG_CONFIG_HOME") {
+        std::path::PathBuf::from(p)
+    } else if let Ok(h) = std::env::var("HOME") {
+        std::path::PathBuf::from(h).join(".config")
+    } else {
+        return Err("Could not determine config directory".into());
+    };
+    let dir = base.join("request-pilot").join("uploaded-envs");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
+    let safe_name: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe_name = if safe_name.is_empty() { "uploaded.env".to_string() } else { safe_name };
+    let target = dir.join(&safe_name);
+    std::fs::write(&target, content)
+        .map_err(|e| format!("Failed to write {}: {}", target.display(), e))?;
+    Ok(target.to_string_lossy().to_string())
+}
+
 /// Write content to a known file path (for files already saved once).
 /// Only allows writing to .http files to limit surface area.
 #[tauri::command]
@@ -781,6 +825,7 @@ pub fn run() {
             env_resolve_entry,
             env_save,
             env_create_file,
+            env_save_uploaded_content,
             fetch_azure_token,
             check_azure_cli,
             start_device_code,
