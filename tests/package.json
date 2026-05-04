@@ -11,6 +11,7 @@
   "license": "ISC",
   "devDependencies": {
     "jest": "^30.3.0",
-    "jest-environment-jsdom": "^30.3.0"
+    "jest-environment-jsdom": "^30.3.0",
+    "jsdom": "^22.1.0"
   }
 }

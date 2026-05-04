@@ -55,9 +55,14 @@ describe('desktop/ui DOM element references', () => {
    */
   function getDynamicIds() {
     const ids = new Set();
+    // Match `id="foo"` or id='foo' as HTML strings or `.id = 'foo'`
+    // assignments. The latter pattern is used for elements built via
+    // `document.createElement(...)` then assigned an id.
     const re = /id=(?:\\?["'])([a-zA-Z0-9_-]+)(?:\\?["'])/g;
+    const reAssign = /\.id\s*=\s*['"]([a-zA-Z0-9_-]+)['"]/g;
     let m;
     while ((m = re.exec(jsSource)) !== null) ids.add(m[1]);
+    while ((m = reAssign.exec(jsSource)) !== null) ids.add(m[1]);
     return ids;
   }
 

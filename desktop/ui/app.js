@@ -17,6 +17,20 @@ let loadedFiles = [];
 let activeFileIndex = -1;
 let activeBlockIndex = -1;
 let runtimeOverrides = {};   // {name: value} — populated by @@extract / post-run final_variables. Cleared at the start of every Run All.
+// `activeEnvVars` is consumed by `buildMergedVarsObject()` which the variable-
+// overlay system can call during initial DOM wiring (before line ~1670 where
+// the env panel logic lives). Hoist the declaration here so the overlay
+// helpers don't trip over a Temporal Dead Zone reference.
+let activeEnvVars = []; // [[name, value], ...] for the active entry only
+// State maps for the `{{variable}}` reference highlighter. These are also
+// hoisted because the helpers that read them (attachVariableOverlay etc.)
+// are invoked from createParamRow / createHeaderRow / createFormFieldRow,
+// which fire at top-level during script init via `renderParamsFromUrl()`.
+// Without this hoist they would be in the TDZ when first read and throw a
+// ReferenceError that aborts the rest of script init — silently breaking
+// every event handler attached after the throw site.
+const _variableOverlays = new WeakMap(); // input -> mirror element
+const _variableOverlaySet = new Set();   // strong refs for iteration
 let disabledBlocks = {};     // {"fileIdx-blockIdx": true} — disabled steps
 let isRunning = false;
 let lastResponse = null;
@@ -1555,8 +1569,10 @@ function renderVariableChips(text) {
 // Tracks every input/textarea that has an overlay attached so we can
 // re-render their chips when the variable resolution changes (env file
 // loaded, override changed, etc.).
-const _variableOverlays = new WeakMap(); // input -> mirror element
-const _variableOverlaySet = new Set();   // strong refs for iteration
+// (Actual `_variableOverlays` / `_variableOverlaySet` declarations live at
+//  the top of the file alongside other global state — they MUST be defined
+//  before the first call to `attachVariableOverlay()` because that function
+//  is invoked at top-level via createParamRow during initial render.)
 
 function syncVariableOverlay(input) {
   const mirror = _variableOverlays.get(input);
@@ -1670,7 +1686,8 @@ function lookupVar(name) {
 // Per-card UI state (expanded, dirty edit drafts, lazily-loaded vars for
 // inactive cards) lives alongside the persisted config in `envCardState`.
 let envConfig = { entries: [], active_index: null };
-let activeEnvVars = []; // [[name, value], ...] for the active entry only
+// `activeEnvVars` itself is hoisted near the top of this file (see Global
+// State) because the var-overlay system reads it during initial DOM wiring.
 let envCardState = []; // parallel array: { vars: [[k,v]]?, draftVars: [[k,v]]?, expanded: bool, dirty: bool, loading: bool }
 
 async function reloadEnvList(preserveCardState = true) {
