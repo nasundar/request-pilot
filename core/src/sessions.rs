@@ -950,8 +950,61 @@ pub fn apply_capture_policy(
 
     for block in results.block_results.iter_mut() {
         redact_block_in_place(block, &header_deny, &query_deny, policy, &mut report);
+        // After redaction (which respects the user's body-capture policy),
+        // apply the loop iteration cap: large loops can produce hundreds of
+        // full request/response pairs. Default policy keeps full bodies for
+        // failures + the first and last successful iter; everything else gets
+        // a body-stripped summary. Surfaced via `body_omitted = true`.
+        cap_loop_iterations(block);
     }
     report
+}
+
+/// Trim per-iteration bodies on a looped block down to a manageable set:
+/// keep all failed/error iterations + first success + last success in full;
+/// strip request/response bodies (and step bodies) on the rest while
+/// preserving status, assertions, extracts, timing, URL, and headers.
+///
+/// Single-iteration and short loops (<=3 iters) are left untouched —
+/// the cap only kicks in when there's enough volume that trimming pays off.
+fn cap_loop_iterations(block: &mut BlockResult) {
+    if block.iterations.len() <= 3 {
+        return;
+    }
+
+    // Identify successful iter indices in source order.
+    let success_indices: Vec<usize> = block
+        .iterations
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| it.status == "passed")
+        .map(|(i, _)| i)
+        .collect();
+
+    let first_success = success_indices.first().copied();
+    let last_success = success_indices.last().copied();
+
+    for (i, it) in block.iterations.iter_mut().enumerate() {
+        let is_failure = it.status != "passed";
+        let is_first_success = first_success == Some(i);
+        let is_last_success = last_success == Some(i);
+        if is_failure || is_first_success || is_last_success {
+            continue;
+        }
+        // Trim this iteration: drop bodies but keep meta.
+        let inner = it.block_result.as_mut();
+        inner.request_body = None;
+        if let Some(resp) = inner.response.as_mut() {
+            resp.body.clear();
+        }
+        for step in inner.step_results.iter_mut() {
+            step.request_body = None;
+            if let Some(resp) = step.response.as_mut() {
+                resp.body.clear();
+            }
+        }
+        it.body_omitted = true;
+    }
 }
 
 fn redact_block_in_place(
@@ -3091,6 +3144,119 @@ GET https://example.com/b
         // already-redacted [0] which our `redact_at_path` declines to
         // re-count, plus index [1] which is a fresh hit) = 3.
         assert_eq!(report.body_fields_redacted, 3);
+    }
+
+    // ─── Loop iteration body cap ────────────────────────────────────────
+
+    fn make_iteration(idx: usize, status: &str) -> crate::test_runner::IterationResult {
+        use crate::test_runner::IterationResult;
+        let mut inner = dummy_block(&format!("iter_{}", idx), status, Some("BIG_BODY"));
+        inner.request_body = Some("BIG_REQ_BODY".to_string());
+        IterationResult {
+            index: idx,
+            iter_value: format!("v{}", idx),
+            status: status.to_string(),
+            block_result: Box::new(inner),
+            body_omitted: false,
+        }
+    }
+
+    #[test]
+    fn cap_loop_iterations_keeps_failures_and_first_last_success() {
+        // 5 iters: 0=passed, 1=failed, 2=passed, 3=passed, 4=failed.
+        //   first success = idx 0
+        //   last success  = idx 3
+        //   failures      = idx 1, 4
+        // Expected trim: idx 2 ONLY (the middle success).
+        let mut block = dummy_block("loop", "failed", None);
+        block.iterations = vec![
+            make_iteration(0, "passed"),
+            make_iteration(1, "failed"),
+            make_iteration(2, "passed"),
+            make_iteration(3, "passed"),
+            make_iteration(4, "failed"),
+        ];
+        let mut results = dummy_results(vec![block]);
+
+        apply_capture_policy(&mut results, &CapturePolicy::default());
+
+        let iters = &results.block_results[0].iterations;
+        assert_eq!(iters.len(), 5);
+
+        // Failures kept full.
+        assert!(!iters[1].body_omitted);
+        assert!(iters[1].block_result.request_body.is_some());
+        assert!(!iters[1]
+            .block_result
+            .response
+            .as_ref()
+            .unwrap()
+            .body
+            .is_empty());
+        assert!(!iters[4].body_omitted);
+
+        // First & last success kept full.
+        assert!(!iters[0].body_omitted, "first success should be kept full");
+        assert!(iters[0].block_result.request_body.is_some());
+        assert!(!iters[3].body_omitted, "last success should be kept full");
+
+        // Middle success trimmed.
+        assert!(iters[2].body_omitted, "middle success should be body-omitted");
+        assert!(
+            iters[2].block_result.request_body.is_none(),
+            "trimmed iter request_body should be None"
+        );
+        assert!(
+            iters[2]
+                .block_result
+                .response
+                .as_ref()
+                .unwrap()
+                .body
+                .is_empty(),
+            "trimmed iter response.body should be empty"
+        );
+        // Status & assertions preserved on the trimmed iter.
+        assert_eq!(iters[2].status, "passed");
+        assert_eq!(iters[2].block_result.assertion_results.len(), 1);
+    }
+
+    #[test]
+    fn cap_loop_iterations_skips_short_loops() {
+        // <=3 iters: untouched (no value in trimming).
+        let mut block = dummy_block("short_loop", "passed", None);
+        block.iterations = vec![
+            make_iteration(0, "passed"),
+            make_iteration(1, "passed"),
+            make_iteration(2, "passed"),
+        ];
+        let mut results = dummy_results(vec![block]);
+        apply_capture_policy(&mut results, &CapturePolicy::default());
+
+        for it in &results.block_results[0].iterations {
+            assert!(!it.body_omitted, "short loops should not be capped");
+            assert!(it.block_result.request_body.is_some());
+        }
+    }
+
+    #[test]
+    fn cap_loop_iterations_keeps_all_when_all_failures() {
+        // All iters failed -> none are "successes", so first/last_success
+        // are None, but failures are always kept -> nothing trimmed.
+        let mut block = dummy_block("all_fail", "failed", None);
+        block.iterations = vec![
+            make_iteration(0, "failed"),
+            make_iteration(1, "failed"),
+            make_iteration(2, "failed"),
+            make_iteration(3, "failed"),
+            make_iteration(4, "failed"),
+        ];
+        let mut results = dummy_results(vec![block]);
+        apply_capture_policy(&mut results, &CapturePolicy::default());
+
+        for it in &results.block_results[0].iterations {
+            assert!(!it.body_omitted);
+        }
     }
 
     // ─── SessionStore round-trip ───────────────────────────────────────

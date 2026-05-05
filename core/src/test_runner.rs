@@ -90,6 +90,21 @@ pub struct BlockProgress {
     pub error: Option<String>,
 }
 
+/// Progress event for a single iteration of a `# @@for` loop block.
+/// Emitted before each iteration starts (status="running") and again when
+/// it finishes (status mirrors the inner BlockResult's status). Carries
+/// the parent block's name so consumers can route the event to the right
+/// row in the UI.
+#[derive(Debug, Serialize, Clone)]
+pub struct IterationProgress {
+    pub block_name: String,
+    pub index: usize,
+    pub total: usize,
+    pub iter_value: String,
+    pub status: String, // "running", "passed", "failed", "error"
+    pub time_ms: u64,
+}
+
 /// Trait for receiving real-time block execution progress.
 /// Desktop GUI implements this with Tauri events, TUI with mpsc channels.
 pub trait ProgressHandler: Send + Sync {
@@ -100,6 +115,9 @@ pub trait ProgressHandler: Send + Sync {
     /// Default impl is a no-op so consumers that only care about lightweight
     /// progress (TUI, CLI) don't need to implement it.
     fn on_block_result(&self, _result: &BlockResult) {}
+    /// Emitted before AND after each iteration of a `# @@for` loop block.
+    /// Default no-op so existing handlers don't need to opt in.
+    fn on_iteration_progress(&self, _progress: &IterationProgress) {}
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -167,6 +185,12 @@ pub struct IterationResult {
     pub iter_value: String,
     pub status: String, // "passed" | "failed" | "error" | "skipped"
     pub block_result: Box<BlockResult>,
+    /// True when this iteration's request/response bodies have been
+    /// stripped by the storage cap policy (kept assertions/status/timing
+    /// only). Surface in the UI as "(body omitted)" so users can tell a
+    /// trimmed iteration from one that genuinely had no body.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub body_omitted: bool,
 }
 
 /// One pair's diff outcome inside a multi-diff @compare block. Carries
@@ -466,9 +490,10 @@ async fn execute_block_or_loop(
     block: TestBlock,
     var_store: VariableStore,
     extra_headers: Vec<(String, String)>,
+    handler: Option<Arc<dyn ProgressHandler>>,
 ) -> BlockResult {
     if block.for_loop.is_some() {
-        execute_loop_block(block, var_store, extra_headers).await
+        execute_loop_block(block, var_store, extra_headers, handler).await
     } else {
         execute_block(block, var_store, extra_headers).await
     }
@@ -483,6 +508,7 @@ async fn execute_loop_block(
     block: TestBlock,
     var_store: VariableStore,
     extra_headers: Vec<(String, String)>,
+    handler: Option<Arc<dyn ProgressHandler>>,
 ) -> BlockResult {
     let total_start = std::time::Instant::now();
     // for_loop is guaranteed to be Some by the caller; clone out for use.
@@ -535,6 +561,7 @@ async fn execute_loop_block(
     //    cleared so execute_block treats it as a normal single request.
     let mut iterations: Vec<IterationResult> = Vec::with_capacity(arr.len());
     let mut any_failed = false;
+    let total = arr.len();
     for (idx, elem) in arr.iter().enumerate() {
         // Bind iter_var:
         //   - JSON string -> raw string value (so `{{user_id}}` = "u1", not "\"u1\"")
@@ -546,6 +573,28 @@ async fn execute_loop_block(
             other => other.to_string(),
         };
 
+        // Truncate iter_value display so a giant object doesn't blow up
+        // history rendering or progress event payloads.
+        const MAX_DISPLAY: usize = 200;
+        let display_value = if bound_value.chars().count() > MAX_DISPLAY {
+            let trimmed: String = bound_value.chars().take(MAX_DISPLAY).collect();
+            format!("{}…", trimmed)
+        } else {
+            bound_value.clone()
+        };
+
+        // Live-progress: iteration starting.
+        if let Some(ref h) = handler {
+            h.on_iteration_progress(&IterationProgress {
+                block_name: block.name.clone(),
+                index: idx,
+                total,
+                iter_value: display_value.clone(),
+                status: "running".to_string(),
+                time_ms: 0,
+            });
+        }
+
         let mut child = var_store.clone();
         child.set(&fl.iter_var, &bound_value);
         // Loop counters — interpolator's plain-name fallback resolves these.
@@ -556,28 +605,33 @@ async fn execute_loop_block(
 
         let mut inner_block = block.clone();
         inner_block.for_loop = None;
+        let iter_start = std::time::Instant::now();
         let inner_result = execute_block(inner_block, child, extra_headers.clone()).await;
+        let iter_ms = iter_start.elapsed().as_millis() as u64;
 
         let iter_status = inner_result.status.clone();
         if iter_status != "passed" {
             any_failed = true;
         }
 
-        // Truncate iter_value display so a giant object doesn't blow up
-        // history rendering.
-        const MAX_DISPLAY: usize = 200;
-        let display_value = if bound_value.chars().count() > MAX_DISPLAY {
-            let trimmed: String = bound_value.chars().take(MAX_DISPLAY).collect();
-            format!("{}…", trimmed)
-        } else {
-            bound_value.clone()
-        };
+        // Live-progress: iteration finished.
+        if let Some(ref h) = handler {
+            h.on_iteration_progress(&IterationProgress {
+                block_name: block.name.clone(),
+                index: idx,
+                total,
+                iter_value: display_value.clone(),
+                status: iter_status.clone(),
+                time_ms: iter_ms,
+            });
+        }
 
         iterations.push(IterationResult {
             index: idx,
             iter_value: display_value,
             status: iter_status,
             block_result: Box::new(inner_result),
+            body_omitted: false,
         });
     }
 
@@ -1097,7 +1151,7 @@ async fn run_tests_with_groups(
                         let result = if block.compare && !block.steps.is_empty() {
                             execute_compare_block(block, vs, eh).await
                         } else {
-                            execute_block_or_loop(block, vs, eh).await
+                            execute_block_or_loop(block, vs, eh, h.clone()).await
                         };
                         emit_completed(&h, &result);
                         (idx, result)
@@ -1252,7 +1306,7 @@ async fn run_suite_inner(
         let result = if block.compare && !block.steps.is_empty() {
             execute_compare_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
         } else {
-            execute_block_or_loop((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
+            execute_block_or_loop((*block).clone(), var_store.clone(), extra_headers.to_vec(), handler.clone()).await
         };
         // Merge extracts into var_store
         for er in &result.extract_results {
@@ -1320,7 +1374,7 @@ async fn run_suite_inner(
         let result = if block.compare && !block.steps.is_empty() {
             execute_compare_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
         } else {
-            execute_block_or_loop((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
+            execute_block_or_loop((*block).clone(), var_store.clone(), extra_headers.to_vec(), handler.clone()).await
         };
         for er in &result.extract_results {
             if er.success {
@@ -2342,7 +2396,7 @@ mod tests {
         let mut vs = VariableStore::new();
         vs.set("user_ids", r#"["u1","u2","u3"]"#);
 
-        let result = execute_block_or_loop(block, vs, vec![]).await;
+        let result = execute_block_or_loop(block, vs, vec![], None).await;
 
         // 3 iterations executed in order; each substituted user_id correctly.
         assert_eq!(result.iterations.len(), 3, "all 3 elements iterated");
@@ -2378,7 +2432,7 @@ mod tests {
         let mut vs = VariableStore::new();
         vs.set("users", r#"[{"id":"u1","post":"p1"},{"id":"u2","post":"p2"}]"#);
 
-        let result = execute_block_or_loop(block, vs, vec![]).await;
+        let result = execute_block_or_loop(block, vs, vec![], None).await;
 
         assert_eq!(result.iterations.len(), 2);
         assert!(
@@ -2401,7 +2455,7 @@ mod tests {
             "missing_var",
             "http://127.0.0.1:0/{{x}}",
         );
-        let result = execute_block_or_loop(block, VariableStore::new(), vec![]).await;
+        let result = execute_block_or_loop(block, VariableStore::new(), vec![], None).await;
 
         assert_eq!(result.status, "error");
         assert!(result.iterations.is_empty(), "no iterations on source error");
@@ -2421,7 +2475,7 @@ mod tests {
         // A bare string that's NOT a JSON array.
         vs.set("scalar_src", "just-a-string");
 
-        let result = execute_block_or_loop(block, vs, vec![]).await;
+        let result = execute_block_or_loop(block, vs, vec![], None).await;
         assert_eq!(result.status, "error");
         assert!(result.iterations.is_empty());
         assert!(
@@ -2435,7 +2489,7 @@ mod tests {
         let block2 = make_loop_block("x", "obj_src", "http://127.0.0.1:0/{{x}}");
         let mut vs2 = VariableStore::new();
         vs2.set("obj_src", r#"{"k":"v"}"#);
-        let result2 = execute_block_or_loop(block2, vs2, vec![]).await;
+        let result2 = execute_block_or_loop(block2, vs2, vec![], None).await;
         assert_eq!(result2.status, "error");
         assert!(result2.iterations.is_empty());
         assert!(
@@ -2452,7 +2506,7 @@ mod tests {
         let mut vs = VariableStore::new();
         vs.set("empty_src", "[]");
 
-        let result = execute_block_or_loop(block, vs, vec![]).await;
+        let result = execute_block_or_loop(block, vs, vec![], None).await;
         assert_eq!(result.status, "passed", "empty array is vacuously passing");
         assert!(result.iterations.is_empty());
         assert!(result.error.is_none());
@@ -2469,7 +2523,7 @@ mod tests {
         );
         let mut vs = VariableStore::new();
         vs.set("vals", r#"["a","b"]"#);
-        let result = execute_block_or_loop(block, vs, vec![]).await;
+        let result = execute_block_or_loop(block, vs, vec![], None).await;
 
         assert_eq!(result.iterations.len(), 2);
         let url0 = &result.iterations[0].block_result.request_url;
@@ -2499,7 +2553,7 @@ mod tests {
         // Sentinel: outer store before the loop.
         assert!(vs.get("leaked").is_none());
 
-        let _result = execute_block_or_loop(block, vs.clone(), vec![]).await;
+        let _result = execute_block_or_loop(block, vs.clone(), vec![], None).await;
 
         // Outer var_store (the one we pass by clone) is unaffected
         // regardless of what happened inside iterations.
@@ -2518,7 +2572,7 @@ mod tests {
         let mut vs = VariableStore::new();
         vs.set("blobs", &arr);
 
-        let result = execute_block_or_loop(block, vs, vec![]).await;
+        let result = execute_block_or_loop(block, vs, vec![], None).await;
         assert_eq!(result.iterations.len(), 1);
         // 200-char cap (plus the ellipsis suffix) — guards UI/history rendering.
         let display_len = result.iterations[0].iter_value.chars().count();
@@ -2530,6 +2584,70 @@ mod tests {
         assert!(
             result.iterations[0].iter_value.ends_with('…'),
             "truncated iter_value should end with ellipsis"
+        );
+    }
+
+    /// Test ProgressHandler that records every iteration progress event so
+    /// we can assert on the precise sequence and metadata.
+    struct RecordingHandler {
+        events: std::sync::Mutex<Vec<IterationProgress>>,
+    }
+    impl ProgressHandler for RecordingHandler {
+        fn on_block_start(&self, _: &BlockProgress) {}
+        fn on_block_complete(&self, _: &BlockProgress) {}
+        fn on_iteration_progress(&self, progress: &IterationProgress) {
+            self.events.lock().unwrap().push(progress.clone());
+        }
+    }
+
+    #[tokio::test]
+    async fn loop_block_emits_iteration_progress_events() {
+        use crate::variables::VariableStore;
+        let block = make_loop_block("x", "vals", "http://127.0.0.1:0/{{x}}");
+        let mut vs = VariableStore::new();
+        vs.set("vals", r#"["a","b","c"]"#);
+
+        let recorder = Arc::new(RecordingHandler {
+            events: std::sync::Mutex::new(Vec::new()),
+        });
+        let handler: Arc<dyn ProgressHandler> = recorder.clone();
+
+        let _ = execute_block_or_loop(block, vs, vec![], Some(handler)).await;
+
+        let events = recorder.events.lock().unwrap();
+        // 3 iters × 2 events (running + final) = 6 progress events.
+        assert_eq!(
+            events.len(),
+            6,
+            "expected 3 running + 3 final = 6 iteration events, got {}",
+            events.len()
+        );
+        // Sequence: (idx=0,running), (idx=0,final), (idx=1,running), (idx=1,final), ...
+        assert_eq!(events[0].index, 0);
+        assert_eq!(events[0].status, "running");
+        assert_eq!(events[0].iter_value, "a");
+        assert_eq!(events[0].total, 3);
+        assert_eq!(events[0].block_name, "loop_block");
+
+        assert_eq!(events[1].index, 0);
+        // Connection refused -> inner block status is "error"; that bubbles
+        // into the iteration's final-event status.
+        assert!(events[1].status == "error" || events[1].status == "failed");
+
+        assert_eq!(events[4].index, 2);
+        assert_eq!(events[4].status, "running");
+        assert_eq!(events[4].iter_value, "c");
+
+        // No iteration events should fire when the loop source is invalid.
+        let block_bad = make_loop_block("x", "missing", "http://127.0.0.1:0/{{x}}");
+        let recorder2 = Arc::new(RecordingHandler {
+            events: std::sync::Mutex::new(Vec::new()),
+        });
+        let h2: Arc<dyn ProgressHandler> = recorder2.clone();
+        let _ = execute_block_or_loop(block_bad, VariableStore::new(), vec![], Some(h2)).await;
+        assert!(
+            recorder2.events.lock().unwrap().is_empty(),
+            "no iteration progress should fire when loop source is invalid"
         );
     }
 }
