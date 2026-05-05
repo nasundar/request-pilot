@@ -812,6 +812,45 @@ Content-Type: application/json
 - For object loops, extract the array of objects in setup (`# @@extract users = $.users`) so the iter binding can dot-traverse without a second HTTP round-trip.
 - Combine `# @@for` with `# @@group` to fan out a per-element validation group, then run a downstream block via `# @@depends` after all iterations pass.
 
+#### Debugging failed iterations
+
+The desktop app surfaces failures inside a looped block through a focused
+introspection flow. When you write a `# @@for` block that runs N
+iterations and some fail, the runner produces one `IterationResult` per
+iter and the UI lets you drill into any single one without losing the
+parent-block context:
+
+| Surface | Behavior |
+|---|---|
+| **Sidebar loop badge** (`× 20 (5 ✗)`) | Total iter count + failure count when any failed. Tinted red when failures exist. Tooltip shows passed/failed/omitted breakdown. |
+| **Sidebar iter sub-list** | One row per iteration with status dot. For loops with >10 iters, failures are always visible plus the first 5 passed; remaining passed iters tuck behind a `+ N more` link to keep the tree navigable. |
+| **Iter-tabs strip** (response panel) | One tab per iter at the top of the response panel. Status dot per tab. Click to switch — body, headers, assertions, and extracts all re-route to that iter's results. |
+| **Filter chip** (`[All N] [Failed M]`) | Renders only when at least one iter failed. Click "Failed M" to hide passed iters; auto-jumps to the first failure. |
+| **Iter breadcrumb** | Header line in the response panel: `✓ Iter 7/20 · user_id=u_abc` or `✗ Iter 3/20 · user_id=u_xyz`. For object iters, the breadcrumb tries `id` / `name` / `key` / `slug` / `email` / `title` and falls back to the first scalar field. |
+| **Keyboard nav** | `n` jumps to the next failed iter; `Shift+N` to the previous. Wraps at the ends. Ignored when typing in an input/textarea. |
+
+When debugging:
+
+1. After a run, click the looped block in the sidebar to focus it.
+2. Read the badge: `× 20 (5 ✗)` means 5 of 20 iters failed.
+3. Click `[Failed 5]` to hide the passing tabs and zero in on the failures.
+4. Press `n` to walk through them. Each step swaps the response body
+   AND the assertion-tab table to that iter's results, so you see the
+   actual failed assertion (e.g. `status == 200, actual=500`).
+5. The iter-value in the breadcrumb tells you exactly which input
+   triggered the failure — copy that into a single-iter test if you
+   want to reproduce in isolation.
+
+### Storage cap on iteration bodies
+
+For 100+-iter loops with heavy responses, full body capture would bloat
+`run.json`. The runtime stores full request/response for failed iters
+plus the first and last successful iter; the rest store summary fields
+(status, duration, assertion counts, extract counts) only. Iters whose
+bodies were omitted are flagged with `(body omitted)` in the response
+panel — if you need full bodies for every iter (e.g., for forensic
+review), reduce the iteration count or split the loop into smaller batches.
+
 ## Common Pitfalls
 
 ### Never write into the Sessions store

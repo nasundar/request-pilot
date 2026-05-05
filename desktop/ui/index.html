@@ -506,6 +506,10 @@
           <div class="panel-header">
             <span class="panel-title">RESPONSE</span>
             <div id="responseMeta" class="response-meta hidden">
+              <!-- Iteration breadcrumb: shown only when a # @@for loop iter
+                   is focused, so the user always knows which of N iterations
+                   they're inspecting. Hidden for non-loop blocks. -->
+              <span id="responseIterBadge" class="response-iter-badge hidden"></span>
               <span id="responseStatusBadge" class="status-badge"></span>
               <span class="meta-separator">·</span>
               <span id="responseTime" class="meta-item">0 ms</span>

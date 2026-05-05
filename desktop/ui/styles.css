@@ -5518,10 +5518,70 @@ input:focus, select:focus, textarea:focus { outline: none; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Overflow handling: hide the "extra passed" iters by default; toggle
+   `.expanded` on the container to reveal them. Failures are never
+   tagged overflow so they stay visible at all times. */
+.loop-iterations .loop-iter-overflow {
+  display: none;
+}
+.loop-iterations.expanded .loop-iter-overflow {
+  display: flex;
+}
+.loop-iterations-more {
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 3px 4px;
+  margin-top: 2px;
+  user-select: none;
+}
+.loop-iterations-more:hover {
+  text-decoration: underline;
+}
 .loop-omitted-flag {
   font-size: 10px;
   color: var(--text-muted);
   opacity: 0.7;
+}
+
+/* Iteration filter chip (All N / Failed M) at the start of the
+   response-panel iter-tabs strip. Compact pill that visually groups
+   the two buttons without crowding the iteration tabs that follow. */
+.iter-tab-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  margin-right: 8px;
+  padding: 2px 0;
+  border-right: 1px solid var(--border);
+  padding-right: 6px;
+  flex-shrink: 0;
+}
+.iter-filter-btn {
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s, color 0.1s;
+}
+.iter-filter-btn:first-child { border-radius: 4px 0 0 4px; border-right-width: 0; }
+.iter-filter-btn:last-child  { border-radius: 0 4px 4px 0; }
+.iter-filter-btn:hover {
+  background: var(--hover);
+  color: var(--text-primary);
+}
+.iter-filter-btn.active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+.iter-filter-btn.fail.active {
+  background: var(--red);
+  border-color: var(--red);
 }
 
 /* `× N` badge on the parent loop block in the sidebar. */
@@ -5535,6 +5595,48 @@ input:focus, select:focus, textarea:focus { outline: none; }
   background: color-mix(in srgb, var(--purple) 18%, transparent);
   color: var(--purple);
   white-space: nowrap;
+}
+/* Failure-state variant: when any iteration failed, switch to red so
+   `× 20 (5 ✗)` reads as an alert instead of a neutral count. */
+.block-loop-badge.has-failures {
+  background: color-mix(in srgb, var(--red) 22%, transparent);
+  color: var(--red);
+}
+
+/* Lightweight breadcrumb shown at the top of the assertions tab when
+   a loop iteration is focused, so the user knows which iter's results
+   they're reading. */
+.iter-focus-header .assertion-group-header {
+  background: color-mix(in srgb, var(--purple) 12%, transparent);
+  color: var(--text-primary);
+  border-left: 2px solid var(--purple);
+  padding-left: 8px;
+}
+
+/* Iteration breadcrumb in the response-panel meta line. Mirrors the
+   compactness of the status badge so the meta line stays readable at
+   small widths. Status color tracks iteration pass/fail. */
+.response-iter-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  margin-right: 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--purple) 18%, transparent);
+  color: var(--purple);
+  white-space: nowrap;
+}
+.response-iter-badge.hidden {
+  display: none;
+}
+.response-iter-badge.passed {
+  background: color-mix(in srgb, var(--green) 18%, transparent);
+  color: var(--green);
+}
+.response-iter-badge.failed {
+  background: color-mix(in srgb, var(--red) 22%, transparent);
+  color: var(--red);
 }
 
 /* Diff summary */

@@ -122,6 +122,24 @@ function getBlockIterations(br) {
 }
 
 /**
+ * Aggregate iteration counts. Returns
+ * `{ total, passed, failed, omitted }` where `failed` includes both
+ * `failed` (assertion failure) and `error` (transport / setup error)
+ * statuses, and `omitted` counts iterations whose body was trimmed by
+ * the storage cap policy.
+ */
+function iterFailureCount(br) {
+  const iters = getBlockIterations(br);
+  let passed = 0, failed = 0, omitted = 0;
+  iters.forEach((it) => {
+    if (it.status === 'passed') passed += 1;
+    else if (it.status === 'failed' || it.status === 'error') failed += 1;
+    if (it.body_omitted) omitted += 1;
+  });
+  return { total: iters.length, passed, failed, omitted };
+}
+
+/**
  * Returns the per-pair diff result list for a block result, falling back
  * to the legacy single `diff_result` field when the runner that produced
  * the result predates multi-diff. Each entry has shape
@@ -511,6 +529,7 @@ const responseEmpty   = $('#responseEmpty');
 const responseStepTabs = $('#responseStepTabs');
 const responseContent = $('#responseContent');
 const responseMeta    = $('#responseMeta');
+const responseIterBadge = $('#responseIterBadge');
 const statusBadge     = $('#responseStatusBadge');
 const responseTime    = $('#responseTime');
 const responseSize    = $('#responseSize');
@@ -659,13 +678,21 @@ function updateBlockStatuses() {
   loadedFiles.forEach((file, fileIdx) => {
     const fileNode = fileTree.querySelector(`.file-node[data-file-idx="${fileIdx}"]`);
     if (!fileNode) return;
-    file.suite.blocks.forEach((_, blockIdx) => {
+    file.suite.blocks.forEach((block, blockIdx) => {
       const item = fileNode.querySelector(`.block-item[data-block-idx="${blockIdx}"]`);
       if (!item) return;
       const dot = item.querySelector('.block-status');
-      if (!dot) return;
-      const status = getBlockStatus(fileIdx, blockIdx);
-      dot.className = `block-status ${status ? 'status-' + status : ''}`;
+      if (dot) {
+        const status = getBlockStatus(fileIdx, blockIdx);
+        dot.className = `block-status ${status ? 'status-' + status : ''}`;
+      }
+      // V1.1: refresh loop-block sidebar visuals (badge + iter sub-list)
+      // in place so post-run state shows up without rebuilding the file
+      // tree (which would lose expand/collapse state).
+      if (hasLoopDirective(block)) {
+        syncSidebarLoopBadge(item, fileIdx, blockIdx);
+        syncSidebarLoopIterList(item, fileIdx, blockIdx);
+      }
     });
     // Update group summary dots
     fileNode.querySelectorAll('.group-node').forEach(gn => {
@@ -2839,6 +2866,31 @@ function displayResponse(resp) {
 let activeResponseStepIdx = 0;
 
 /**
+ * Per-block filter state for the iter-tabs strip. Keyed by
+ * `${fileIdx}-${blockIdx}`. Value is `'all'` (default) or `'failed'`.
+ * Cleared automatically when the user switches files (handled in
+ * closeFile / loadFile).
+ */
+let loopTabFilter = {};
+
+/**
+ * Returns the next or previous failed-iteration index, wrapping around
+ * the end of the iters list. Returns -1 if there are no failures.
+ */
+function findAdjacentFailedIter(iters, fromIdx, direction) {
+  if (!iters || iters.length === 0) return -1;
+  const failedIdxs = iters
+    .map((it, i) => ({ it, i }))
+    .filter(({ it }) => it.status === 'failed' || it.status === 'error')
+    .map(({ i }) => i);
+  if (failedIdxs.length === 0) return -1;
+  if (direction > 0) {
+    return failedIdxs.find((i) => i > fromIdx) ?? failedIdxs[0];
+  }
+  return [...failedIdxs].reverse().find((i) => i < fromIdx) ?? failedIdxs[failedIdxs.length - 1];
+}
+
+/**
  * Render the per-step (compare) OR per-iteration (loop) tabs above the
  * response panel's sub-tabs. Hidden for plain blocks. Click on a tab
  * triggers `showResponseForBlock` to swap the displayed step/iteration.
@@ -2881,6 +2933,27 @@ function renderResponseStepTabs(fileIdx, blockIdx) {
     // Loop block: one tab per iteration. Label is "N: <truncated value>"
     // so identical iter values still show up as distinct tabs and the
     // user can see at a glance which value drove which response.
+    const filterKey = `${fileIdx}-${blockIdx}`;
+    const failedCount = iters.filter(it => it.status === 'failed' || it.status === 'error').length;
+    // Normalize filter state: if a rerun made the loop all-pass, drop any
+    // stale "failed" filter so the user doesn't end up staring at an
+    // entirely empty tab strip with no chip to recover.
+    if (failedCount === 0 && loopTabFilter[filterKey] === 'failed') {
+      delete loopTabFilter[filterKey];
+    }
+    const filterMode = loopTabFilter[filterKey] || 'all';
+
+    // Filter chip — only render when there ARE failures to filter to.
+    // For a clean all-pass run the strip stays minimal.
+    if (failedCount > 0) {
+      const allActive = filterMode === 'all' ? ' active' : '';
+      const failActive = filterMode === 'failed' ? ' active' : '';
+      html += `<div class="iter-tab-filter" role="group" aria-label="Iteration filter">
+        <button class="iter-filter-btn${allActive}" data-filter-mode="all" title="Show all iterations">All ${iters.length}</button>
+        <button class="iter-filter-btn fail${failActive}" data-filter-mode="failed" title="Show only failed iterations (n / Shift+N to navigate)">Failed ${failedCount}</button>
+      </div>`;
+    }
+
     iters.forEach((it, ii) => {
       const cls = it.status === 'passed' ? 'passed'
         : it.status === 'failed' ? 'failed'
@@ -2888,15 +2961,47 @@ function renderResponseStepTabs(fileIdx, blockIdx) {
         : 'pending';
       const dot = `<span class="step-status ${cls}"></span>`;
       const active = ii === activeResponseStepIdx ? ' active' : '';
-      const label = `#${it.index + 1}: ${escapeHtml(truncateForTab(it.iter_value))}`;
+      const labelText = formatIterLabel(it.iter_value);
+      const label = `#${it.index + 1}${labelText ? `: ${escapeHtml(labelText)}` : ''}`;
       const tip = it.body_omitted
         ? `Iteration ${it.index} — body trimmed by storage cap (status & assertions kept)`
         : `Iteration ${it.index}`;
-      html += `<button class="response-step-tab${active}" data-step-idx="${ii}" title="${escapeAttr(tip)}">${label}${dot}</button>`;
+      // CSS `display:none` for hidden tabs (filtered out) — keeps DOM
+      // index stable so data-step-idx == iter index.
+      const hiddenStyle = (filterMode === 'failed' && cls !== 'failed') ? ' style="display:none"' : '';
+      html += `<button class="response-step-tab${active}" data-step-idx="${ii}" data-iter-status="${cls}"${hiddenStyle} title="${escapeAttr(tip)}">${label}${dot}</button>`;
     });
   }
   responseStepTabs.innerHTML = html;
   responseStepTabs.classList.remove('hidden');
+
+  // Filter button handlers (loop blocks only).
+  responseStepTabs.querySelectorAll('.iter-filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const mode = btn.dataset.filterMode;
+      if (!mode) return;
+      const filterKey = `${fileIdx}-${blockIdx}`;
+      loopTabFilter[filterKey] = mode;
+      // If switching to failed-only and the current iter is passed, jump
+      // to the first failure so the user's view stays meaningful.
+      if (mode === 'failed') {
+        const file = loadedFiles[fileIdx];
+        const br = file?.results?.block_results?.[blockIdx];
+        const iters = getBlockIterations(br);
+        const cur = iters[activeResponseStepIdx];
+        if (!cur || (cur.status !== 'failed' && cur.status !== 'error')) {
+          const firstFail = findAdjacentFailedIter(iters, -1, +1);
+          if (firstFail >= 0) {
+            activeResponseStepIdx = firstFail;
+            showResponseForBlock(fileIdx, blockIdx, firstFail);
+            renderAssertions(fileIdx, blockIdx);
+            return;
+          }
+        }
+      }
+      renderResponseStepTabs(fileIdx, blockIdx);
+    });
+  });
 
   responseStepTabs.querySelectorAll('.response-step-tab').forEach(tab => {
     tab.addEventListener('click', () => {
@@ -2904,6 +3009,12 @@ function renderResponseStepTabs(fileIdx, blockIdx) {
       if (Number.isNaN(idx)) return;
       activeResponseStepIdx = idx;
       showResponseForBlock(fileIdx, blockIdx, idx);
+      // For loop blocks, the assertion / extract results live INSIDE the
+      // focused iter (parent br arrays are empty). Re-render the
+      // assertions tab so it reflects the newly-focused iteration.
+      // Compare blocks render all steps' assertions in one pass, so this
+      // is also fine to call for them — it's idempotent.
+      if (isLoop) renderAssertions(fileIdx, blockIdx);
     });
   });
 }
@@ -2918,6 +3029,76 @@ function truncateForTab(s) {
   const max = 30;
   if (s.length <= max) return s;
   return s.slice(0, max - 1) + '…';
+}
+
+/**
+ * Format a per-iteration label for display in tabs and breadcrumbs.
+ *
+ * The Rust runner stores iter_value as a JSON-serialized string for
+ * non-scalar elements (objects/arrays) and as the raw string for scalar
+ * elements. For scalars, just truncate. For objects, try to extract a
+ * short, informative key (id / name / key / first scalar field) — a
+ * literal `{"id":"u_abc","email":"a@example.com",…}` doesn't help users
+ * tell iterations apart at a glance.
+ *
+ * Returns a string suitable for display (always truncated to ~30 chars).
+ */
+function formatIterLabel(iterValue) {
+  if (iterValue == null) return '';
+  if (typeof iterValue !== 'string') return truncateForTab(String(iterValue));
+  // Heuristic: if it parses as a JSON object, try to extract a useful key.
+  const trimmed = iterValue.trim();
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const obj = JSON.parse(trimmed);
+      if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+        // Prefer well-known keys; then any string-typed scalar.
+        const preferredKeys = ['id', 'name', 'key', 'slug', 'email', 'title'];
+        for (const k of preferredKeys) {
+          if (k in obj && (typeof obj[k] === 'string' || typeof obj[k] === 'number' || typeof obj[k] === 'boolean')) {
+            return truncateForTab(`${k}=${obj[k]}`);
+          }
+        }
+        // Fallback: first scalar field.
+        for (const [k, v] of Object.entries(obj)) {
+          if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+            return truncateForTab(`${k}=${v}`);
+          }
+        }
+      }
+    } catch (_) { /* fall through to plain truncation */ }
+  }
+  return truncateForTab(iterValue);
+}
+
+/**
+ * Set the iteration breadcrumb shown in the response-panel header.
+ * Pass `null` to hide it. Otherwise `iter` is an IterationResult and
+ * `total` is iters.length.
+ *
+ * The breadcrumb shows `Iter 7/20 · user_id=u_abc` so the user always
+ * knows which iteration's body / assertions / extracts they're seeing.
+ * Status icon (✓/✗) reflects the iteration's pass/fail state.
+ */
+function setIterBreadcrumb(iter, total) {
+  if (!responseIterBadge) return;
+  if (!iter || !total) {
+    responseIterBadge.textContent = '';
+    responseIterBadge.classList.add('hidden');
+    responseIterBadge.classList.remove('passed', 'failed');
+    return;
+  }
+  const idx = (iter.index ?? 0) + 1;
+  const valLabel = formatIterLabel(iter.iter_value);
+  const icon = iter.status === 'passed' ? '\u2713'
+    : iter.status === 'failed' || iter.status === 'error' ? '\u2717'
+    : '\u25CB';
+  responseIterBadge.textContent = `${icon} Iter ${idx}/${total}` +
+    (valLabel ? ` \u00B7 ${valLabel}` : '') +
+    (iter.body_omitted ? ' \u00B7 \u2205 omitted' : '');
+  responseIterBadge.classList.remove('hidden', 'passed', 'failed');
+  if (iter.status === 'passed') responseIterBadge.classList.add('passed');
+  else if (iter.status === 'failed' || iter.status === 'error') responseIterBadge.classList.add('failed');
 }
 
 /**
@@ -2943,12 +3124,17 @@ function showResponseForBlock(fileIdx, blockIdx, preferredStepIdx) {
   const br = file?.results?.block_results?.[blockIdx];
   if (!block || !br) {
     renderResponseStepTabs(fileIdx, blockIdx);
+    setIterBreadcrumb(null);
     return null;
   }
 
   const isCompare = !!(block.compare && block.steps && block.steps.length > 0);
   const iters = !isCompare && hasLoopDirective(block) ? getBlockIterations(br) : [];
   const isLoop = !isCompare && iters.length > 0;
+
+  // Breadcrumb is loop-only — clear for compare and plain blocks so it
+  // doesn't linger from a prior iter selection.
+  if (!isLoop) setIterBreadcrumb(null);
 
   if (!isCompare && !isLoop) {
     if (responseStepTabs) {
@@ -2978,6 +3164,7 @@ function showResponseForBlock(fileIdx, blockIdx, preferredStepIdx) {
     renderResponseStepTabs(fileIdx, blockIdx);
 
     const it = iters[pick];
+    setIterBreadcrumb(it, iters.length);
     const inner = it?.block_result;
     if (it?.body_omitted) {
       // Iteration was trimmed by the storage cap — show a friendly note
@@ -4043,15 +4230,30 @@ function createBlockItem(file, fileIdx, block, blockIdx) {
   // Loop badge: shown when the block has a `# @@for` directive. After a
   // run, the count comes from the actual iteration result list; pre-run
   // it falls back to a generic "× loop" hint so the user knows the
-  // directive is set even before any iterations exist.
+  // directive is set even before any iterations exist. When any iteration
+  // failed, the badge surfaces the failure count (× 20 (5 ✗)) so users
+  // see breakage at a glance without expanding the sub-list.
   let loopBadgeHtml = '';
   if (hasLoopDirective(block)) {
     const loopBr = file.results?.block_results?.[blockIdx];
-    const iterCount = getBlockIterations(loopBr).length;
-    const loopTip = `Loop: for ${block.for_loop.iter_var} in ${block.for_loop.source_var}` +
-      (iterCount > 0 ? ` (${iterCount} iterations)` : '');
-    const loopLabel = iterCount > 0 ? `× ${iterCount}` : '× loop';
-    loopBadgeHtml = `<span class="block-loop-badge" title="${escapeAttr(loopTip)}">${escapeHtml(loopLabel)}</span>`;
+    const stats = iterFailureCount(loopBr);
+    const tipParts = [`Loop: for ${block.for_loop.iter_var} in ${block.for_loop.source_var}`];
+    if (stats.total > 0) {
+      tipParts.push(`${stats.total} iterations: ${stats.passed} passed, ${stats.failed} failed`);
+      if (stats.omitted > 0) tipParts.push(`${stats.omitted} bodies omitted by storage cap`);
+    }
+    const loopTip = tipParts.join(' \u2014 ');
+    let loopLabel;
+    let badgeClass = 'block-loop-badge';
+    if (stats.total === 0) {
+      loopLabel = '\u00D7 loop';
+    } else if (stats.failed > 0) {
+      loopLabel = `\u00D7 ${stats.total} (${stats.failed} \u2717)`;
+      badgeClass += ' has-failures';
+    } else {
+      loopLabel = `\u00D7 ${stats.total}`;
+    }
+    loopBadgeHtml = `<span class="${badgeClass}" title="${escapeAttr(loopTip)}">${escapeHtml(loopLabel)}</span>`;
   }
   item.innerHTML = `
     <input type="checkbox" class="block-toggle" title="Enable/disable this step" ${isDisabled ? '' : 'checked'}>
@@ -4136,40 +4338,116 @@ function createBlockItem(file, fileIdx, block, blockIdx) {
   // Add per-iteration sub-items for # @@for-looped blocks (mutually
   // exclusive with compare in V1). Only renders after a run produces
   // iterations — pre-run, the loop badge above is the only hint.
+  // Overflow handling: when there are more than `OVERFLOW_THRESHOLD`
+  // iterations, show all failures + first 5 passed by default and tuck
+  // the rest behind a "+N more" toggle so the sidebar tree stays
+  // navigable for 100+-iter loops.
   if (!block.compare && hasLoopDirective(block)) {
-    const br = file.results?.block_results?.[blockIdx];
-    const iters = getBlockIterations(br);
-    if (iters.length > 0) {
-      const itersContainer = document.createElement('div');
-      itersContainer.className = 'loop-iterations';
-      iters.forEach((it, ii) => {
-        const itEl = document.createElement('div');
-        itEl.className = 'loop-iteration-item';
-        const cls = it.status === 'passed' ? 'passed'
-          : it.status === 'failed' ? 'failed'
-          : it.status === 'error' ? 'error'
-          : '';
-        const omittedHint = it.body_omitted ? ' (body omitted)' : '';
-        const tip = `Iteration ${it.index + 1}: ${it.iter_value} — ${it.status}${omittedHint}`;
-        itEl.innerHTML = `
-          <span class="block-status ${cls ? 'status-' + cls : ''}"></span>
-          <span class="step-label" title="${escapeAttr(tip)}">#${it.index + 1}: ${escapeHtml(truncateForTab(it.iter_value))}</span>
-          ${it.body_omitted ? '<span class="loop-omitted-flag" title="Body omitted by storage cap">∅</span>' : ''}
-        `;
-        itEl.addEventListener('click', (e) => {
-          e.stopPropagation();
-          // Switch to the parent block and show this iter's response.
-          activeResponseStepIdx = ii;
-          selectBlock(fileIdx, blockIdx);
-          showResponseForBlock(fileIdx, blockIdx, ii);
-        });
-        itersContainer.appendChild(itEl);
-      });
-      item.appendChild(itersContainer);
-    }
+    syncSidebarLoopIterList(item, fileIdx, blockIdx);
   }
 
   return item;
+}
+
+// Render (or replace) the per-iteration sub-list inside a sidebar block-item.
+// Pulled out of createBlockItem so updateBlockStatuses() can refresh the list
+// after a run without rebuilding the entire file tree (which would lose
+// expand/collapse state). Idempotent — removes any pre-existing sub-list +
+// "more" link before drawing fresh ones.
+function syncSidebarLoopIterList(blockItemEl, fileIdx, blockIdx) {
+  if (!blockItemEl) return;
+  // Strip any existing render so we can repaint cleanly. Also drops the
+  // overflow class on rows whose status changed since the last render.
+  blockItemEl.querySelectorAll(':scope > .loop-iterations').forEach(n => n.remove());
+
+  const file = loadedFiles[fileIdx];
+  if (!file) return;
+  const block = file.suite.blocks[blockIdx];
+  if (!block || block.compare || !hasLoopDirective(block)) return;
+
+  const br = file.results?.block_results?.[blockIdx];
+  const iters = getBlockIterations(br);
+  if (iters.length === 0) return;
+
+  const OVERFLOW_THRESHOLD = 10;
+  const HIDDEN_PASSED_KEEP_FIRST = 5;
+  const itersContainer = document.createElement('div');
+  itersContainer.className = 'loop-iterations';
+
+  let passedShownSoFar = 0;
+  iters.forEach((it, ii) => {
+    const isFail = it.status === 'failed' || it.status === 'error';
+    const itEl = document.createElement('div');
+    itEl.className = 'loop-iteration-item';
+    const cls = it.status === 'passed' ? 'passed'
+      : it.status === 'failed' ? 'failed'
+      : it.status === 'error' ? 'error'
+      : '';
+    const labelText = formatIterLabel(it.iter_value);
+    const omittedHint = it.body_omitted ? ' (body omitted)' : '';
+    const tip = `Iteration ${it.index + 1}: ${it.iter_value} — ${it.status}${omittedHint}`;
+    itEl.innerHTML = `
+      <span class="block-status ${cls ? 'status-' + cls : ''}"></span>
+      <span class="step-label" title="${escapeAttr(tip)}">#${it.index + 1}${labelText ? `: ${escapeHtml(labelText)}` : ''}</span>
+      ${it.body_omitted ? '<span class="loop-omitted-flag" title="Body omitted by storage cap">∅</span>' : ''}
+    `;
+    itEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      activeResponseStepIdx = ii;
+      selectBlock(fileIdx, blockIdx);
+      showResponseForBlock(fileIdx, blockIdx, ii);
+    });
+    if (iters.length > OVERFLOW_THRESHOLD && !isFail) {
+      if (passedShownSoFar < HIDDEN_PASSED_KEEP_FIRST) {
+        passedShownSoFar += 1;
+      } else {
+        itEl.classList.add('loop-iter-overflow');
+      }
+    }
+    itersContainer.appendChild(itEl);
+  });
+
+  const overflowCount = itersContainer.querySelectorAll('.loop-iter-overflow').length;
+  if (overflowCount > 0) {
+    const moreLink = document.createElement('div');
+    moreLink.className = 'loop-iterations-more';
+    moreLink.textContent = `+ ${overflowCount} more`;
+    moreLink.title = 'Show all iterations (failures are always visible)';
+    moreLink.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const expanded = itersContainer.classList.toggle('expanded');
+      moreLink.textContent = expanded ? 'show less' : `+ ${overflowCount} more`;
+    });
+    itersContainer.appendChild(moreLink);
+  }
+  blockItemEl.appendChild(itersContainer);
+}
+
+// Refresh the loop-failure badge text + has-failures class on a sidebar
+// block-item in place. Mirrors the badge logic in createBlockItem so the
+// post-run lightweight refresh path stays in sync.
+function syncSidebarLoopBadge(blockItemEl, fileIdx, blockIdx) {
+  if (!blockItemEl) return;
+  const file = loadedFiles[fileIdx];
+  if (!file) return;
+  const block = file.suite.blocks[blockIdx];
+  if (!block || !hasLoopDirective(block)) return;
+  const badge = blockItemEl.querySelector('.block-loop-badge');
+  if (!badge) return;
+  const br = file.results?.block_results?.[blockIdx];
+  const stats = iterFailureCount(br);
+  badge.classList.toggle('has-failures', stats.failed > 0);
+  let label;
+  if (stats.total === 0) label = '\u00D7 loop';
+  else if (stats.failed > 0) label = `\u00D7 ${stats.total} (${stats.failed} \u2717)`;
+  else label = `\u00D7 ${stats.total}`;
+  badge.textContent = label;
+  const tipParts = [`Loop: for ${block.for_loop.iter_var} in ${block.for_loop.source_var}`];
+  if (stats.total > 0) {
+    tipParts.push(`${stats.total} iterations: ${stats.passed} passed, ${stats.failed} failed`);
+    if (stats.omitted > 0) tipParts.push(`${stats.omitted} bodies omitted by storage cap`);
+  }
+  badge.title = tipParts.join(' \u2014 ');
 }
 
 function closeFile(fileIdx) {
@@ -4205,6 +4483,18 @@ function closeFile(fileIdx) {
     newViewed.set(`${newFi}-${bi}`, val);
   });
   viewedResults = newViewed;
+
+  // Re-index loopTabFilter the same way so a per-block "show failed only"
+  // mode set on file N doesn't bleed into a different block at file N
+  // after a file close.
+  const newLoopFilter = {};
+  Object.keys(loopTabFilter).forEach(key => {
+    const [fi, bi] = key.split('-').map(Number);
+    if (fi === fileIdx) return;
+    const newFi = fi > fileIdx ? fi - 1 : fi;
+    newLoopFilter[`${newFi}-${bi}`] = loopTabFilter[key];
+  });
+  loopTabFilter = newLoopFilter;
 
   renderFileTree();
   renderEnvVars();
@@ -5377,12 +5667,44 @@ function renderAssertions(fileIdx, blockIdx) {
     return;
   }
 
+  // For looped blocks, the parent BlockResult.assertion_results /
+  // extract_results / error are empty — assertions and extracts run
+  // INSIDE each iteration. Route to the focused iteration so the user
+  // sees the assertion details for whichever iter tab is active.
+  // (When the loop has no iterations yet — e.g., pre-run — this falls
+  // through to the parent br paths which return empty arrays correctly.)
+  const iters = hasLoopDirective(block) ? getBlockIterations(br) : [];
+  const isLoopWithIters = iters.length > 0;
+  let assertionResults, extractResults, errorMsg, iterHeaderHtml = '';
+  if (isLoopWithIters) {
+    let pick = activeResponseStepIdx >= 0 && activeResponseStepIdx < iters.length
+      ? activeResponseStepIdx : 0;
+    const it = iters[pick];
+    const inner = it?.block_result;
+    assertionResults = inner?.assertion_results || [];
+    extractResults = inner?.extract_results || [];
+    errorMsg = inner?.error || null;
+    // Lightweight breadcrumb so the user knows which iteration's results
+    // they're looking at. Full breadcrumb in the response-panel header
+    // is a separate task (rep11-iter-breadcrumb).
+    const valLabel = formatIterLabel(it?.iter_value);
+    const iterStatus = it?.status === 'passed' ? '\u2713'
+      : it?.status === 'failed' || it?.status === 'error' ? '\u2717'
+      : '\u25CB';
+    iterHeaderHtml = `<div class="assertion-group iter-focus-header"><div class="assertion-group-header">${iterStatus} Iteration ${(it?.index ?? pick) + 1} / ${iters.length}${valLabel ? ` \u00B7 ${escapeHtml(valLabel)}` : ''}</div></div>`;
+  } else {
+    assertionResults = br?.assertion_results || [];
+    extractResults = br?.extract_results || [];
+    errorMsg = br?.error;
+  }
+  html += iterHeaderHtml;
+
   // Assertions
   if (block.assertions && block.assertions.length > 0) {
     html += '<div class="assertion-group"><div class="assertion-group-header">Assertions</div>';
     block.assertions.forEach((assertion, i) => {
       const assertionText = `${assertion.left} ${assertion.operator} ${assertion.right}`;
-      const ar = br?.assertion_results?.[i];
+      const ar = assertionResults[i];
       const passed = ar ? ar.passed : null;
       const statusClass = passed === true ? 'passed' : passed === false ? 'failed' : '';
       const icon = passed === true ? '\u2713' : passed === false ? '\u2717' : '\u25CB';
@@ -5407,7 +5729,7 @@ function renderAssertions(fileIdx, blockIdx) {
   if (block.extracts && block.extracts.length > 0) {
     html += '<div class="assertion-group"><div class="assertion-group-header">Variable Extractions</div>';
     block.extracts.forEach((extract, i) => {
-      const er = br?.extract_results?.[i];
+      const er = extractResults[i];
       const success = er ? er.success : null;
       const stateClass = success === true ? 'extract-success' : success === false ? 'extract-failed' : '';
       const icon = success === true ? '\u2713' : success === false ? '\u2717' : '\u26A1';
@@ -5426,9 +5748,9 @@ function renderAssertions(fileIdx, blockIdx) {
   }
 
   // Error message from run
-  if (br?.error) {
+  if (errorMsg) {
     html += `<div class="assertion-group"><div class="assertion-group-header">Error</div>
-      <div class="assertion-row failed"><span class="assert-icon">\u2717</span><span class="assert-text">${escapeHtml(br.error)}</span></div>
+      <div class="assertion-row failed"><span class="assert-icon">\u2717</span><span class="assert-text">${escapeHtml(errorMsg)}</span></div>
     </div>`;
   }
 
@@ -10597,6 +10919,30 @@ document.addEventListener('keydown', (e) => {
       } else {
         switchMode('builder');
       }
+    }
+  }
+  // n / Shift+N -> next / previous failed iteration in the focused
+  // looped block. Only fires when no text input is focused (so typing
+  // 'n' in the URL or metadata fields still works normally).
+  if ((e.key === 'n' || e.key === 'N') && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    const target = e.target;
+    const tag = target?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return;
+    if (activeFileIndex == null || activeFileIndex < 0) return;
+    if (activeBlockIndex == null || activeBlockIndex < 0) return;
+    const file = loadedFiles[activeFileIndex];
+    const block = file?.suite?.blocks?.[activeBlockIndex];
+    if (!block || !hasLoopDirective(block)) return;
+    const br = file.results?.block_results?.[activeBlockIndex];
+    const iters = getBlockIterations(br);
+    if (iters.length === 0) return;
+    const dir = e.shiftKey ? -1 : +1;
+    const target_idx = findAdjacentFailedIter(iters, activeResponseStepIdx, dir);
+    if (target_idx >= 0 && target_idx !== activeResponseStepIdx) {
+      e.preventDefault();
+      activeResponseStepIdx = target_idx;
+      showResponseForBlock(activeFileIndex, activeBlockIndex, target_idx);
+      renderAssertions(activeFileIndex, activeBlockIndex);
     }
   }
 });

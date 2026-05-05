@@ -74,6 +74,7 @@ function bootDesktopApp() {
       selectBlock(fi, bi) { return selectBlock(fi, bi); },
       showResponseForBlock(fi, bi, si) { return showResponseForBlock(fi, bi, si); },
       getActiveResponseStepIdx() { return activeResponseStepIdx; },
+      setActiveResponseStepIdx(v) { activeResponseStepIdx = v; },
       setActiveFileIndex(v) { activeFileIndex = v; },
       setActiveBlockIndex(v) { activeBlockIndex = v; },
       getActiveFileIndex() { return activeFileIndex; },
@@ -83,6 +84,10 @@ function bootDesktopApp() {
       renderFileTree() { return renderFileTree(); },
       populateMetadata(block) { return populateMetadata(block); },
       applyMetadataToBlock() { return applyMetadataToBlock(); },
+      iterFailureCount(br) { return iterFailureCount(br); },
+      formatIterLabel(v) { return formatIterLabel(v); },
+      findAdjacentFailedIter(iters, fromIdx, dir) { return findAdjacentFailedIter(iters, fromIdx, dir); },
+      renderAssertions(fi, bi) { return renderAssertions(fi, bi); },
     };
   </script>`;
 
@@ -155,7 +160,7 @@ function mkResp(status, statusText, body, timeMs) {
   };
 }
 
-function mkInnerBlockResult(iterIdx, status, body) {
+function mkInnerBlockResult(iterIdx, status, body, assertionResults) {
   return {
     seq: null,
     name: 'LoopBlock',
@@ -169,11 +174,80 @@ function mkInnerBlockResult(iterIdx, status, body) {
     response: status === 'error' ? null : mkResp(200, 'OK', body, 5),
     error: status === 'error' ? `iter ${iterIdx} err` : null,
     time_ms: 5,
-    assertion_results: [], extract_results: [],
+    assertion_results: assertionResults || [],
+    extract_results: [],
     step_results: [],
     diff_result: null,
     diff_results: [],
     iterations: [],
+  };
+}
+
+/**
+ * Build a 20-iteration loaded-file fixture with N failures spread out.
+ * Used for tests that exercise the failure-introspection UX:
+ *   - pass/fail badge math
+ *   - show-failed-only filter
+ *   - keyboard nav next/prev failure
+ *   - sidebar overflow handling at >10 iters
+ *   - per-iter assertion-tab routing
+ *
+ * The block has two assertions defined; each iter's block_result carries
+ * the per-iter results so the assertion tab can be tested per-iter.
+ */
+function makeBigLoopLoadedFile(failedIndexes = [3, 7, 11, 15, 19]) {
+  const failedSet = new Set(failedIndexes);
+  const iterations = [];
+  for (let i = 0; i < 20; i += 1) {
+    const isFail = failedSet.has(i);
+    const status = isFail ? 'failed' : 'passed';
+    const ar = [
+      { passed: !isFail, actual: isFail ? '500' : '200' },
+      { passed: true, actual: 'ok' },
+    ];
+    iterations.push({
+      index: i, iter_value: `u${i + 1}`, status,
+      block_result: mkInnerBlockResult(i, status, `body for u${i + 1}`, ar),
+      body_omitted: false,
+    });
+  }
+  return {
+    name: 'big-loop.http', path: '/tmp/big-loop.http', content: '',
+    suite: {
+      variables: [],
+      blocks: [
+        {
+          block_type: 'test', name: 'BigLoop', description: 'twenty iters',
+          compare: false, steps: [],
+          request: { method: 'GET', url: '/users/{{u}}', headers: [], body: null },
+          assertions: [
+            { left: 'status', operator: '==', right: '200' },
+            { left: '$.status', operator: '==', right: 'ok' },
+          ],
+          extracts: [],
+          diff: null, diffs: [],
+          disabled: false, mode: null, dev_auth: null,
+          group: null, depends: [],
+          for_loop: { iter_var: 'u', source_var: 'us' },
+        },
+      ],
+    },
+    results: {
+      passed: 0, failed: failedIndexes.length, skipped: 0, total_time_ms: 100,
+      block_results: [
+        {
+          seq: 0, name: 'BigLoop', block_type: 'test', group: null,
+          request_method: 'GET', request_url: '/users/{{u}}',
+          request_headers: [], request_body: null,
+          status: 'failed', response: null, error: null, time_ms: 100,
+          assertion_results: [], extract_results: [],
+          step_results: [],
+          diff_result: null, diff_results: [],
+          iterations,
+        },
+      ],
+      final_variables: {},
+    },
   };
 }
 
@@ -469,6 +543,430 @@ describe('repeater V1 — # @@for UI', () => {
       // for_loop should be cleared because @@compare + @@for is parser-rejected.
       expect(block.compare).toBe(true);
       expect(block.for_loop).toBeNull();
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  // ============================================================
+  // V1.1 — failure introspection polish tests
+  // ============================================================
+
+  test('iterFailureCount returns total/passed/failed/omitted breakdown', async () => {
+    const app = bootDesktopApp();
+    try {
+      const file = makeBigLoopLoadedFile();
+      app.bridge.setLoadedFiles([file]);
+      const br = file.results.block_results[0];
+      const breakdown = app.bridge.iterFailureCount(br);
+      expect(breakdown).toEqual({ total: 20, passed: 15, failed: 5, omitted: 0 });
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('loop badge shows "× 20 (5 ✗)" with has-failures class when iters fail', async () => {
+    const app = bootDesktopApp();
+    try {
+      app.bridge.setLoadedFiles([makeBigLoopLoadedFile()]);
+      app.bridge.renderFileTree();
+      const badge = app.document.querySelector('.block-loop-badge');
+      expect(badge).toBeTruthy();
+      expect(badge.classList.contains('has-failures')).toBe(true);
+      expect(badge.textContent).toMatch(/×\s*20/);
+      expect(badge.textContent).toContain('5');
+      expect(badge.textContent).toMatch(/✗/);
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('loop badge omits failure suffix when all iters pass', async () => {
+    const app = bootDesktopApp();
+    try {
+      app.bridge.setLoadedFiles([makeBigLoopLoadedFile([])]);
+      app.bridge.renderFileTree();
+      const badge = app.document.querySelector('.block-loop-badge');
+      expect(badge).toBeTruthy();
+      expect(badge.classList.contains('has-failures')).toBe(false);
+      expect(badge.textContent).not.toMatch(/✗/);
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('"show failed only" filter chip renders when failures exist', async () => {
+    const app = bootDesktopApp();
+    try {
+      app.bridge.setLoadedFiles([makeBigLoopLoadedFile()]);
+      app.bridge.selectBlock(0, 0);
+      const filterChip = app.document.querySelector('#responseStepTabs .iter-tab-filter');
+      expect(filterChip).toBeTruthy();
+      const buttons = filterChip.querySelectorAll('.iter-filter-btn');
+      expect(buttons.length).toBe(2);
+      expect(buttons[0].textContent).toMatch(/All\s*20/);
+      expect(buttons[1].textContent).toMatch(/Failed\s*5/);
+      expect(buttons[0].classList.contains('active')).toBe(true);
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('"show failed only" toggle hides passed iters and jumps to first failure', async () => {
+    const app = bootDesktopApp();
+    try {
+      app.bridge.setLoadedFiles([makeBigLoopLoadedFile([3, 7])]);
+      app.bridge.selectBlock(0, 0);
+
+      const filterChip = app.document.querySelector('#responseStepTabs .iter-tab-filter');
+      const failedBtn = filterChip.querySelectorAll('.iter-filter-btn')[1];
+      failedBtn.click();
+
+      const tabs = app.document.querySelectorAll('#responseStepTabs .response-step-tab');
+      // Iter 0 (passed) should be hidden; iter 3 (failed) should be visible.
+      expect(tabs[0].style.display).toBe('none');
+      expect(tabs[3].style.display).not.toBe('none');
+      expect(tabs[7].style.display).not.toBe('none');
+      // Active iter auto-jumped to first failure (index 3).
+      expect(app.bridge.getActiveResponseStepIdx()).toBe(3);
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('filter chip is hidden when no iters fail', async () => {
+    const app = bootDesktopApp();
+    try {
+      app.bridge.setLoadedFiles([makeBigLoopLoadedFile([])]);
+      app.bridge.selectBlock(0, 0);
+      const filterChip = app.document.querySelector('#responseStepTabs .iter-tab-filter');
+      expect(filterChip).toBeFalsy();
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('findAdjacentFailedIter walks forward and wraps around', async () => {
+    const app = bootDesktopApp();
+    try {
+      const iters = [
+        { status: 'passed' },
+        { status: 'failed' },
+        { status: 'passed' },
+        { status: 'failed' },
+        { status: 'passed' },
+      ];
+      // From idx 0, next failure is idx 1.
+      expect(app.bridge.findAdjacentFailedIter(iters, 0, 1)).toBe(1);
+      // From idx 1, next failure is idx 3.
+      expect(app.bridge.findAdjacentFailedIter(iters, 1, 1)).toBe(3);
+      // From idx 3 forward wraps to idx 1.
+      expect(app.bridge.findAdjacentFailedIter(iters, 3, 1)).toBe(1);
+      // From idx 0 backward wraps to idx 3 (last failure).
+      expect(app.bridge.findAdjacentFailedIter(iters, 0, -1)).toBe(3);
+      // From idx -1 (no selection) forward jumps to first failure.
+      expect(app.bridge.findAdjacentFailedIter(iters, -1, 1)).toBe(1);
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('keyboard "n" jumps to next failed iteration', async () => {
+    const app = bootDesktopApp();
+    try {
+      app.bridge.setLoadedFiles([makeBigLoopLoadedFile([3, 7, 11, 15, 19])]);
+      app.bridge.selectBlock(0, 0);
+      app.bridge.setActiveResponseStepIdx(0);
+
+      const ev = new app.window.KeyboardEvent('keydown', {
+        key: 'n', bubbles: true, cancelable: true,
+      });
+      app.document.dispatchEvent(ev);
+
+      expect(app.bridge.getActiveResponseStepIdx()).toBe(3);
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('keyboard "Shift+N" jumps to previous failed iteration', async () => {
+    const app = bootDesktopApp();
+    try {
+      app.bridge.setLoadedFiles([makeBigLoopLoadedFile([3, 7, 11, 15, 19])]);
+      app.bridge.selectBlock(0, 0);
+      app.bridge.setActiveResponseStepIdx(15);
+
+      const ev = new app.window.KeyboardEvent('keydown', {
+        key: 'N', shiftKey: true, bubbles: true, cancelable: true,
+      });
+      app.document.dispatchEvent(ev);
+
+      expect(app.bridge.getActiveResponseStepIdx()).toBe(11);
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('keyboard "n" is ignored when typing in an input field', async () => {
+    const app = bootDesktopApp();
+    try {
+      app.bridge.setLoadedFiles([makeBigLoopLoadedFile([3])]);
+      app.bridge.selectBlock(0, 0);
+      app.bridge.setActiveResponseStepIdx(0);
+
+      // Inject an input element and focus it; keydown should not trigger nav.
+      const input = app.document.createElement('input');
+      input.type = 'text';
+      app.document.body.appendChild(input);
+      input.focus();
+
+      const ev = new app.window.KeyboardEvent('keydown', {
+        key: 'n', bubbles: true, cancelable: true,
+      });
+      input.dispatchEvent(ev);
+
+      expect(app.bridge.getActiveResponseStepIdx()).toBe(0);
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('formatIterLabel: scalars, objects, preferred keys, fallback', async () => {
+    const app = bootDesktopApp();
+    try {
+      const fmt = app.bridge.formatIterLabel;
+      // Scalars (strings — that's how the runner serializes scalar iter_values).
+      expect(fmt('u_abc')).toBe('u_abc');
+      expect(fmt('42')).toBe('42');
+      // Object inputs arrive as JSON-stringified text from the runner.
+      expect(fmt('{"id":"u_abc","email":"foo@x.com"}')).toContain('u_abc');
+      // Object without id but with `name`
+      expect(fmt('{"name":"alice","age":30}')).toContain('alice');
+      // Object with no preferred keys — falls back to first scalar field
+      expect(fmt('{"foo":"bar"}')).toContain('bar');
+      // null / undefined / non-string non-object — should produce a non-empty
+      // fallback string, not crash.
+      expect(typeof fmt(null)).toBe('string');
+      expect(typeof fmt(undefined)).toBe('string');
+      expect(typeof fmt(42)).toBe('string');
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('iter breadcrumb badge renders when focusing a loop iteration', async () => {
+    const app = bootDesktopApp();
+    try {
+      app.bridge.setLoadedFiles([makeBigLoopLoadedFile([3])]);
+      app.bridge.selectBlock(0, 0);
+      app.bridge.showResponseForBlock(0, 0, 3);
+
+      const badge = app.document.getElementById('responseIterBadge');
+      expect(badge).toBeTruthy();
+      expect(badge.classList.contains('hidden')).toBe(false);
+      // Should mention the iter number (4 of 20) and the iter value.
+      expect(badge.textContent).toMatch(/4\s*\/\s*20/);
+      expect(badge.textContent).toContain('u4');
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('iter breadcrumb is hidden for non-loop blocks', async () => {
+    const app = bootDesktopApp();
+    try {
+      app.bridge.setLoadedFiles([makeLoopLoadedFile()]);
+      // Block index 1 is the plain non-loop block in this fixture.
+      app.bridge.selectBlock(0, 1);
+      const badge = app.document.getElementById('responseIterBadge');
+      expect(badge.classList.contains('hidden')).toBe(true);
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('sidebar shows "+N more" link when iters > 10 and hides overflow rows', async () => {
+    const app = bootDesktopApp();
+    try {
+      app.bridge.setLoadedFiles([makeBigLoopLoadedFile([3, 7])]);
+      app.bridge.renderFileTree();
+
+      // The sidebar block must be expanded so the iters are in the DOM.
+      const blockItem = app.document.querySelector('.block-item');
+      blockItem.click();
+
+      const moreLink = app.document.querySelector('.loop-iterations-more');
+      expect(moreLink).toBeTruthy();
+      expect(moreLink.textContent).toMatch(/\+\s*\d+\s*more/);
+
+      // Overflow class should be on (passed-only) rows beyond the first 5.
+      const overflow = app.document.querySelectorAll('.loop-iter-overflow');
+      expect(overflow.length).toBeGreaterThan(0);
+
+      // Clicking expands.
+      moreLink.click();
+      const container = app.document.querySelector('.loop-iterations');
+      expect(container.classList.contains('expanded')).toBe(true);
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('sidebar does NOT render "+N more" when iters <= 10', async () => {
+    const app = bootDesktopApp();
+    try {
+      // makeLoopLoadedFile has only 3 iters — well under the threshold.
+      app.bridge.setLoadedFiles([makeLoopLoadedFile()]);
+      app.bridge.renderFileTree();
+      const blockItem = app.document.querySelector('.block-item');
+      blockItem.click();
+
+      const moreLink = app.document.querySelector('.loop-iterations-more');
+      expect(moreLink).toBeFalsy();
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('renderAssertions for a focused loop iter routes to per-iter results', async () => {
+    const app = bootDesktopApp();
+    try {
+      const file = makeBigLoopLoadedFile([3, 7]);
+      app.bridge.setLoadedFiles([file]);
+      app.bridge.selectBlock(0, 0);
+
+      // Focus iter 3 (failed) — assertion tab should show that iter's results,
+      // not the parent block's empty array.
+      app.bridge.showResponseForBlock(0, 0, 3);
+      app.bridge.renderAssertions(0, 0);
+
+      const list = app.document.getElementById('assertionsContent');
+      expect(list).toBeTruthy();
+      // The fixture's iter-3 first assertion fails with actual=500.
+      expect(list.textContent).toContain('500');
+
+      // Focus iter 0 (passed) — same assertion row but now passing.
+      app.bridge.showResponseForBlock(0, 0, 0);
+      app.bridge.renderAssertions(0, 0);
+      const list2 = app.document.getElementById('assertionsContent');
+      expect(list2.textContent).toContain('200');
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  // --- Regression tests against rubber-duck-identified blind spots ---
+
+  test('failed-only filter is cleared if rerun produces all-pass result', async () => {
+    const app = bootDesktopApp();
+    try {
+      // First run: 3 failures.
+      const file = makeBigLoopLoadedFile([3, 7, 11]);
+      app.bridge.setLoadedFiles([file]);
+      app.bridge.selectBlock(0, 0);
+
+      // Activate Failed-only filter.
+      const failedBtn = app.document
+        .querySelector('#responseStepTabs .iter-tab-filter')
+        .querySelectorAll('.iter-filter-btn')[1];
+      failedBtn.click();
+
+      // Simulate a rerun that fixes all failures.
+      file.results.block_results[0].iterations.forEach(it => {
+        it.status = 'passed';
+        it.block_result.status = 'passed';
+        it.block_result.assertion_results.forEach(ar => {
+          ar.passed = true;
+          ar.actual = '200';
+        });
+      });
+      file.results.block_results[0].status = 'passed';
+      // Re-select the block to trigger a fresh tab render.
+      app.bridge.selectBlock(0, 0);
+
+      // The chip should be gone (no failures). All tabs should be visible.
+      const chip = app.document.querySelector('#responseStepTabs .iter-tab-filter');
+      expect(chip).toBeFalsy();
+      const tabs = app.document.querySelectorAll('#responseStepTabs .response-step-tab');
+      expect(tabs.length).toBe(20);
+      tabs.forEach(t => {
+        expect(t.style.display).not.toBe('none');
+      });
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('updateBlockStatuses refreshes loop badge + sub-list after a rerun', async () => {
+    const app = bootDesktopApp();
+    try {
+      // Initial run: all-pass.
+      const file = makeBigLoopLoadedFile([]);
+      app.bridge.setLoadedFiles([file]);
+      app.bridge.renderFileTree();
+
+      let badge = app.document.querySelector('.block-loop-badge');
+      expect(badge.textContent).toMatch(/×\s*20/);
+      expect(badge.classList.contains('has-failures')).toBe(false);
+
+      // Mutate results to simulate a rerun with 3 new failures, then call
+      // updateBlockStatuses() (NOT renderFileTree()) — the same call path
+      // the runner uses after a real run.
+      file.results.block_results[0].iterations.forEach((it, i) => {
+        if ([2, 5, 9].includes(i)) {
+          it.status = 'failed';
+          it.block_result.status = 'failed';
+          it.block_result.assertion_results[0].passed = false;
+          it.block_result.assertion_results[0].actual = '500';
+        }
+      });
+      file.results.block_results[0].status = 'failed';
+      // Find updateBlockStatuses on the bridge or call via renderFileTree replacement.
+      // We don't expose updateBlockStatuses on the bridge — so this test
+      // verifies the sync-in-place helpers (mounted on the bridge) work.
+      // Equivalent to what updateBlockStatuses does for loop blocks.
+      const blockItem = app.document.querySelector('.block-item');
+      // Use the helper directly since it's part of the bridge surface
+      // exposed through window in the page itself. This mirrors what
+      // updateBlockStatuses does internally.
+      app.window.eval(`
+        const item = document.querySelector('.block-item');
+        syncSidebarLoopBadge(item, 0, 0);
+        syncSidebarLoopIterList(item, 0, 0);
+      `);
+
+      badge = app.document.querySelector('.block-loop-badge');
+      expect(badge.textContent).toContain('20');
+      expect(badge.textContent).toContain('3');
+      expect(badge.textContent).toMatch(/✗/);
+      expect(badge.classList.contains('has-failures')).toBe(true);
+
+      // Sub-list should have 3 failed dots and the rest passed.
+      const failedDots = app.document.querySelectorAll('.loop-iteration-item .block-status.status-failed');
+      expect(failedDots.length).toBe(3);
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('keyboard nav is ignored when focused on a <select>', async () => {
+    const app = bootDesktopApp();
+    try {
+      app.bridge.setLoadedFiles([makeBigLoopLoadedFile([3])]);
+      app.bridge.selectBlock(0, 0);
+      app.bridge.setActiveResponseStepIdx(0);
+
+      const sel = app.document.createElement('select');
+      sel.innerHTML = '<option>a</option><option>b</option>';
+      app.document.body.appendChild(sel);
+      sel.focus();
+
+      const ev = new app.window.KeyboardEvent('keydown', {
+        key: 'n', bubbles: true, cancelable: true,
+      });
+      sel.dispatchEvent(ev);
+
+      expect(app.bridge.getActiveResponseStepIdx()).toBe(0);
     } finally {
       await app.cleanup();
     }
