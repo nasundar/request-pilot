@@ -1190,9 +1190,48 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
     })
 }
 
+/// Find the first byte position in `text` where a top-level (bracket-depth-0,
+/// outside-quotes) space or operator-introducer character occurs. Used by
+/// `parse_assertion_directive` so paths containing brackets/quotes — e.g.
+/// `$.foo["a b"]` or `$.foo["a==b"]` — don't accidentally split mid-path.
+fn find_assertion_split(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth: i32 = 0;
+    let mut quote: Option<u8> = None;
+    let mut escape = false;
+    for (i, &c) in bytes.iter().enumerate() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if let Some(q) = quote {
+            if c == b'\\' {
+                escape = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            b'"' | b'\'' => quote = Some(c),
+            b'[' => depth += 1,
+            b']' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            b' ' if depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
 fn parse_assertion_directive(text: &str) -> Option<Assertion> {
     let text = text.trim();
-    let space_idx = text.find(' ')?;
+    // Use bracket/quote-aware splitting so quoted bracket keys with embedded
+    // spaces or operators (e.g. `$.foo["a b"] == 1`) parse correctly.
+    let space_idx = find_assertion_split(text)?;
     let left = text[..space_idx].to_string();
     let rest = text[space_idx..].trim();
 
@@ -1722,6 +1761,48 @@ Content-Type: application/json
             assert_eq!(a.operator, *op);
             assert_eq!(a.right, "200");
         }
+    }
+
+    #[test]
+    fn parse_assertion_with_bracket_key_containing_space() {
+        // The DSL split must skip past `["a b"]` so the operator is found
+        // at the right boundary. Without bracket-aware splitting, this
+        // would split mid-path.
+        let a = parse_assertion_directive(r#"$.foo["a b"] == 1"#);
+        assert!(a.is_some(), "must parse path with quoted key containing a space");
+        let a = a.unwrap();
+        assert_eq!(a.left, r#"$.foo["a b"]"#);
+        assert_eq!(a.operator, "==");
+        assert_eq!(a.right, "1");
+    }
+
+    #[test]
+    fn parse_assertion_with_bracket_key_containing_dot() {
+        let a = parse_assertion_directive(r#"$.metric["microsoft.resourceid"] != null"#);
+        let a = a.expect("must parse");
+        assert_eq!(a.left, r#"$.metric["microsoft.resourceid"]"#);
+        assert_eq!(a.operator, "!=");
+        assert_eq!(a.right, "null");
+    }
+
+    #[test]
+    fn parse_assertion_with_wildcard_path() {
+        let a = parse_assertion_directive(r#"$.users[*].id != null"#);
+        let a = a.expect("must parse");
+        assert_eq!(a.left, "$.users[*].id");
+        assert_eq!(a.operator, "!=");
+        assert_eq!(a.right, "null");
+    }
+
+    #[test]
+    fn parse_assertion_with_bracket_key_containing_operator_chars() {
+        // Operators must not be detected inside a quoted bracket key — a
+        // path like `$.foo["a==b"]` should not split at the inner `==`.
+        let a = parse_assertion_directive(r#"$.foo["a==b"] contains x"#);
+        let a = a.expect("must parse");
+        assert_eq!(a.left, r#"$.foo["a==b"]"#);
+        assert_eq!(a.operator, "contains");
+        assert_eq!(a.right, "x");
     }
 
     // ── Extract directive ───────────────────────────────────────────

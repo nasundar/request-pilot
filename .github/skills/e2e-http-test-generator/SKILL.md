@@ -78,6 +78,8 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 # @@assert $.field != null              — JSON path assertions
 # @@assert $.items.length > 0          — array length checks
 # @@assert $.name contains partial     — substring match
+# @@assert $.users[*].email != null    — wildcard: every element must satisfy (vacuously true on empty arrays)
+# @@assert $.metric["microsoft.resourceid"] != null   — bracket-key: for keys containing dots, spaces, hyphens
 # @@extract var_name = $.json.path     — save response value for later blocks
 # @@mode app|dev                    — restrict to app mode or dev mode (mutually exclusive auth)
 # @@dev_auth <scope>               — Azure scope for user auth (used with @mode app)
@@ -103,7 +105,7 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 
 **Assertion operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `contains`
 **Special values:** `null`, `!null`
-**Paths:** `status`, `$.field`, `$.nested.field`, `$[0].field`, `$.field.length`, `$.headers.header-name`
+**Paths:** `status`, `$.field`, `$.nested.field`, `$[0].field`, `$.field.length`, `$.headers.header-name`, `$.foo["literal-key"]` (bracket key for fields whose names contain dots, spaces, or other special chars), `$.arr[*].field` (wildcard — assertion must hold for every element; an empty array vacuously passes, giving "skip when no data" semantics for free)
 
 ### Built-in Variables
 
@@ -893,6 +895,43 @@ bodies were omitted are flagged with `(body omitted)` in the response
 panel — if you need full bodies for every iter (e.g., for forensic
 review), reduce the iteration count or split the loop into smaller batches.
 
+### Pattern 12: Resource-centric presence checks (wildcard + bracket-key)
+
+When validating a list-shaped response where every element must carry a
+known set of fields — but the list might be empty under valid conditions
+(e.g. a Prometheus query returning zero series during off-hours, a
+multi-tenant feed during quiet windows) — combine the array wildcard
+`[*]` with bracket-key syntax to write a single-line presence check that
+"skips when there's no data" automatically:
+
+```http
+### @@test Every timeseries carries the resource-centric labels
+POST {{prom_endpoint}}/api/v1/query
+Content-Type: application/x-www-form-urlencoded
+
+query=count by ("cluster", "microsoft.resourceid", "microsoft.subscriptionid", "microsoft.resourcegroupname", "microsoft.resourcetype", "microsoft.amwresourceid") ({"__name__"="{{metric_name}}"})&time={{time}}
+
+# @@assert status == 200
+# @@assert $.status == success
+# @@assert $.data.resultType == vector
+# Wildcard + bracket-key — every result must have all six labels non-empty.
+# An empty $.data.result (no series at this time) vacuously passes,
+# i.e. "skip when no data" is implicit.
+# @@assert $.data.result[*].metric["cluster"].length > 0
+# @@assert $.data.result[*].metric["microsoft.resourceid"].length > 0
+# @@assert $.data.result[*].metric["microsoft.subscriptionid"].length > 0
+# @@assert $.data.result[*].metric["microsoft.resourcegroupname"].length > 0
+# @@assert $.data.result[*].metric["microsoft.resourcetype"].length > 0
+# @@assert $.data.result[*].metric["microsoft.amwresourceid"].length > 0
+```
+
+If you also need to fail when the endpoint returned no data at all, add a
+companion length-check before the wildcard assertions:
+
+```http
+# @@assert $.data.result.length > 0
+```
+
 ## Common Pitfalls
 
 ### Never write into the Sessions store
@@ -905,6 +944,42 @@ generate `.http` files into a sessions root.** If a user asks you to "add a
 test to my sessions directory", clarify and write the new `.http` file
 elsewhere (typically `tests/`, `e2e/`, or `docs/`). Writing into the
 sessions tree corrupts version identity and can shadow real run records.
+
+### Asserting on JSON keys that contain dots, spaces, or hyphens
+**Problem:** Plain dotted-path `$.metric.microsoft.resourceid` mis-tokenizes a key like `microsoft.resourceid` as 3 nested fields (`metric` → `microsoft` → `resourceid`). The assertion silently fails to resolve and reports "missing".
+
+**Solution:** Use **bracket-key syntax** with double or single quotes:
+
+```http
+# @@assert $.data.result[0].metric["microsoft.resourceid"] != null
+# @@assert $.config['feature.flag.x'] == enabled
+# @@assert $.headers["X-Trace-Id"] != null
+```
+
+Inside the quotes, any character is literal except the matching quote and `\`. To embed the quote itself, escape it: `["foo\"bar"]`. `]` inside the quoted segment is treated literally — only the closing `]` after the matching quote ends the bracket.
+
+### Wildcard `[*]` semantics — vacuous truth on empty arrays
+**Behavior:** `$.arr[*].field op rhs` succeeds iff **every element** of `arr` satisfies `op rhs` individually. An **empty array vacuously passes** (no elements means no failures). This is exactly the "skip when no data" pattern most users want when validating shape over a collection that might be empty.
+
+```http
+# @@assert $.data.result[*].metric["cluster"].length > 0
+# Passes when:
+#   - data.result is [] (no elements to check)
+#   - data.result has elements and EVERY element has a non-empty cluster label
+# Fails when:
+#   - data.result is missing or null (path resolution failed)
+#   - data.result is not an array
+#   - any single element has cluster missing or empty
+```
+
+**Pitfall — over-permissive vacuous-truth:** Because empty arrays vacuously pass, an assertion like `$.users[*].email != null` silently passes when the endpoint returns no users at all. If you need to catch "endpoint returned zero results when it shouldn't have", pair the wildcard with a length check:
+
+```http
+# @@assert $.data.result.length > 0                              ← endpoint returned data
+# @@assert $.data.result[*].metric["cluster"].length > 0          ← every result has the label
+```
+
+**Pitfall — typo before the wildcard:** `$.data.reslut[*].x != null` (typo in `reslut`) does NOT vacuously pass — a missing field BEFORE the wildcard yields a single "missing" branch, which fails the assertion. Only the wildcard itself fanning out into an empty array is vacuous-true. This means typos still get caught.
 
 ### Comments leaking into request body
 **Problem:** Section decoration comments (`# ====`, `# ----`, `# Group: xxx`) placed between blocks (before the next `###`) become part of the previous block's HTTP body, causing 400 errors.
