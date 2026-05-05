@@ -233,6 +233,7 @@ GET https://example.com/third
                 error: None,
             }],
             diff_result: None,
+            diff_results: Vec::new(),
         }
     }
 
@@ -1708,6 +1709,7 @@ GET https://example.com/third
                 time_ms: 7,
                 step_results: vec![],
                 diff_result: None,
+                diff_results: Vec::new(),
             }],
             final_variables: HashMap::new(),
             telemetry: None,

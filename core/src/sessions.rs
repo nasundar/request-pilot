@@ -2548,6 +2548,7 @@ mod tests {
             time_ms: 12,
             step_results: vec![],
             diff_result: None,
+            diff_results: Vec::new(),
         }
     }
 

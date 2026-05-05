@@ -416,6 +416,7 @@ mod tests {
             time_ms: 1,
             step_results: vec![],
             diff_result: None,
+            diff_results: Vec::new(),
         }
     }
 

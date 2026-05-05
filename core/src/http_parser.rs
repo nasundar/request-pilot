@@ -73,9 +73,24 @@ pub struct TestBlock {
     /// Steps within a @compare block. Empty for normal blocks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<CompareStep>,
-    /// Diff directive specifying which two steps to compare.
+    /// Diff directive specifying which two steps to compare. Kept as a
+    /// transitional single-pair field so `.http` files and history
+    /// records produced before multi-diff support keep deserializing.
+    /// New code reads `effective_diffs()` (which falls back to wrapping
+    /// `diff` in a single-element vec when `diffs` is empty) instead of
+    /// reading either field directly. The parser populates both fields:
+    /// `diffs[0]` is also mirrored into `diff` so old consumers (e.g.
+    /// the history viewer running an older build) still see something
+    /// meaningful.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<DiffDirective>,
+    /// Multi-pair diff directives. A block may declare any number of
+    /// `# @@diff <a> <b>` lines; each becomes one entry here in source
+    /// order. Empty for blocks without a diff directive. The first pair
+    /// is treated as "primary" — `$diff.*` assertions are evaluated
+    /// against it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diffs: Vec<DiffDirective>,
     /// Validation errors detected during parsing (duplicate step names, invalid diff refs, etc.)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: ParseErrors,
@@ -122,6 +137,24 @@ pub struct CompareStep {
 pub struct DiffDirective {
     pub step_a: String,
     pub step_b: String,
+}
+
+impl TestBlock {
+    /// Return the effective set of diff directives for this block.
+    /// Prefers the multi-pair `diffs` vec; falls back to wrapping the
+    /// transitional single `diff` field when `diffs` is empty (old
+    /// serialized blocks). Callers should use this rather than reading
+    /// either backing field directly so they see a consistent shape
+    /// regardless of which writer produced the data.
+    pub fn effective_diffs(&self) -> Vec<&DiffDirective> {
+        if !self.diffs.is_empty() {
+            self.diffs.iter().collect()
+        } else if let Some(d) = self.diff.as_ref() {
+            vec![d]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 /// Validation errors detected during parsing.
@@ -720,7 +753,7 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
     let mut block_request_id_disabled = false;
     let mut block_redact_body_rules: Vec<BodyRedactRule> = Vec::new();
     let mut is_compare = false;
-    let mut diff_directive: Option<DiffDirective> = None;
+    let mut diff_directives: Vec<DiffDirective> = Vec::new();
     // Block-level assertions (used for $diff.* in compare blocks, or normal assertions)
     let mut assertions = Vec::new();
     let mut extracts = Vec::new();
@@ -844,7 +877,11 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
         if let Some(rest) = match_directive(line, "diff") {
             let parts: Vec<&str> = rest.split_whitespace().collect();
             if parts.len() >= 2 {
-                diff_directive = Some(DiffDirective {
+                // Multiple `# @@diff a b` lines accumulate; each becomes
+                // a separate pair so a block can render v1↔v2 and v1↔v3
+                // side-by-side. Pre-multi-diff `.http` files only had
+                // one such line, so this is a strict superset.
+                diff_directives.push(DiffDirective {
                     step_a: parts[0].to_string(),
                     step_b: parts[1].to_string(),
                 });
@@ -955,8 +992,10 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
         }
     }
 
-    // Validate @diff references against actual step names
-    if let Some(ref diff) = diff_directive {
+    // Validate @diff references against actual step names. Each pair
+    // is checked independently so multi-diff blocks surface bad
+    // references one-pair-at-a-time rather than failing globally.
+    for diff in diff_directives.iter() {
         if !seen_step_names.contains(&diff.step_a) {
             errors.push(format!(
                 "@diff references unknown step '{}'",
@@ -995,6 +1034,11 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
         }
     }
 
+    // Mirror the first pair into the legacy `diff` field so older
+    // consumers (history-store entries, downstream tools) reading
+    // `block.diff` still see the primary pair instead of `null`.
+    let primary_diff = diff_directives.first().cloned();
+
     Some(TestBlock {
         block_type,
         name: block_name,
@@ -1009,7 +1053,8 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
         extracts,
         compare: is_compare,
         steps,
-        diff: diff_directive,
+        diff: primary_diff,
+        diffs: diff_directives,
         errors,
         request_id_header: block_request_id_header,
         request_id_disabled: block_request_id_disabled,
@@ -1179,8 +1224,10 @@ pub fn generate_http_content(suite: &TestSuite) -> String {
                 }
             }
 
-            // Diff directive
-            if let Some(ref diff) = block.diff {
+            // Diff directives — emit one `# @@diff a b` per pair so
+            // multi-diff blocks roundtrip through generate_http without
+            // collapsing back to a single pair.
+            for diff in block.effective_diffs() {
                 output.push_str(&format!("# @@diff {} {}\n", diff.step_a, diff.step_b));
             }
 
@@ -1713,6 +1760,7 @@ GET {{base_url}}\n";
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+                diffs: Vec::new(),
             errors: Vec::new(),
             request_id_header: None,
             request_id_disabled: false,
@@ -1752,6 +1800,7 @@ GET {{base_url}}\n";
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+                diffs: Vec::new(),
             errors: Vec::new(),
             request_id_header: None,
             request_id_disabled: false,
@@ -1806,6 +1855,7 @@ GET {{base_url}}\n";
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+                diffs: Vec::new(),
             errors: Vec::new(),
             request_id_header: None,
             request_id_disabled: false,
@@ -1857,6 +1907,7 @@ GET {{base_url}}\n";
                     compare: false,
                     steps: Vec::new(),
                     diff: None,
+                    diffs: Vec::new(),
                 errors: Vec::new(),
                 request_id_header: None,
                 request_id_disabled: false,
@@ -1894,6 +1945,7 @@ GET {{base_url}}\n";
                     compare: false,
                     steps: Vec::new(),
                     diff: None,
+                    diffs: Vec::new(),
                 errors: Vec::new(),
                 request_id_header: None,
                 request_id_disabled: false,
@@ -1920,6 +1972,7 @@ GET {{base_url}}\n";
                     compare: false,
                     steps: Vec::new(),
                     diff: None,
+                    diffs: Vec::new(),
                     errors: Vec::new(),
                     request_id_header: None,
                     request_id_disabled: false,
@@ -1974,6 +2027,7 @@ GET {{base_url}}\n";
                     compare: false,
                     steps: Vec::new(),
                     diff: None,
+                    diffs: Vec::new(),
                 errors: Vec::new(),
                 request_id_header: None,
                 request_id_disabled: false,
@@ -2004,6 +2058,7 @@ GET {{base_url}}\n";
                     compare: false,
                     steps: Vec::new(),
                     diff: None,
+                    diffs: Vec::new(),
                 errors: Vec::new(),
                 request_id_header: None,
                 request_id_disabled: false,
@@ -2030,6 +2085,7 @@ GET {{base_url}}\n";
                     compare: false,
                     steps: Vec::new(),
                     diff: None,
+                    diffs: Vec::new(),
                     errors: Vec::new(),
                     request_id_header: None,
                     request_id_disabled: false,
@@ -2144,6 +2200,7 @@ GET {{base_url}}\n";
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+                diffs: Vec::new(),
             errors: Vec::new(),
             request_id_header: None,
             request_id_disabled: false,
@@ -2221,6 +2278,7 @@ grant_type=client_credentials
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+                diffs: Vec::new(),
             errors: Vec::new(),
             request_id_header: None,
             request_id_disabled: false,
@@ -2273,6 +2331,7 @@ grant_type=client_credentials
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+                diffs: Vec::new(),
             errors: Vec::new(),
             request_id_header: None,
             request_id_disabled: false,
@@ -2334,6 +2393,7 @@ grant_type=client_credentials
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+                diffs: Vec::new(),
             errors: Vec::new(),
             request_id_header: None,
             request_id_disabled: false,
@@ -2586,6 +2646,7 @@ Authorization: Bearer {{token}}
                 compare: false,
                 steps: Vec::new(),
                 diff: None,
+                diffs: Vec::new(),
             errors: Vec::new(),
             request_id_header: None,
             request_id_disabled: false,
@@ -2687,6 +2748,12 @@ Authorization: Bearer token123
         let diff = block.diff.as_ref().unwrap();
         assert_eq!(diff.step_a, "baseline");
         assert_eq!(diff.step_b, "candidate");
+        // Single-diff blocks also populate the multi-pair `diffs` vec
+        // (the parser mirrors `diffs[0]` into `diff` for compat).
+        assert_eq!(block.diffs.len(), 1);
+        assert_eq!(block.diffs[0].step_a, "baseline");
+        assert_eq!(block.diffs[0].step_b, "candidate");
+        assert_eq!(block.effective_diffs().len(), 1);
         // Block-level assertions ($diff.*)
         assert_eq!(block.assertions.len(), 1);
         assert_eq!(block.assertions[0].left, "$diff.match");
@@ -2776,6 +2843,233 @@ Authorization: Bearer {{token}}
         assert!(generated.contains("# @@diff baseline candidate"));
         assert!(generated.contains("# @@assert $diff.match == true"));
         assert!(generated.contains("# @@extract v1_id = $.id"));
+    }
+
+    // ── Multi-diff: multiple `# @@diff a b` lines per block ─────────
+    #[test]
+    fn parse_multiple_diff_directives_in_one_block() {
+        let input = r#"
+### @test Compare three versions
+# @compare
+# @step v1
+GET https://api.example.com/v1/users
+
+# @step v2
+GET https://api.example.com/v2/users
+
+# @step v3
+GET https://api.example.com/v3/users
+
+# @diff v1 v2
+# @diff v1 v3
+# @assert $diff.match == true
+"#;
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.blocks.len(), 1);
+        let block = &suite.blocks[0];
+        assert_eq!(block.steps.len(), 3);
+        // Both `# @@diff` lines accumulate into the multi-pair vec.
+        assert_eq!(block.diffs.len(), 2);
+        assert_eq!(block.diffs[0].step_a, "v1");
+        assert_eq!(block.diffs[0].step_b, "v2");
+        assert_eq!(block.diffs[1].step_a, "v1");
+        assert_eq!(block.diffs[1].step_b, "v3");
+        // Primary (compat) field mirrors the first pair.
+        let primary = block.diff.as_ref().unwrap();
+        assert_eq!(primary.step_a, "v1");
+        assert_eq!(primary.step_b, "v2");
+        // effective_diffs() exposes all pairs.
+        assert_eq!(block.effective_diffs().len(), 2);
+    }
+
+    #[test]
+    fn multi_diff_roundtrips_through_generator() {
+        let input = r#"
+### @test Compare three versions
+# @compare
+# @step v1
+GET https://api.example.com/v1/users
+
+# @step v2
+GET https://api.example.com/v2/users
+
+# @step v3
+GET https://api.example.com/v3/users
+
+# @diff v1 v2
+# @diff v1 v3
+"#;
+        let suite = parse_test_suite(input);
+        let generated = generate_http_content(&suite);
+        // Both pairs must be emitted — no collapsing back to a single pair.
+        assert!(
+            generated.contains("# @@diff v1 v2"),
+            "expected v1↔v2 directive in:\n{generated}"
+        );
+        assert!(
+            generated.contains("# @@diff v1 v3"),
+            "expected v1↔v3 directive in:\n{generated}"
+        );
+        // Re-parse the generated text and verify the second roundtrip
+        // still produces both pairs (idempotent).
+        let suite2 = parse_test_suite(&generated);
+        let block2 = &suite2.blocks[0];
+        assert_eq!(block2.diffs.len(), 2);
+        assert_eq!(block2.diffs[0].step_b, "v2");
+        assert_eq!(block2.diffs[1].step_b, "v3");
+    }
+
+    #[test]
+    fn multi_diff_validates_each_pair_independently() {
+        // A bad reference in one pair should produce one error per bad ref,
+        // not silently drop the other valid pair.
+        let input = r#"
+### @test Compare with bad ref
+# @compare
+# @step v1
+GET https://api.example.com/v1
+
+# @step v2
+GET https://api.example.com/v2
+
+# @diff v1 v2
+# @diff v1 nonexistent
+"#;
+        let suite = parse_test_suite(input);
+        let block = &suite.blocks[0];
+        // Both pairs are parsed (validation reports the error but keeps
+        // the pair in the model so the UI can surface it).
+        assert_eq!(block.diffs.len(), 2);
+        // Validation surfaces the unknown step.
+        assert!(
+            block.errors.iter().any(|e| e.contains("nonexistent")),
+            "expected validation error for unknown step, got: {:?}",
+            block.errors
+        );
+    }
+
+    #[test]
+    fn effective_diffs_prefers_multi_pair_vec_over_legacy_field() {
+        // When `diffs` has entries, they win. The legacy `diff` field is
+        // ignored even if populated (writers typically mirror diffs[0]
+        // into diff for older readers, but `effective_diffs()` must not
+        // double-count that mirror).
+        let block = TestBlock {
+            block_type: "test".to_string(),
+            name: "n".to_string(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: vec![],
+            request: ParsedRequest {
+                name: None,
+                method: String::new(),
+                url: String::new(),
+                headers: Vec::new(),
+                body: None,
+            },
+            assertions: Vec::new(),
+            extracts: Vec::new(),
+            compare: true,
+            steps: Vec::new(),
+            diff: Some(DiffDirective {
+                step_a: "v1".to_string(),
+                step_b: "v2".to_string(),
+            }),
+            diffs: vec![
+                DiffDirective {
+                    step_a: "v1".to_string(),
+                    step_b: "v2".to_string(),
+                },
+                DiffDirective {
+                    step_a: "v1".to_string(),
+                    step_b: "v3".to_string(),
+                },
+            ],
+            errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
+        };
+        let eff = block.effective_diffs();
+        assert_eq!(eff.len(), 2, "must use diffs vec, not double-count diff");
+        assert_eq!(eff[0].step_b, "v2");
+        assert_eq!(eff[1].step_b, "v3");
+    }
+
+    #[test]
+    fn effective_diffs_falls_back_to_legacy_diff_field_when_diffs_empty() {
+        // History records or older serialized blocks may have only the
+        // legacy `diff` field. The helper wraps it in a single-element
+        // vec so callers get a uniform shape.
+        let block = TestBlock {
+            block_type: "test".to_string(),
+            name: "n".to_string(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: vec![],
+            request: ParsedRequest {
+                name: None,
+                method: String::new(),
+                url: String::new(),
+                headers: Vec::new(),
+                body: None,
+            },
+            assertions: Vec::new(),
+            extracts: Vec::new(),
+            compare: true,
+            steps: Vec::new(),
+            diff: Some(DiffDirective {
+                step_a: "v1".to_string(),
+                step_b: "v2".to_string(),
+            }),
+            diffs: Vec::new(),
+            errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
+        };
+        let eff = block.effective_diffs();
+        assert_eq!(eff.len(), 1);
+        assert_eq!(eff[0].step_a, "v1");
+        assert_eq!(eff[0].step_b, "v2");
+    }
+
+    #[test]
+    fn effective_diffs_returns_empty_when_no_diff_at_all() {
+        let block = TestBlock {
+            block_type: "test".to_string(),
+            name: "n".to_string(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: vec![],
+            request: ParsedRequest {
+                name: None,
+                method: String::new(),
+                url: String::new(),
+                headers: Vec::new(),
+                body: None,
+            },
+            assertions: Vec::new(),
+            extracts: Vec::new(),
+            compare: false,
+            steps: Vec::new(),
+            diff: None,
+            diffs: Vec::new(),
+            errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
+        };
+        assert_eq!(block.effective_diffs().len(), 0);
     }
 
     // ── Duplicate step names produce parse error ────────────────────

@@ -134,9 +134,34 @@ pub struct BlockResult {
     /// Per-step results for @compare blocks. Empty for normal blocks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub step_results: Vec<StepResult>,
-    /// Diff result for @compare blocks.
+    /// Diff result for @compare blocks. Transitional single-pair field
+    /// kept so old run.json history files keep deserializing and so
+    /// older builds that read this field still see the primary diff.
+    /// New code reads `diff_results` (which is empty when this is the
+    /// only data) and falls back to wrapping `diff_result` in a
+    /// single-element vec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_result: Option<assertions::DiffResult>,
+    /// Multi-pair diff results — one entry per `# @@diff a b` line in
+    /// source order. Empty for non-compare or non-diff blocks. The
+    /// first pair is "primary": `$diff.*` assertions are evaluated
+    /// against `diff_results[0].diff`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diff_results: Vec<NamedDiffResult>,
+}
+
+/// One pair's diff outcome inside a multi-diff @compare block. Carries
+/// the pair labels so callers can render `baseline ⇄ canary` headings
+/// and a per-pair error so a single bad reference (e.g. step name typo)
+/// doesn't kill all the other pairs.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct NamedDiffResult {
+    pub step_a: String,
+    pub step_b: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<assertions::DiffResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Result of executing a single step within a @compare block.
@@ -281,6 +306,7 @@ fn make_skipped_result(block: &TestBlock, reason: &str) -> BlockResult {
         time_ms: 0,
         step_results: Vec::new(),
         diff_result: None,
+        diff_results: Vec::new(),
     }
 }
 
@@ -355,6 +381,7 @@ async fn execute_block(block: TestBlock, var_store: VariableStore, extra_headers
                 time_ms,
                 step_results: Vec::new(),
                 diff_result: None,
+                diff_results: Vec::new(),
             }
         }
         Err(err) => BlockResult {
@@ -374,6 +401,7 @@ async fn execute_block(block: TestBlock, var_store: VariableStore, extra_headers
             time_ms,
             step_results: Vec::new(),
             diff_result: None,
+            diff_results: Vec::new(),
         },
     }
 }
@@ -404,6 +432,7 @@ async fn execute_compare_block(
             time_ms: 0,
             step_results: Vec::new(),
             diff_result: None,
+            diff_results: Vec::new(),
         };
     }
 
@@ -505,8 +534,15 @@ async fn execute_compare_block(
         }
     }
 
-    // Compute diff if @diff directive is present
-    let diff_result = if let Some(ref diff) = block.diff {
+    // Compute diff for every `# @@diff a b` pair declared on the block.
+    // Multi-pair blocks render `baseline ⇄ canary` AND `baseline ⇄ eastus`
+    // side-by-side, so each pair gets its own NamedDiffResult. A bad
+    // step reference for one pair (e.g. typo) is recorded as a per-pair
+    // error rather than failing the whole block, so the other pairs
+    // still display their diff.
+    let effective = block.effective_diffs();
+    let mut diff_results: Vec<NamedDiffResult> = Vec::with_capacity(effective.len());
+    for diff in effective {
         let missing_a = !step_responses.contains_key(&diff.step_a);
         let missing_b = !step_responses.contains_key(&diff.step_b);
         if missing_a || missing_b {
@@ -517,29 +553,16 @@ async fn execute_compare_block(
             if missing_b {
                 missing.push(format!("'{}'", diff.step_b));
             }
-            let total_time_ms = block_start.elapsed().as_millis() as u64;
-            let first_step = step_results.first();
-            return BlockResult {
-                seq: None,
-                name: block.name.clone(),
-                block_type: block.block_type.clone(),
-                group: block.group.clone(),
-                request_method: first_step.map(|s| s.request_method.clone()).unwrap_or_default(),
-                request_url: first_step.map(|s| s.request_url.clone()).unwrap_or_default(),
-                request_headers: Vec::new(),
-                request_body: None,
-                status: "error".to_string(),
-                response: None,
-                assertion_results: Vec::new(),
-                extract_results: Vec::new(),
+            diff_results.push(NamedDiffResult {
+                step_a: diff.step_a.clone(),
+                step_b: diff.step_b.clone(),
+                diff: None,
                 error: Some(format!(
                     "@diff step not found in responses: {}",
                     missing.join(", ")
                 )),
-                time_ms: total_time_ms,
-                step_results,
-                diff_result: None,
-            };
+            });
+            continue;
         }
         let body_a = step_responses
             .get(&diff.step_a)
@@ -549,12 +572,28 @@ async fn execute_compare_block(
             .get(&diff.step_b)
             .map(|r| r.body.as_str())
             .unwrap_or("");
-        Some(assertions::compute_diff(body_a, body_b))
-    } else {
-        None
-    };
+        diff_results.push(NamedDiffResult {
+            step_a: diff.step_a.clone(),
+            step_b: diff.step_b.clone(),
+            diff: Some(assertions::compute_diff(body_a, body_b)),
+            error: None,
+        });
+    }
 
-    // Evaluate comparison assertions ($diff.* assertions)
+    // Mirror the first successful pair into the legacy `diff_result`
+    // field so older history viewers and `$diff.*` assertion code see
+    // the primary pair. Errors don't poison the legacy field — if pair
+    // 0 errored but pair 1 succeeded, `diff_result` reflects pair 0
+    // (the parser-declared primary), which matches the new shape.
+    let diff_result: Option<assertions::DiffResult> = diff_results
+        .first()
+        .and_then(|d| d.diff.clone());
+
+    // Evaluate comparison assertions ($diff.* assertions). These look
+    // at `diff_result` (the primary pair) so existing single-diff tests
+    // keep working unchanged. Multi-diff blocks may also want indexed
+    // assertion paths in the future (e.g. `$diff[1].match`); not added
+    // here.
     let comparison_assertions: Vec<AssertionResult> = if let Some(ref diff) = diff_result {
         block
             .assertions
@@ -567,8 +606,11 @@ async fn execute_compare_block(
     };
 
     let all_comparison_passed = comparison_assertions.iter().all(|r| r.passed);
+    let any_diff_pair_errored = diff_results.iter().any(|d| d.error.is_some());
     let total_time_ms = block_start.elapsed().as_millis() as u64;
-    let overall_passed = all_step_assertions_passed && all_comparison_passed;
+    let overall_passed = all_step_assertions_passed
+        && all_comparison_passed
+        && !any_diff_pair_errored;
 
     // Collect all step extracts for propagation to outer scope
     let all_extracts: Vec<ExtractResult> = step_results
@@ -579,6 +621,30 @@ async fn execute_compare_block(
     // Use first step's request info for the block-level fields
     let first_step = step_results.first();
 
+    // If every diff pair errored, surface that as a block-level error
+    // string so the UI status bar shows ERROR (matching pre-multi-diff
+    // behavior where a single failed reference returned status="error").
+    let block_error: Option<String> = if !diff_results.is_empty()
+        && diff_results.iter().all(|d| d.error.is_some())
+    {
+        Some(
+            diff_results
+                .iter()
+                .filter_map(|d| d.error.as_deref())
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    } else {
+        None
+    };
+    let status = if block_error.is_some() {
+        "error"
+    } else if overall_passed {
+        "passed"
+    } else {
+        "failed"
+    };
+
     BlockResult {
         seq: None,
         name: block.name.clone(),
@@ -588,14 +654,15 @@ async fn execute_compare_block(
         request_url: first_step.map(|s| s.request_url.clone()).unwrap_or_default(),
         request_headers: Vec::new(),
         request_body: None,
-        status: if overall_passed { "passed" } else { "failed" }.to_string(),
+        status: status.to_string(),
         response: None,
         assertion_results: comparison_assertions,
         extract_results: all_extracts,
-        error: None,
+        error: block_error,
         time_ms: total_time_ms,
         step_results,
         diff_result,
+        diff_results,
     }
 }
 
@@ -1259,6 +1326,7 @@ mod tests {
             time_ms: 0,
             step_results: Vec::new(),
             diff_result: None,
+            diff_results: Vec::new(),
         };
         assert_eq!(result.status, "passed");
         assert!(result.error.is_none());
@@ -1299,6 +1367,7 @@ mod tests {
             compare: false,
             steps: vec![],
             diff: None,
+            diffs: Vec::new(),
             errors: Vec::new(),
             request_id_header: Some("X-Request-Id".into()),
             request_id_disabled: false,
@@ -1335,6 +1404,7 @@ mod tests {
             compare: false,
             steps: vec![],
             diff: None,
+            diffs: Vec::new(),
             errors: Vec::new(),
             request_id_header: Some("X-Request-Id".into()),
             request_id_disabled: false,
@@ -1370,6 +1440,7 @@ mod tests {
             compare: false,
             steps: vec![],
             diff: None,
+            diffs: Vec::new(),
             errors: Vec::new(),
             request_id_header: None,
             request_id_disabled: false,
@@ -1415,6 +1486,7 @@ mod tests {
             compare: false,
             steps: Vec::new(),
             diff: None,
+            diffs: Vec::new(),
             errors: Vec::new(),
             request_id_header: None,
             request_id_disabled: false,
@@ -1697,6 +1769,7 @@ mod tests {
                 },
             ],
             diff: None,
+            diffs: Vec::new(),
             errors: Vec::new(),
             request_id_header: None,
             request_id_disabled: false,
@@ -1770,6 +1843,7 @@ mod tests {
                 step_a: "step_a".to_string(),
                 step_b: "nonexistent".to_string(),
             }),
+            diffs: Vec::new(),
             errors: vec!["@diff references unknown step 'nonexistent'".to_string()],
             request_id_header: None,
             request_id_disabled: false,
@@ -1844,6 +1918,7 @@ mod tests {
                 step_a: "step_a".to_string(),
                 step_b: "step_b".to_string(),
             }),
+            diffs: Vec::new(),
             errors: Vec::new(),
             request_id_header: None,
             request_id_disabled: false,
@@ -1893,6 +1968,7 @@ mod tests {
                 step_a: "a".to_string(),
                 step_b: "b".to_string(),
             }),
+            diffs: Vec::new(),
             errors: vec![
                 "@diff references unknown step 'a'".to_string(),
                 "@diff references unknown step 'b'".to_string(),
@@ -1966,6 +2042,7 @@ mod tests {
                 step_a: "alpha".to_string(),
                 step_b: "beta".to_string(),
             }),
+            diffs: Vec::new(),
             errors: Vec::new(),
             request_id_header: None,
             request_id_disabled: false,

@@ -1325,6 +1325,7 @@ impl App {
             compare: false,
             steps: Vec::new(),
             diff: None,
+            diffs: Vec::new(),
             errors: Default::default(),
             request_id_header: None,
             request_id_disabled: false,
@@ -2297,6 +2298,7 @@ impl App {
                         time_ms: 0,
                         step_results: Vec::new(),
                         diff_result: None,
+                    diff_results: Vec::new(),
                     });
                 }
                 if let Some(single_br) = single_results.block_results.into_iter().next() {
@@ -2577,6 +2579,7 @@ impl App {
                     time_ms: 0,
                     step_results: Vec::new(),
                     diff_result: None,
+                    diff_results: Vec::new(),
                 }).collect();
 
                 for (br, &orig_idx) in result_blocks.into_iter().zip(indices.iter()) {
@@ -2869,6 +2872,7 @@ mod auto_record_tests {
                 time_ms: 1,
                 step_results: vec![],
                 diff_result: None,
+                    diff_results: Vec::new(),
             }],
             final_variables: HashMap::new(),
             telemetry: None,
@@ -3048,6 +3052,7 @@ mod snapshot_load_tests {
                 time_ms: 1,
                 step_results: vec![],
                 diff_result: None,
+                    diff_results: Vec::new(),
             }],
             final_variables: HashMap::new(),
             telemetry: None,
@@ -3197,6 +3202,7 @@ mod replay_block_tests {
             time_ms: 1,
             step_results: vec![],
             diff_result: None,
+                    diff_results: Vec::new(),
         }
     }
 

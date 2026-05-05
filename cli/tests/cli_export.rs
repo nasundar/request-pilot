@@ -56,6 +56,7 @@ fn make_block(name: &str, status: &str, http_status: u16) -> BlockResult {
         time_ms: 7,
         step_results: vec![],
         diff_result: None,
+        diff_results: Vec::new(),
     }
 }
 

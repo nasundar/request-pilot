@@ -70,6 +70,57 @@ function invalidateDiffCacheEntry(fileIdx, blockIdx) {
     diffCacheBytes -= JSON.stringify(diffCache.get(key)).length * 2;
     diffCache.delete(key);
   }
+  // Also drop indexed multi-diff cache entries for the same block
+  // (key shape: `assert:${fileIdx}-${blockIdx}#${diffIdx}`).
+  const indexedPrefix = `${key}#`;
+  for (const k of [...diffCache.keys()]) {
+    if (k.startsWith(indexedPrefix)) {
+      diffCacheBytes -= JSON.stringify(diffCache.get(k)).length * 2;
+      diffCache.delete(k);
+    }
+  }
+}
+
+/**
+ * Returns every diff directive declared on a block, regardless of whether
+ * the file was authored against the legacy single-`diff` schema or the
+ * new multi-`diffs` array. Mirrors the Rust `TestBlock::effective_diffs`
+ * helper so JS code never has to branch on which field is populated.
+ *
+ * Block-builder code paths that *write* a diff still update both fields
+ * (legacy `block.diff` plus index 0 of `block.diffs`) so the next round
+ * of generated `.http` text and history `run.json` records stay readable
+ * by both old and new builds.
+ */
+function getBlockDiffs(block) {
+  if (!block) return [];
+  if (Array.isArray(block.diffs) && block.diffs.length > 0) return block.diffs;
+  if (block.diff) return [block.diff];
+  return [];
+}
+
+/**
+ * Returns the per-pair diff result list for a block result, falling back
+ * to the legacy single `diff_result` field when the runner that produced
+ * the result predates multi-diff. Each entry has shape
+ * `{ step_a, step_b, diff: DiffResult|null, error: string|null }`.
+ */
+function getDiffResults(br, block) {
+  if (!br) return [];
+  if (Array.isArray(br.diff_results) && br.diff_results.length > 0) return br.diff_results;
+  if (br.diff_result) {
+    // Synthesize the multi-diff envelope from the legacy field. We borrow
+    // step names from the block's primary diff directive when available
+    // so the UI label still says "baseline ↔ candidate" instead of "?".
+    const primary = getBlockDiffs(block)[0];
+    return [{
+      step_a: primary?.step_a || '',
+      step_b: primary?.step_b || '',
+      diff: br.diff_result,
+      error: null,
+    }];
+  }
+  return [];
 }
 
 // --- Logging ---
@@ -3233,40 +3284,56 @@ function showBlockTooltip(block, anchorEl, fileIdx, blockIdx) {
       }
     }
 
-    // Diff directive info
-    if (block.diff) {
-      html += `<div class="btt-section"><div class="btt-section-title">Diff</div>
-        <div class="btt-diff-item">\u21C4 Compare: <strong>${escapeHtml(block.diff.step_a)}</strong> vs <strong>${escapeHtml(block.diff.step_b)}</strong></div>
-      </div>`;
+    // Diff directive info — list every declared pair (multi-diff
+    // blocks may declare v1↔v2 AND v1↔v3 in the same block).
+    const tooltipDiffs = getBlockDiffs(block);
+    if (tooltipDiffs.length > 0) {
+      html += `<div class="btt-section"><div class="btt-section-title">Diff${tooltipDiffs.length > 1 ? ` (${tooltipDiffs.length} pairs)` : ''}</div>`;
+      tooltipDiffs.forEach(d => {
+        html += `<div class="btt-diff-item">\u21C4 Compare: <strong>${escapeHtml(d.step_a)}</strong> vs <strong>${escapeHtml(d.step_b)}</strong></div>`;
+      });
+      html += `</div>`;
     }
 
-    // Show diff results if block has been run
+    // Show diff results if block has been run — one summary per pair.
     const file = fileIdx !== undefined ? loadedFiles[fileIdx] : null;
     const br = file?.results?.block_results?.[blockIdx];
-    if (br?.diff_result) {
-      const diff = br.diff_result;
-      html += `<div class="btt-section"><div class="btt-section-title">Comparison Result</div>
-        <div class="btt-diff-result">
+    const tooltipPairs = getDiffResults(br, block);
+    if (tooltipPairs.length > 0) {
+      html += `<div class="btt-section"><div class="btt-section-title">Comparison Result${tooltipPairs.length > 1 ? `s (${tooltipPairs.length})` : ''}</div>`;
+      tooltipPairs.forEach((pair, di) => {
+        const diff = pair.diff;
+        if (!diff) {
+          if (pair.error) {
+            html += `<div class="btt-diff-result" style="color:var(--error-color)">${escapeHtml(pair.step_a)} ↔ ${escapeHtml(pair.step_b)}: ${escapeHtml(pair.error)}</div>`;
+          }
+          return;
+        }
+        if (tooltipPairs.length > 1) {
+          html += `<div style="font-size:11px;color:var(--text-secondary);margin-top:${di > 0 ? '6px' : '0'};margin-bottom:2px">${escapeHtml(pair.step_a)} ↔ ${escapeHtml(pair.step_b)}</div>`;
+        }
+        html += `<div class="btt-diff-result">
           <span class="btt-diff-badge ${diff.match_exact ? 'btt-match' : 'btt-mismatch'}">${diff.match_exact ? '\u2713 Exact Match' : `${(diff.similarity * 100).toFixed(1)}% Similar`}</span>
           <span class="btt-diff-type">${diff.is_json ? 'JSON' : 'Text'}</span>
         </div>`;
-      if (!diff.match_exact) {
-        const parts = [];
-        if (diff.added_count) parts.push(`<span class="btt-diff-added">+${diff.added_count} added</span>`);
-        if (diff.removed_count) parts.push(`<span class="btt-diff-removed">-${diff.removed_count} removed</span>`);
-        if (diff.changed_count) parts.push(`<span class="btt-diff-changed">\u0394${diff.changed_count} changed</span>`);
-        if (parts.length > 0) html += `<div class="btt-diff-counts">${parts.join(' ')}</div>`;
-        // Show first few changed paths
-        if (diff.changed_paths && diff.changed_paths.length > 0) {
-          const preview = diff.changed_paths.slice(0, 5);
-          html += `<div class="btt-diff-paths">`;
-          preview.forEach(cp => {
-            html += `<div class="btt-diff-path">${escapeHtml(cp.path)}: ${escapeHtml(String(cp.left ?? ''))} \u2192 ${escapeHtml(String(cp.right ?? ''))}</div>`;
-          });
-          if (diff.changed_paths.length > 5) html += `<div class="btt-diff-path" style="opacity:0.6">...and ${diff.changed_paths.length - 5} more</div>`;
-          html += `</div>`;
+        if (!diff.match_exact) {
+          const parts = [];
+          if (diff.added_count) parts.push(`<span class="btt-diff-added">+${diff.added_count} added</span>`);
+          if (diff.removed_count) parts.push(`<span class="btt-diff-removed">-${diff.removed_count} removed</span>`);
+          if (diff.changed_count) parts.push(`<span class="btt-diff-changed">\u0394${diff.changed_count} changed</span>`);
+          if (parts.length > 0) html += `<div class="btt-diff-counts">${parts.join(' ')}</div>`;
+          // Show first few changed paths
+          if (diff.changed_paths && diff.changed_paths.length > 0) {
+            const preview = diff.changed_paths.slice(0, 5);
+            html += `<div class="btt-diff-paths">`;
+            preview.forEach(cp => {
+              html += `<div class="btt-diff-path">${escapeHtml(cp.path)}: ${escapeHtml(String(cp.left ?? ''))} \u2192 ${escapeHtml(String(cp.right ?? ''))}</div>`;
+            });
+            if (diff.changed_paths.length > 5) html += `<div class="btt-diff-path" style="opacity:0.6">...and ${diff.changed_paths.length - 5} more</div>`;
+            html += `</div>`;
+          }
         }
-      }
+      });
       html += `</div>`;
     }
   }
@@ -4111,6 +4178,7 @@ metaCompare.addEventListener('change', async () => {
       { name: 'candidate', request: { method: block.request.method || 'GET', url: '', headers: [], body: null }, assertions: [], extracts: [] },
     ];
     block.diff = { step_a: 'baseline', step_b: 'candidate' };
+    block.diffs = [{ step_a: 'baseline', step_b: 'candidate' }];
     // Append default diff assertion, preserving any existing assertions
     if (!block.assertions) block.assertions = [];
     block.assertions.push({ left: '$diff.match', operator: '==', right: 'true' });
@@ -4336,10 +4404,18 @@ function wireStepPanelEvents(fileIdx, blockIdx, stepIdx) {
     const oldName = step.name;
     const newName = e.target.value.trim();
     step.name = newName;
-    // Update diff directive references if they pointed to old name
+    // Update diff directive references if they pointed to old name —
+    // both the legacy single `block.diff` and the multi-pair
+    // `block.diffs` vec stay in sync.
     if (block.diff) {
       if (block.diff.step_a === oldName) block.diff.step_a = newName;
       if (block.diff.step_b === oldName) block.diff.step_b = newName;
+    }
+    if (Array.isArray(block.diffs)) {
+      block.diffs.forEach(d => {
+        if (d.step_a === oldName) d.step_a = newName;
+        if (d.step_b === oldName) d.step_b = newName;
+      });
     }
     scheduleFlush();
   });
@@ -4440,11 +4516,18 @@ function wireStepPanelEvents(fileIdx, blockIdx, stepIdx) {
   // Remove step
   panel.querySelector('.step-remove-btn')?.addEventListener('click', () => {
     block.steps.splice(stepIdx, 1);
-    // Fix diff directive if needed
+    // Fix diff directives if needed — drop any pair that now references
+    // a missing step (covers both legacy single `block.diff` and the
+    // multi-pair `block.diffs` vec).
+    const names = block.steps.map(s => s.name);
+    if (Array.isArray(block.diffs) && block.diffs.length > 0) {
+      block.diffs = block.diffs.filter(
+        d => names.includes(d.step_a) && names.includes(d.step_b),
+      );
+    }
     if (block.diff) {
-      const names = block.steps.map(s => s.name);
       if (!names.includes(block.diff.step_a) || !names.includes(block.diff.step_b)) {
-        block.diff = null;
+        block.diff = block.diffs && block.diffs.length > 0 ? { ...block.diffs[0] } : null;
       }
     }
     activeCompareStepIdx = Math.min(activeCompareStepIdx, block.steps.length - 1);
@@ -4472,25 +4555,44 @@ function renderComparisonPanel(fileIdx, blockIdx) {
   const file = loadedFiles[fileIdx];
   const block = file.suite.blocks[blockIdx];
   const br = file.results?.block_results?.[blockIdx];
-  const diff = br?.diff_result;
+  const diffPairs = getDiffResults(br, block);
 
   let html = '<div class="compare-diff-panel">';
 
-  // Diff directive editor
+  // Diff directives editor — supports multiple `# @@diff a b` pairs so the
+  // user can compare v1↔v2 AND v1↔v3 in the same block. Committed pairs
+  // live in `block.diffs`; pending blank/half-filled rows live in the
+  // transient `block._uiExtraDiffRows` counter so we don't accidentally
+  // serialize incomplete pairs to disk. Always render at least one row
+  // so the affordance stays discoverable when a fresh compare block has
+  // no pairs at all.
   const stepNames = block.steps.map(s => s.name);
-  html += `<div class="step-field"><label>Diff Steps</label>
-    <div style="display:flex;gap:6px;align-items:center">
-      <select class="meta-select diff-step-a">
+  const blockDiffs = getBlockDiffs(block);
+  const draftCount = Math.max(
+    block._uiExtraDiffRows || 0,
+    blockDiffs.length === 0 ? 1 : 0,
+  );
+  const editorRows = [
+    ...blockDiffs,
+    ...Array.from({ length: draftCount }, () => ({ step_a: '', step_b: '' })),
+  ];
+  html += `<div class="step-field"><label>Diff Steps</label>`;
+  editorRows.forEach((row, di) => {
+    html += `<div class="diff-row" data-di="${di}" style="display:flex;gap:6px;align-items:center;margin-top:${di > 0 ? '4px' : '0'}">
+      <select class="meta-select diff-step-a" data-di="${di}">
         <option value="">Select step A</option>
-        ${stepNames.map(n => `<option value="${escapeAttr(n)}"${block.diff?.step_a === n ? ' selected' : ''}>${escapeHtml(n)}</option>`).join('')}
+        ${stepNames.map(n => `<option value="${escapeAttr(n)}"${row.step_a === n ? ' selected' : ''}>${escapeHtml(n)}</option>`).join('')}
       </select>
       <span style="color:var(--text-muted)">↔</span>
-      <select class="meta-select diff-step-b">
+      <select class="meta-select diff-step-b" data-di="${di}">
         <option value="">Select step B</option>
-        ${stepNames.map(n => `<option value="${escapeAttr(n)}"${block.diff?.step_b === n ? ' selected' : ''}>${escapeHtml(n)}</option>`).join('')}
+        ${stepNames.map(n => `<option value="${escapeAttr(n)}"${row.step_b === n ? ' selected' : ''}>${escapeHtml(n)}</option>`).join('')}
       </select>
-    </div>
-  </div>`;
+      <button class="btn-icon diff-row-remove" data-di="${di}" title="Remove diff pair" ${editorRows.length === 1 && blockDiffs.length === 0 ? 'style="visibility:hidden"' : ''}>×</button>
+    </div>`;
+  });
+  html += `<button class="btn btn-ghost btn-xs step-add-btn diff-row-add" style="margin-top:6px">+ Diff Pair</button>`;
+  html += `</div>`;
 
   // Block-level assertions editor
   html += `<div class="step-assertions-area" style="margin-top:10px"><label style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px">Comparison Assertions</label>`;
@@ -4524,19 +4626,35 @@ function renderComparisonPanel(fileIdx, blockIdx) {
   }
   html += `<button class="btn btn-ghost btn-xs step-add-btn comp-add-extract">+ Extract</button></div>`;
 
-  // Diff results summary (if run)
-  if (diff) {
+  // Diff results summary (if run) — one block per pair
+  if (diffPairs.length > 0) {
     html += `<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
-      <label style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px">Diff Results</label>
-      <div class="diff-summary-inline" style="margin-top:6px">
-        <span class="diff-badge ${diff.match_exact ? 'match' : 'mismatch'}">${diff.match_exact ? '✓ Exact Match' : (diff.similarity * 100).toFixed(1) + '% Similar'}</span>
-        <span class="diff-badge">${diff.is_json ? 'JSON' : 'Text'}</span>
-        ${diff.added_count ? `<span class="diff-badge added">+${diff.added_count} added</span>` : ''}
-        ${diff.removed_count ? `<span class="diff-badge removed">-${diff.removed_count} removed</span>` : ''}
-        ${diff.changed_count ? `<span class="diff-badge changed">Δ${diff.changed_count} changed</span>` : ''}
-      </div>
-      <button class="btn btn-primary btn-xs" onclick="openDiffViewer(${fileIdx}, ${blockIdx})" style="margin-top:6px">🔍 View Full Diff</button>
-    </div>`;
+      <label style="font-size:10px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px">Diff Results</label>`;
+    diffPairs.forEach((pair, di) => {
+      const diff = pair.diff;
+      const label = pair.step_a || pair.step_b
+        ? `${escapeHtml(pair.step_a)} ↔ ${escapeHtml(pair.step_b)}`
+        : `Pair ${di + 1}`;
+      if (diff) {
+        html += `<div style="margin-top:8px">
+          ${diffPairs.length > 1 ? `<div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">${label}</div>` : ''}
+          <div class="diff-summary-inline">
+            <span class="diff-badge ${diff.match_exact ? 'match' : 'mismatch'}">${diff.match_exact ? '✓ Exact Match' : (diff.similarity * 100).toFixed(1) + '% Similar'}</span>
+            <span class="diff-badge">${diff.is_json ? 'JSON' : 'Text'}</span>
+            ${diff.added_count ? `<span class="diff-badge added">+${diff.added_count} added</span>` : ''}
+            ${diff.removed_count ? `<span class="diff-badge removed">-${diff.removed_count} removed</span>` : ''}
+            ${diff.changed_count ? `<span class="diff-badge changed">Δ${diff.changed_count} changed</span>` : ''}
+          </div>
+          <button class="btn btn-primary btn-xs" onclick="openDiffViewer(${fileIdx}, ${blockIdx}, ${di})" style="margin-top:6px">🔍 View Full Diff${diffPairs.length > 1 ? ` — ${label}` : ''}</button>
+        </div>`;
+      } else if (pair.error) {
+        html += `<div style="margin-top:8px">
+          ${diffPairs.length > 1 ? `<div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">${label}</div>` : ''}
+          <div class="assertion-row failed"><span class="assert-icon">✗</span><span class="assert-text">${escapeHtml(pair.error)}</span></div>
+        </div>`;
+      }
+    });
+    html += `</div>`;
   }
 
   html += '</div>';
@@ -4568,20 +4686,65 @@ function wireComparisonPanelEvents(fileIdx, blockIdx) {
     }, 400);
   };
 
-  // Diff step selectors
-  const diffA = panel.querySelector('.diff-step-a');
-  const diffB = panel.querySelector('.diff-step-b');
-  const onDiffChange = () => {
-    const a = diffA?.value, b = diffB?.value;
-    if (a && b && a !== b) {
-      block.diff = { step_a: a, step_b: b };
-    } else if (!a && !b) {
-      block.diff = null;
-    }
+  // Diff step selectors — multi-row. Each row has its own pair of
+  // step-A/step-B dropdowns plus a remove button. The "+ Diff Pair"
+  // button appends a fresh draft row. To keep `block.diffs` clean
+  // (complete pairs only — incomplete drafts would otherwise emit
+  // `# @@diff   ` on serialize), draft rows live in a UI-only counter
+  // until they're filled in. Once both ends of a draft row are set
+  // they merge into `block.diffs` and the counter decrements.
+  const commitDiffRows = ({ rerender = false } = {}) => {
+    const rows = panel.querySelectorAll('.diff-row');
+    const next = [];
+    let drafts = 0;
+    rows.forEach(row => {
+      const a = row.querySelector('.diff-step-a')?.value || '';
+      const b = row.querySelector('.diff-step-b')?.value || '';
+      if (a && b && a !== b) {
+        next.push({ step_a: a, step_b: b });
+      } else if (a || b) {
+        // Half-filled draft — keep the row visible until completed.
+        drafts++;
+      }
+    });
+    block.diffs = next;
+    // Mirror the primary pair into the legacy `diff` field so older
+    // builds that read only `block.diff` (e.g. running an older Rust
+    // core against the same `.http`) still see the first pair.
+    block.diff = next.length > 0 ? { ...next[0] } : null;
+    block._uiExtraDiffRows = drafts;
+    if (rerender) renderComparisonPanel(fileIdx, blockIdx);
     scheduleFlush();
   };
-  diffA?.addEventListener('change', onDiffChange);
-  diffB?.addEventListener('change', onDiffChange);
+  panel.querySelectorAll('.diff-step-a, .diff-step-b').forEach(sel => {
+    sel.addEventListener('change', () => commitDiffRows());
+  });
+  panel.querySelectorAll('.diff-row-remove').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const di = parseInt(btn.dataset.di);
+      // Capture in-flight DOM state first so removing one row doesn't
+      // accidentally lose unsaved edits in other rows.
+      commitDiffRows();
+      if (Array.isArray(block.diffs) && di < block.diffs.length) {
+        block.diffs.splice(di, 1);
+        block.diff = block.diffs.length > 0 ? { ...block.diffs[0] } : null;
+      } else if (block._uiExtraDiffRows && di >= (block.diffs?.length || 0)) {
+        // Row was a draft (never committed). Just decrement the
+        // UI-only counter.
+        block._uiExtraDiffRows = Math.max(0, block._uiExtraDiffRows - 1);
+      }
+      renderComparisonPanel(fileIdx, blockIdx);
+      scheduleFlush();
+    });
+  });
+  panel.querySelector('.diff-row-add')?.addEventListener('click', () => {
+    // Snapshot current dropdowns into block.diffs first, then bump the
+    // draft-row counter and re-render. The new row is empty until the
+    // user fills both ends — at which point commitDiffRows promotes it.
+    commitDiffRows();
+    block._uiExtraDiffRows = (block._uiExtraDiffRows || 0) + 1;
+    renderComparisonPanel(fileIdx, blockIdx);
+  });
 
   // Block assertions
   panel.querySelectorAll('.comp-assert-left, .comp-assert-op, .comp-assert-right').forEach(inp => {
@@ -4889,7 +5052,12 @@ function renderAssertions(fileIdx, blockIdx) {
 
   // Compare block: assertions first, then action button, then details
   if (block.compare && block.steps && block.steps.length > 0) {
-    const diff = br?.diff_result;
+    const diffPairs = getDiffResults(br, block);
+    const blockDiffs = getBlockDiffs(block);
+    // Total number of pair *slots* on the block — even pairs that errored
+    // or haven't run yet should produce a "View Full Diff" affordance, so
+    // the user can still see why a pair failed (or know one is coming).
+    const pairCount = Math.max(diffPairs.length, blockDiffs.length);
 
     // 1. Comparison assertions (top priority — what the user cares about)
     if (block.assertions && block.assertions.length > 0) {
@@ -4952,56 +5120,80 @@ function renderAssertions(fileIdx, blockIdx) {
       html += '</div>';
     });
 
-    // 3. View Full Diff button
-    if (diff) {
-      html += `<button class="diff-view-btn" onclick="openDiffViewer(${fileIdx}, ${blockIdx})">🔍 View Full Diff</button>`;
-    }
+    // 3 + 4. One "Comparison Result" section per declared diff pair.
+    // We iterate by pair-slot so unrun blocks (no diff_results yet) still
+    // render the View Full Diff buttons grouped under their step labels.
+    for (let pi = 0; pi < pairCount; pi++) {
+      const pair = diffPairs[pi];
+      const declared = blockDiffs[pi];
+      const stepA = pair?.step_a || declared?.step_a || '';
+      const stepB = pair?.step_b || declared?.step_b || '';
+      const label = stepA || stepB
+        ? `${escapeHtml(stepA)} \u21C4 ${escapeHtml(stepB)}`
+        : `Pair ${pi + 1}`;
+      const diff = pair?.diff;
+      const pairError = pair?.error;
+      const pairLabelSuffix = pairCount > 1 ? ` <span class="diff-pair-label">${label}</span>` : '';
 
-    // 4. Comparison result details (summary, changed paths)
-    if (diff) {
-      html += `<div class="assertion-group diff-summary-group">
-        <div class="assertion-group-header">\u21C4 Comparison Result</div>
-        <div class="diff-summary">
-          <div class="diff-stat"><span class="diff-label">Match:</span><span class="diff-value ${diff.match_exact ? 'diff-match' : 'diff-mismatch'}">${diff.match_exact ? 'Exact Match \u2713' : 'Differences Found'}</span></div>
-          <div class="diff-stat"><span class="diff-label">Similarity:</span><span class="diff-value">${(diff.similarity * 100).toFixed(1)}%</span></div>
-          <div class="diff-stat"><span class="diff-label">Type:</span><span class="diff-value">${diff.is_json ? 'JSON' : 'Text'}</span></div>
-          ${diff.added_count ? `<div class="diff-stat"><span class="diff-label">Added:</span><span class="diff-value diff-added">+${diff.added_count}</span></div>` : ''}
-          ${diff.removed_count ? `<div class="diff-stat"><span class="diff-label">Removed:</span><span class="diff-value diff-removed">-${diff.removed_count}</span></div>` : ''}
-          ${diff.changed_count ? `<div class="diff-stat"><span class="diff-label">Changed:</span><span class="diff-value diff-changed">\u0394${diff.changed_count}</span></div>` : ''}
-        </div>`;
+      // Per-pair "View Full Diff" — only enabled when we actually have a
+      // computed diff. For pairs that errored (e.g. unknown step) we skip
+      // the button and surface the error in the details section.
+      if (diff) {
+        html += `<button class="diff-view-btn" onclick="openDiffViewer(${fileIdx}, ${blockIdx}, ${pi})">🔍 View Full Diff${pairCount > 1 ? ` — ${escapeHtml(stepA)} \u21C4 ${escapeHtml(stepB)}` : ''}</button>`;
+      }
 
-      if (diff.changed_paths && diff.changed_paths.length > 0) {
-        html += `<div class="diff-paths"><div class="diff-paths-header">Changed Paths</div>`;
-        diff.changed_paths.slice(0, 50).forEach(cp => {
-          html += `<div class="diff-path-row">
-            <span class="diff-path-name">${escapeHtml(cp.path)}</span>
-            <span class="diff-path-left" title="Step A">${escapeHtml(String(cp.left ?? ''))}</span>
-            <span class="diff-path-arrow">\u2192</span>
-            <span class="diff-path-right" title="Step B">${escapeHtml(String(cp.right ?? ''))}</span>
+      if (diff) {
+        html += `<div class="assertion-group diff-summary-group">
+          <div class="assertion-group-header">\u21C4 Comparison Result${pairLabelSuffix}</div>
+          <div class="diff-summary">
+            <div class="diff-stat"><span class="diff-label">Match:</span><span class="diff-value ${diff.match_exact ? 'diff-match' : 'diff-mismatch'}">${diff.match_exact ? 'Exact Match \u2713' : 'Differences Found'}</span></div>
+            <div class="diff-stat"><span class="diff-label">Similarity:</span><span class="diff-value">${(diff.similarity * 100).toFixed(1)}%</span></div>
+            <div class="diff-stat"><span class="diff-label">Type:</span><span class="diff-value">${diff.is_json ? 'JSON' : 'Text'}</span></div>
+            ${diff.added_count ? `<div class="diff-stat"><span class="diff-label">Added:</span><span class="diff-value diff-added">+${diff.added_count}</span></div>` : ''}
+            ${diff.removed_count ? `<div class="diff-stat"><span class="diff-label">Removed:</span><span class="diff-value diff-removed">-${diff.removed_count}</span></div>` : ''}
+            ${diff.changed_count ? `<div class="diff-stat"><span class="diff-label">Changed:</span><span class="diff-value diff-changed">\u0394${diff.changed_count}</span></div>` : ''}
           </div>`;
-        });
-        if (diff.changed_paths.length > 50) {
-          html += `<div class="diff-path-row">... and ${diff.changed_paths.length - 50} more</div>`;
+
+        if (diff.changed_paths && diff.changed_paths.length > 0) {
+          html += `<div class="diff-paths"><div class="diff-paths-header">Changed Paths</div>`;
+          diff.changed_paths.slice(0, 50).forEach(cp => {
+            html += `<div class="diff-path-row">
+              <span class="diff-path-name">${escapeHtml(cp.path)}</span>
+              <span class="diff-path-left" title="Step A">${escapeHtml(String(cp.left ?? ''))}</span>
+              <span class="diff-path-arrow">\u2192</span>
+              <span class="diff-path-right" title="Step B">${escapeHtml(String(cp.right ?? ''))}</span>
+            </div>`;
+          });
+          if (diff.changed_paths.length > 50) {
+            html += `<div class="diff-path-row">... and ${diff.changed_paths.length - 50} more</div>`;
+          }
+          html += '</div>';
         }
-        html += '</div>';
-      }
 
-      if (diff.added_paths && diff.added_paths.length > 0) {
-        html += `<div class="diff-paths"><div class="diff-paths-header">Added Paths</div>`;
-        diff.added_paths.slice(0, 20).forEach(p => {
-          html += `<div class="diff-path-row"><span class="diff-path-name diff-added">+ ${escapeHtml(p)}</span></div>`;
-        });
-        html += '</div>';
-      }
-      if (diff.removed_paths && diff.removed_paths.length > 0) {
-        html += `<div class="diff-paths"><div class="diff-paths-header">Removed Paths</div>`;
-        diff.removed_paths.slice(0, 20).forEach(p => {
-          html += `<div class="diff-path-row"><span class="diff-path-name diff-removed">- ${escapeHtml(p)}</span></div>`;
-        });
-        html += '</div>';
-      }
+        if (diff.added_paths && diff.added_paths.length > 0) {
+          html += `<div class="diff-paths"><div class="diff-paths-header">Added Paths</div>`;
+          diff.added_paths.slice(0, 20).forEach(p => {
+            html += `<div class="diff-path-row"><span class="diff-path-name diff-added">+ ${escapeHtml(p)}</span></div>`;
+          });
+          html += '</div>';
+        }
+        if (diff.removed_paths && diff.removed_paths.length > 0) {
+          html += `<div class="diff-paths"><div class="diff-paths-header">Removed Paths</div>`;
+          diff.removed_paths.slice(0, 20).forEach(p => {
+            html += `<div class="diff-path-row"><span class="diff-path-name diff-removed">- ${escapeHtml(p)}</span></div>`;
+          });
+          html += '</div>';
+        }
 
-      html += '</div>';
+        html += '</div>';
+      } else if (pairError) {
+        // Pair couldn't run (typo'd step name, etc.). Surface the error
+        // inline so the user can fix it without losing the other pairs.
+        html += `<div class="assertion-group diff-summary-group">
+          <div class="assertion-group-header">\u21C4 Comparison Result${pairLabelSuffix}</div>
+          <div class="assertion-row failed"><span class="assert-icon">\u2717</span><span class="assert-text">${escapeHtml(pairError)}</span></div>
+        </div>`;
+      }
     }
 
     // Block-level error
@@ -5487,7 +5679,7 @@ async function runCompareStep(fileIdx, blockIdx, stepIdx) {
           request_headers: [], request_body: null,
           status: 'pending', response: null,
           assertion_results: [], extract_results: [],
-          error: null, time_ms: 0, step_results: [], diff_result: null
+          error: null, time_ms: 0, step_results: [], diff_result: null, diff_results: []
         };
       }
       const parentBr = file.results.block_results[blockIdx];
@@ -5640,7 +5832,19 @@ function showTestResults(passed, failed, skipped, timeMs, blockResults, pendingB
 
     const stepCount = br.step_results?.length || 0;
     const stepText = stepCount > 0 ? `${stepCount} steps` : '';
-    const diffMatch = br.diff_result ? (br.diff_result.match_exact ? '\u2713 match' : `${(br.diff_result.similarity * 100).toFixed(0)}% similar`) : '';
+    // Multi-diff: show the primary pair's badge here (compact view).
+    // The full per-pair list lives in the assertions sidebar / tooltip.
+    // Suffix "+N" when there are additional pairs so the user knows
+    // there's more to look at.
+    const drPairs = (br.diff_results && br.diff_results.length > 0)
+      ? br.diff_results
+      : (br.diff_result ? [{ diff: br.diff_result }] : []);
+    const primaryDiff = drPairs[0]?.diff;
+    const extraPairs = Math.max(0, drPairs.length - 1);
+    const diffMatch = primaryDiff
+      ? (primaryDiff.match_exact ? '\u2713 match' : `${(primaryDiff.similarity * 100).toFixed(0)}% similar`)
+      + (extraPairs > 0 ? ` +${extraPairs}` : '')
+      : '';
 
     // Determine failure reason
     let failReasonHtml = '';
@@ -5673,7 +5877,7 @@ function showTestResults(passed, failed, skipped, timeMs, blockResults, pendingB
       ${assertText ? `<span class="detail-assertions ${assertClass}">${assertText}</span>` : ''}
       ${extractText ? `<span class="detail-extracts">${extractText}</span>` : ''}
       ${stepText ? `<span class="detail-steps">${stepText}</span>` : ''}
-      ${diffMatch ? `<span class="detail-diff ${br.diff_result?.match_exact ? 'diff-match' : 'diff-mismatch'}">${diffMatch}</span>` : ''}
+      ${diffMatch ? `<span class="detail-diff ${primaryDiff?.match_exact ? 'diff-match' : 'diff-mismatch'}" title="${drPairs.length > 1 ? `${drPairs.length} diff pairs — primary shown` : ''}">${diffMatch}</span>` : ''}
       <span class="detail-time">${br.time_ms} ms</span>
       ${viewedIcon}
     `;
@@ -9761,17 +9965,24 @@ function renderRustCharHighlight(text, highlights, cls, hlFn) {
   return result;
 }
 
-async function openDiffViewer(fileIdx, blockIdx) {
+async function openDiffViewer(fileIdx, blockIdx, diffIdx = 0) {
   const file = loadedFiles[fileIdx];
   const block = file?.suite?.blocks?.[blockIdx];
   const br = file?.results?.block_results?.[blockIdx];
-  if (!br || !br.diff_result) return;
+  if (!br) return;
 
-  const diff = br.diff_result;
+  // Resolve which pair this viewer is for. Multi-diff blocks pass an
+  // explicit `diffIdx`; legacy callers omit it and we fall back to 0
+  // (the "primary" pair, which matches the legacy single-diff shape).
+  const pairs = getDiffResults(br, block);
+  const pair = pairs[diffIdx];
+  if (!pair || !pair.diff) return;
+
+  const diff = pair.diff;
   const steps = br.step_results || [];
 
-  const stepAName = block?.diff?.step_a || steps[0]?.name || 'Step A';
-  const stepBName = block?.diff?.step_b || steps[1]?.name || 'Step B';
+  const stepAName = pair.step_a || steps[0]?.name || 'Step A';
+  const stepBName = pair.step_b || steps[1]?.name || 'Step B';
 
   const stepA = steps.find(s => s.name === stepAName);
   const stepB = steps.find(s => s.name === stepBName);
@@ -9820,8 +10031,11 @@ async function openDiffViewer(fileIdx, blockIdx) {
   rightCode.innerHTML = '';
   $('#diffViewerOverlay').classList.remove('hidden');
 
-  // Check diff cache first
-  const cacheKey = `assert:${fileIdx}-${blockIdx}`;
+  // Check diff cache first. Cache key includes pair index so v1↔v2 and
+  // v1↔v3 don't clobber each other when the user toggles between them.
+  const cacheKey = pairs.length > 1
+    ? `assert:${fileIdx}-${blockIdx}#${diffIdx}`
+    : `assert:${fileIdx}-${blockIdx}`;
   const contentType = lang === 'json' ? 'json' : 'text';
   let diffOps = null;
 
