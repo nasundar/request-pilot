@@ -585,6 +585,7 @@ const metaDisabled    = $('#metaDisabled');
 const metaCompare     = $('#metaCompare');
 const metaLoopIterVar   = $('#metaLoopIterVar');
 const metaLoopSourceVar = $('#metaLoopSourceVar');
+const metaLoopParallel  = $('#metaLoopParallel');
 const builderNormal   = $('#builderNormal');
 const compareStepsView = $('#compareStepsView');
 const compareStepsTabs = $('#compareStepsTabs');
@@ -4238,6 +4239,10 @@ function createBlockItem(file, fileIdx, block, blockIdx) {
     const loopBr = file.results?.block_results?.[blockIdx];
     const stats = iterFailureCount(loopBr);
     const tipParts = [`Loop: for ${block.for_loop.iter_var} in ${block.for_loop.source_var}`];
+    // V1.2: surface parallel concurrency in the tooltip if set.
+    if (block.for_loop.parallel && block.for_loop.parallel > 1) {
+      tipParts.push(`parallel: ${block.for_loop.parallel}`);
+    }
     if (stats.total > 0) {
       tipParts.push(`${stats.total} iterations: ${stats.passed} passed, ${stats.failed} failed`);
       if (stats.omitted > 0) tipParts.push(`${stats.omitted} bodies omitted by storage cap`);
@@ -4443,6 +4448,9 @@ function syncSidebarLoopBadge(blockItemEl, fileIdx, blockIdx) {
   else label = `\u00D7 ${stats.total}`;
   badge.textContent = label;
   const tipParts = [`Loop: for ${block.for_loop.iter_var} in ${block.for_loop.source_var}`];
+  if (block.for_loop.parallel && block.for_loop.parallel > 1) {
+    tipParts.push(`parallel: ${block.for_loop.parallel}`);
+  }
   if (stats.total > 0) {
     tipParts.push(`${stats.total} iterations: ${stats.passed} passed, ${stats.failed} failed`);
     if (stats.omitted > 0) tipParts.push(`${stats.omitted} bodies omitted by storage cap`);
@@ -4523,6 +4531,13 @@ function populateMetadata(block) {
   metaCompare.checked = !!block.compare;
   metaLoopIterVar.value = block.for_loop?.iter_var || '';
   metaLoopSourceVar.value = block.for_loop?.source_var || '';
+  // V1.2: parallel concurrency. Empty input = sequential (no @@parallel).
+  // We display Some(1) as blank too, since @@parallel 1 is equivalent to
+  // sequential and the regenerator omits it.
+  if (metaLoopParallel) {
+    const p = block.for_loop?.parallel;
+    metaLoopParallel.value = (p && p > 1) ? String(p) : '';
+  }
 
   // Build summary line
   const parts = [];
@@ -4530,7 +4545,13 @@ function populateMetadata(block) {
   if (block.block_type && block.block_type !== 'test') parts.push(`[${block.block_type}]`);
   if (block.group) parts.push(`group: ${block.group}`);
   if (block.compare) parts.push('compare');
-  if (hasLoopDirective(block)) parts.push(`for ${block.for_loop.iter_var} in ${block.for_loop.source_var}`);
+  if (hasLoopDirective(block)) {
+    let loopPart = `for ${block.for_loop.iter_var} in ${block.for_loop.source_var}`;
+    if (block.for_loop.parallel && block.for_loop.parallel > 1) {
+      loopPart += ` ‖ ${block.for_loop.parallel}`;
+    }
+    parts.push(loopPart);
+  }
   blockMetaSummary.textContent = parts.join('  ·  ');
 }
 
@@ -4566,12 +4587,30 @@ function applyMetadataToBlock() {
   // sane when a user toggles compare on a previously-looped block).
   const iter = metaLoopIterVar.value.trim();
   const src = metaLoopSourceVar.value.trim();
+  // V1.2 parallel: parse the input, clamp to [1, 32], drop on invalid.
+  // Empty input or 1 stays as null so we don't emit `# @@parallel 1`.
+  let parallel = null;
+  if (metaLoopParallel) {
+    const raw = metaLoopParallel.value.trim();
+    if (raw !== '') {
+      const n = parseInt(raw, 10);
+      if (Number.isFinite(n) && n >= 2 && n <= 32) {
+        parallel = n;
+      } else if (Number.isFinite(n) && n > 32) {
+        parallel = 32;
+      }
+      // n < 2 (including NaN, 0, negative, 1) -> null (sequential)
+    }
+  }
   const newLoop = (!metaCompare.checked && iter && src)
-    ? { iter_var: iter, source_var: src }
+    ? { iter_var: iter, source_var: src, parallel }
     : null;
   const oldLoop = block.for_loop || null;
   const sameLoop = (newLoop === oldLoop) ||
-    (newLoop && oldLoop && newLoop.iter_var === oldLoop.iter_var && newLoop.source_var === oldLoop.source_var);
+    (newLoop && oldLoop
+      && newLoop.iter_var === oldLoop.iter_var
+      && newLoop.source_var === oldLoop.source_var
+      && (newLoop.parallel || null) === (oldLoop.parallel || null));
   if (!sameLoop) {
     block.for_loop = newLoop;
     changed = true;
@@ -4613,7 +4652,13 @@ function onMetaFieldChange() {
         if (block.block_type && block.block_type !== 'test') parts.push(`[${block.block_type}]`);
         if (block.group) parts.push(`group: ${block.group}`);
         if (block.compare) parts.push('compare');
-        if (hasLoopDirective(block)) parts.push(`for ${block.for_loop.iter_var} in ${block.for_loop.source_var}`);
+        if (hasLoopDirective(block)) {
+          let loopPart = `for ${block.for_loop.iter_var} in ${block.for_loop.source_var}`;
+          if (block.for_loop.parallel && block.for_loop.parallel > 1) {
+            loopPart += ` ‖ ${block.for_loop.parallel}`;
+          }
+          parts.push(loopPart);
+        }
         blockMetaSummary.textContent = parts.join('  ·  ');
       }
       renderFileTree();
@@ -4668,8 +4713,8 @@ metaCompare.addEventListener('change', async () => {
 
   renderFileTree();
 });
-[metaName, metaDescription, metaGroup, metaDepends, metaDevAuth, metaLoopIterVar, metaLoopSourceVar].forEach(el => {
-  el.addEventListener('input', onMetaFieldChange);
+[metaName, metaDescription, metaGroup, metaDepends, metaDevAuth, metaLoopIterVar, metaLoopSourceVar, metaLoopParallel].forEach(el => {
+  if (el) el.addEventListener('input', onMetaFieldChange);
 });
 [metaBlockType, metaMode, metaDisabled].forEach(el => {
   el.addEventListener('change', onMetaFieldChange);

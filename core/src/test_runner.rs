@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
@@ -491,27 +491,164 @@ async fn execute_block_or_loop(
     var_store: VariableStore,
     extra_headers: Vec<(String, String)>,
     handler: Option<Arc<dyn ProgressHandler>>,
+    cancel: Option<CancelToken>,
 ) -> BlockResult {
     if block.for_loop.is_some() {
-        execute_loop_block(block, var_store, extra_headers, handler).await
+        execute_loop_block(block, var_store, extra_headers, handler, cancel).await
     } else {
         execute_block(block, var_store, extra_headers).await
+    }
+}
+
+/// Execute a single iteration of a `# @@for` block. Pulled out of
+/// `execute_loop_block` so both the sequential and parallel paths use the
+/// same logic. Owns the progress-event emission lifecycle for one iter.
+///
+/// Each iteration receives a CHILD var_store derived from the loop's
+/// snapshot — per-iter extracts stay local and don't pollute the outer
+/// state. The inner block has its for_loop cleared so `execute_block`
+/// treats it as a single request.
+async fn run_one_iteration(
+    block: &TestBlock,
+    fl: &crate::http_parser::ForLoop,
+    idx: usize,
+    total: usize,
+    elem: &serde_json::Value,
+    parent_vars: &VariableStore,
+    extra_headers: &[(String, String)],
+    handler: Option<Arc<dyn ProgressHandler>>,
+) -> IterationResult {
+    // Bind iter_var:
+    //   - JSON string -> raw string value (so `{{user_id}}` = "u1", not "\"u1\"")
+    //   - everything else (object/array/number/bool/null) -> JSON-stringified
+    //     so the interpolator's dotted-path navigator can walk it via
+    //     `{{user.id}}` / `{{users[0].name}}`.
+    let bound_value = match elem {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+
+    // Truncate iter_value display so a giant object doesn't blow up
+    // history rendering or progress event payloads.
+    const MAX_DISPLAY: usize = 200;
+    let display_value = if bound_value.chars().count() > MAX_DISPLAY {
+        let trimmed: String = bound_value.chars().take(MAX_DISPLAY).collect();
+        format!("{}…", trimmed)
+    } else {
+        bound_value.clone()
+    };
+
+    // Live-progress: iteration starting.
+    if let Some(ref h) = handler {
+        h.on_iteration_progress(&IterationProgress {
+            block_name: block.name.clone(),
+            index: idx,
+            total,
+            iter_value: display_value.clone(),
+            status: "running".to_string(),
+            time_ms: 0,
+        });
+    }
+
+    let mut child = parent_vars.clone();
+    child.set(&fl.iter_var, &bound_value);
+    // Loop counters — interpolator's plain-name fallback resolves these.
+    // Using `$index` / `$iteration` keeps them visually distinct from
+    // user variables (and matches REST-Client-style built-ins).
+    child.set("$index", &idx.to_string());
+    child.set("$iteration", &(idx + 1).to_string());
+
+    let mut inner_block = block.clone();
+    inner_block.for_loop = None;
+    let iter_start = std::time::Instant::now();
+    let inner_result = execute_block(inner_block, child, extra_headers.to_vec()).await;
+    let iter_ms = iter_start.elapsed().as_millis() as u64;
+
+    let iter_status = inner_result.status.clone();
+
+    // Live-progress: iteration finished.
+    if let Some(ref h) = handler {
+        h.on_iteration_progress(&IterationProgress {
+            block_name: block.name.clone(),
+            index: idx,
+            total,
+            iter_value: display_value.clone(),
+            status: iter_status.clone(),
+            time_ms: iter_ms,
+        });
+    }
+
+    IterationResult {
+        index: idx,
+        iter_value: display_value,
+        status: iter_status,
+        block_result: Box::new(inner_result),
+        body_omitted: false,
+    }
+}
+
+/// Build a synthetic `IterationResult` for an iteration that never ran or
+/// whose worker task panicked. Used by the parallel scheduler to fill gaps
+/// (cancelled iters, JoinError) so the Vec<IterationResult> always has one
+/// entry per source-array element regardless of execution path failures.
+fn synthetic_skipped_iteration(
+    block: &TestBlock,
+    idx: usize,
+    iter_value: String,
+    status: &str,
+    error_msg: &str,
+) -> IterationResult {
+    IterationResult {
+        index: idx,
+        iter_value: iter_value.clone(),
+        status: status.to_string(),
+        block_result: Box::new(BlockResult {
+            seq: None,
+            name: block.name.clone(),
+            block_type: block.block_type.clone(),
+            group: block.group.clone(),
+            request_method: block.request.method.clone(),
+            request_url: block.request.url.clone(),
+            request_headers: Vec::new(),
+            request_body: None,
+            status: status.to_string(),
+            response: None,
+            assertion_results: Vec::new(),
+            extract_results: Vec::new(),
+            error: Some(error_msg.to_string()),
+            time_ms: 0,
+            step_results: Vec::new(),
+            diff_result: None,
+            diff_results: Vec::new(),
+            iterations: Vec::new(),
+        }),
+        body_omitted: false,
     }
 }
 
 /// Execute a `# @@for iter_var in source_var` block — runs the inner block
 /// once per element of the JSON array stored in `source_var`. Per-iteration
 /// extracts stay LOCAL to that iteration (don't escape into the outer
-/// var_store) so loop output is opt-in via a future `# @@collect` directive.
-/// Iterations run sequentially in V1 (parallel deferred).
+/// var_store).
+///
+/// Concurrency: when `for_loop.parallel` is `Some(N > 1)`, iterations run
+/// concurrently via a bounded worker pool of N tasks (each pulling the
+/// next index from a shared atomic counter). Otherwise iterations run
+/// sequentially. Either path produces identical, deterministic
+/// `IterationResult` ordering (sorted by `index`).
+///
+/// Cancellation: the supplied `CancelToken` is checked between iterations
+/// (sequential) or before each worker pulls the next index (parallel). On
+/// cancel, remaining iterations are skipped with synthetic
+/// `status = "skipped"` results so the UI sees the full iteration set.
 async fn execute_loop_block(
     block: TestBlock,
     var_store: VariableStore,
     extra_headers: Vec<(String, String)>,
     handler: Option<Arc<dyn ProgressHandler>>,
+    cancel: Option<CancelToken>,
 ) -> BlockResult {
     let total_start = std::time::Instant::now();
-    // for_loop is guaranteed to be Some by the caller; clone out for use.
     let fl = block.for_loop.clone().expect("execute_loop_block called without for_loop");
 
     // 1. Look up the source variable.
@@ -556,90 +693,129 @@ async fn execute_loop_block(
         }
     };
 
-    // 4. Iterate. Each iteration gets a CHILD var_store so per-iter extracts
-    //    don't pollute the outer state. The inner block has its for_loop
-    //    cleared so execute_block treats it as a normal single request.
-    let mut iterations: Vec<IterationResult> = Vec::with_capacity(arr.len());
-    let mut any_failed = false;
     let total = arr.len();
-    for (idx, elem) in arr.iter().enumerate() {
-        // Bind iter_var:
-        //   - JSON string -> raw string value (so `{{user_id}}` = "u1", not "\"u1\"")
-        //   - everything else (object/array/number/bool/null) -> JSON-stringified
-        //     so the interpolator's dotted-path navigator can walk it via
-        //     `{{user.id}}` / `{{users[0].name}}`.
-        let bound_value = match elem {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
+    let mut iterations: Vec<IterationResult> = Vec::with_capacity(total);
+    let mut any_failed = false;
 
-        // Truncate iter_value display so a giant object doesn't blow up
-        // history rendering or progress event payloads.
-        const MAX_DISPLAY: usize = 200;
-        let display_value = if bound_value.chars().count() > MAX_DISPLAY {
-            let trimmed: String = bound_value.chars().take(MAX_DISPLAY).collect();
-            format!("{}…", trimmed)
-        } else {
-            bound_value.clone()
-        };
+    // Determine concurrency. None or Some(1) => sequential. Some(N>1) =>
+    // parallel via a bounded worker pool.
+    let max_concurrency = fl.parallel.unwrap_or(1).max(1) as usize;
 
-        // Live-progress: iteration starting.
-        if let Some(ref h) = handler {
-            h.on_iteration_progress(&IterationProgress {
-                block_name: block.name.clone(),
-                index: idx,
-                total,
-                iter_value: display_value.clone(),
-                status: "running".to_string(),
-                time_ms: 0,
+    if max_concurrency <= 1 || total <= 1 {
+        // ── Sequential path ─────────────────────────────────────────
+        for (idx, elem) in arr.iter().enumerate() {
+            // Cancellation: stop scheduling new iterations and synthesize
+            // skipped results for the remainder so the UI sees the full set.
+            if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+                for skip_idx in idx..total {
+                    let display = elem_display(&arr[skip_idx]);
+                    iterations.push(synthetic_skipped_iteration(
+                        &block, skip_idx, display, "skipped", "Cancelled by user",
+                    ));
+                }
+                any_failed = true;
+                break;
+            }
+            let it = run_one_iteration(
+                &block, &fl, idx, total, elem,
+                &var_store, &extra_headers, handler.clone(),
+            ).await;
+            if it.status != "passed" {
+                any_failed = true;
+            }
+            iterations.push(it);
+        }
+    } else {
+        // ── Parallel worker-pool path ───────────────────────────────
+        // N workers each pull the next index from a shared atomic counter.
+        // Cloning happens lazily inside the worker (only the workers'
+        // shared state is pre-cloned, not per-iteration), so memory and
+        // cost stay bounded by N rather than `total`.
+        let arr = Arc::new(arr);
+        let next_idx = Arc::new(AtomicUsize::new(0));
+        let block_arc = Arc::new(block.clone());
+        let fl_arc = Arc::new(fl.clone());
+        let extra_arc = Arc::new(extra_headers.clone());
+        let var_arc = Arc::new(var_store.clone());
+
+        let workers = max_concurrency.min(total);
+        let mut set: JoinSet<Vec<IterationResult>> = JoinSet::new();
+        for _w in 0..workers {
+            let arr = arr.clone();
+            let next_idx = next_idx.clone();
+            let block_arc = block_arc.clone();
+            let fl_arc = fl_arc.clone();
+            let var_arc = var_arc.clone();
+            let extra_arc = extra_arc.clone();
+            let handler_w = handler.clone();
+            let cancel_w = cancel.clone();
+            set.spawn(async move {
+                let mut local: Vec<IterationResult> = Vec::new();
+                loop {
+                    if cancel_w.as_ref().is_some_and(|c| c.is_cancelled()) {
+                        break;
+                    }
+                    let idx = next_idx.fetch_add(1, Ordering::Relaxed);
+                    if idx >= arr.len() {
+                        break;
+                    }
+                    // Clone state for THIS iteration. Same per-iter cost as
+                    // the sequential path, just spread across N workers.
+                    let it = run_one_iteration(
+                        &block_arc, &fl_arc, idx, arr.len(), &arr[idx],
+                        &var_arc, &extra_arc, handler_w.clone(),
+                    ).await;
+                    local.push(it);
+                }
+                local
             });
         }
 
-        let mut child = var_store.clone();
-        child.set(&fl.iter_var, &bound_value);
-        // Loop counters — interpolator's plain-name fallback resolves these.
-        // Using `$index` / `$iteration` keeps them visually distinct from
-        // user variables (and matches REST-Client-style built-ins).
-        child.set("$index", &idx.to_string());
-        child.set("$iteration", &(idx + 1).to_string());
-
-        let mut inner_block = block.clone();
-        inner_block.for_loop = None;
-        let iter_start = std::time::Instant::now();
-        let inner_result = execute_block(inner_block, child, extra_headers.clone()).await;
-        let iter_ms = iter_start.elapsed().as_millis() as u64;
-
-        let iter_status = inner_result.status.clone();
-        if iter_status != "passed" {
-            any_failed = true;
+        // Collect workers' results. JoinErrors (panics) are converted to
+        // synthetic error iters below so a single bad iter doesn't crash
+        // the whole loop.
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok(batch) => {
+                    for it in batch {
+                        if it.status != "passed" {
+                            any_failed = true;
+                        }
+                        iterations.push(it);
+                    }
+                }
+                Err(e) => {
+                    log::error!("loop worker task panicked: {}", e);
+                    any_failed = true;
+                }
+            }
         }
 
-        // Live-progress: iteration finished.
-        if let Some(ref h) = handler {
-            h.on_iteration_progress(&IterationProgress {
-                block_name: block.name.clone(),
-                index: idx,
-                total,
-                iter_value: display_value.clone(),
-                status: iter_status.clone(),
-                time_ms: iter_ms,
-            });
+        // Fill any gaps (cancelled iters or worker panics): every iter
+        // index in [0, total) should have a result. Missing ones become
+        // synthetic "skipped"/"error" records keyed by their index value.
+        let returned: HashSet<usize> = iterations.iter().map(|it| it.index).collect();
+        for idx in 0..total {
+            if !returned.contains(&idx) {
+                let cancelled = cancel.as_ref().is_some_and(|c| c.is_cancelled());
+                let (status, msg) = if cancelled {
+                    ("skipped", "Cancelled by user")
+                } else {
+                    ("error", "Iteration task panicked")
+                };
+                let display = elem_display(&arr[idx]);
+                iterations.push(synthetic_skipped_iteration(
+                    &block, idx, display, status, msg,
+                ));
+                any_failed = true;
+            }
         }
 
-        iterations.push(IterationResult {
-            index: idx,
-            iter_value: display_value,
-            status: iter_status,
-            block_result: Box::new(inner_result),
-            body_omitted: false,
-        });
+        // Deterministic ordering — workers complete in arbitrary order.
+        iterations.sort_by_key(|it| it.index);
     }
 
     let total_time_ms = total_start.elapsed().as_millis() as u64;
-    // Aggregate: empty array still passes (zero iters = nothing failed).
-    // Any failed iteration -> block fails. Errors inside iters bubble up
-    // as `failed` here too (the inner BlockResult.status carries the
-    // error message and is preserved verbatim in IterationResult).
     let aggregate_status = if any_failed { "failed" } else { "passed" };
 
     BlockResult {
@@ -647,8 +823,6 @@ async fn execute_loop_block(
         name: block.name.clone(),
         block_type: block.block_type.clone(),
         group: block.group.clone(),
-        // Top-level method/url are the templates pre-interpolation; useful
-        // as a "this is what the loop runs N copies of" summary in the UI.
         request_method: block.request.method.clone(),
         request_url: block.request.url.clone(),
         request_headers: Vec::new(),
@@ -663,6 +837,23 @@ async fn execute_loop_block(
         diff_result: None,
         diff_results: Vec::new(),
         iterations,
+    }
+}
+
+/// Compact display string for a JSON array element — used when synthesizing
+/// skipped/error IterationResults so the UI still has a meaningful iter
+/// label even when the iter never executed.
+fn elem_display(elem: &serde_json::Value) -> String {
+    const MAX_DISPLAY: usize = 200;
+    let raw = match elem {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    if raw.chars().count() > MAX_DISPLAY {
+        let trimmed: String = raw.chars().take(MAX_DISPLAY).collect();
+        format!("{}…", trimmed)
+    } else {
+        raw
     }
 }
 
@@ -1146,12 +1337,13 @@ async fn run_tests_with_groups(
                     let vs = var_snapshot.clone();
                     let h = handler.clone();
                     let eh = extra_headers.to_vec();
+                    let cancel_for_task = cancel.cloned();
                     join_set.spawn(async move {
                         emit_start(&h, &block.name, &block.block_type);
                         let result = if block.compare && !block.steps.is_empty() {
                             execute_compare_block(block, vs, eh).await
                         } else {
-                            execute_block_or_loop(block, vs, eh, h.clone()).await
+                            execute_block_or_loop(block, vs, eh, h.clone(), cancel_for_task).await
                         };
                         emit_completed(&h, &result);
                         (idx, result)
@@ -1306,7 +1498,7 @@ async fn run_suite_inner(
         let result = if block.compare && !block.steps.is_empty() {
             execute_compare_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
         } else {
-            execute_block_or_loop((*block).clone(), var_store.clone(), extra_headers.to_vec(), handler.clone()).await
+            execute_block_or_loop((*block).clone(), var_store.clone(), extra_headers.to_vec(), handler.clone(), cancel.clone()).await
         };
         // Merge extracts into var_store
         for er in &result.extract_results {
@@ -1374,7 +1566,9 @@ async fn run_suite_inner(
         let result = if block.compare && !block.steps.is_empty() {
             execute_compare_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
         } else {
-            execute_block_or_loop((*block).clone(), var_store.clone(), extra_headers.to_vec(), handler.clone()).await
+            // NOTE: teardown ignores `cancel` — it always runs to completion
+            // so cleanup happens even after a user-initiated stop.
+            execute_block_or_loop((*block).clone(), var_store.clone(), extra_headers.to_vec(), handler.clone(), None).await
         };
         for er in &result.extract_results {
             if er.success {
@@ -2381,6 +2575,7 @@ mod tests {
             for_loop: Some(crate::http_parser::ForLoop {
                 iter_var: iter_var.to_string(),
                 source_var: source_var.to_string(),
+                parallel: None,
             }),
         }
     }
@@ -2396,7 +2591,7 @@ mod tests {
         let mut vs = VariableStore::new();
         vs.set("user_ids", r#"["u1","u2","u3"]"#);
 
-        let result = execute_block_or_loop(block, vs, vec![], None).await;
+        let result = execute_block_or_loop(block, vs, vec![], None, None).await;
 
         // 3 iterations executed in order; each substituted user_id correctly.
         assert_eq!(result.iterations.len(), 3, "all 3 elements iterated");
@@ -2432,7 +2627,7 @@ mod tests {
         let mut vs = VariableStore::new();
         vs.set("users", r#"[{"id":"u1","post":"p1"},{"id":"u2","post":"p2"}]"#);
 
-        let result = execute_block_or_loop(block, vs, vec![], None).await;
+        let result = execute_block_or_loop(block, vs, vec![], None, None).await;
 
         assert_eq!(result.iterations.len(), 2);
         assert!(
@@ -2455,7 +2650,7 @@ mod tests {
             "missing_var",
             "http://127.0.0.1:0/{{x}}",
         );
-        let result = execute_block_or_loop(block, VariableStore::new(), vec![], None).await;
+        let result = execute_block_or_loop(block, VariableStore::new(), vec![], None, None).await;
 
         assert_eq!(result.status, "error");
         assert!(result.iterations.is_empty(), "no iterations on source error");
@@ -2475,7 +2670,7 @@ mod tests {
         // A bare string that's NOT a JSON array.
         vs.set("scalar_src", "just-a-string");
 
-        let result = execute_block_or_loop(block, vs, vec![], None).await;
+        let result = execute_block_or_loop(block, vs, vec![], None, None).await;
         assert_eq!(result.status, "error");
         assert!(result.iterations.is_empty());
         assert!(
@@ -2489,7 +2684,7 @@ mod tests {
         let block2 = make_loop_block("x", "obj_src", "http://127.0.0.1:0/{{x}}");
         let mut vs2 = VariableStore::new();
         vs2.set("obj_src", r#"{"k":"v"}"#);
-        let result2 = execute_block_or_loop(block2, vs2, vec![], None).await;
+        let result2 = execute_block_or_loop(block2, vs2, vec![], None, None).await;
         assert_eq!(result2.status, "error");
         assert!(result2.iterations.is_empty());
         assert!(
@@ -2506,7 +2701,7 @@ mod tests {
         let mut vs = VariableStore::new();
         vs.set("empty_src", "[]");
 
-        let result = execute_block_or_loop(block, vs, vec![], None).await;
+        let result = execute_block_or_loop(block, vs, vec![], None, None).await;
         assert_eq!(result.status, "passed", "empty array is vacuously passing");
         assert!(result.iterations.is_empty());
         assert!(result.error.is_none());
@@ -2523,7 +2718,7 @@ mod tests {
         );
         let mut vs = VariableStore::new();
         vs.set("vals", r#"["a","b"]"#);
-        let result = execute_block_or_loop(block, vs, vec![], None).await;
+        let result = execute_block_or_loop(block, vs, vec![], None, None).await;
 
         assert_eq!(result.iterations.len(), 2);
         let url0 = &result.iterations[0].block_result.request_url;
@@ -2553,7 +2748,7 @@ mod tests {
         // Sentinel: outer store before the loop.
         assert!(vs.get("leaked").is_none());
 
-        let _result = execute_block_or_loop(block, vs.clone(), vec![], None).await;
+        let _result = execute_block_or_loop(block, vs.clone(), vec![], None, None).await;
 
         // Outer var_store (the one we pass by clone) is unaffected
         // regardless of what happened inside iterations.
@@ -2572,7 +2767,7 @@ mod tests {
         let mut vs = VariableStore::new();
         vs.set("blobs", &arr);
 
-        let result = execute_block_or_loop(block, vs, vec![], None).await;
+        let result = execute_block_or_loop(block, vs, vec![], None, None).await;
         assert_eq!(result.iterations.len(), 1);
         // 200-char cap (plus the ellipsis suffix) — guards UI/history rendering.
         let display_len = result.iterations[0].iter_value.chars().count();
@@ -2612,7 +2807,7 @@ mod tests {
         });
         let handler: Arc<dyn ProgressHandler> = recorder.clone();
 
-        let _ = execute_block_or_loop(block, vs, vec![], Some(handler)).await;
+        let _ = execute_block_or_loop(block, vs, vec![], Some(handler), None).await;
 
         let events = recorder.events.lock().unwrap();
         // 3 iters × 2 events (running + final) = 6 progress events.
@@ -2644,10 +2839,203 @@ mod tests {
             events: std::sync::Mutex::new(Vec::new()),
         });
         let h2: Arc<dyn ProgressHandler> = recorder2.clone();
-        let _ = execute_block_or_loop(block_bad, VariableStore::new(), vec![], Some(h2)).await;
+        let _ = execute_block_or_loop(block_bad, VariableStore::new(), vec![], Some(h2), None).await;
         assert!(
             recorder2.events.lock().unwrap().is_empty(),
             "no iteration progress should fire when loop source is invalid"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // V1.2: # @@parallel — bounded-concurrency loop execution.
+    //
+    // Strategy: same connection-refused trick as sequential tests. We don't
+    // need to verify wall-clock speedup; we verify functional correctness:
+    //   - all N iterations still run to completion
+    //   - results stay deterministically ordered by index
+    //   - parallel(1) ≡ sequential
+    //   - cancel mid-flight halts new iter pickup
+    // -------------------------------------------------------------------
+
+    fn make_parallel_loop_block(
+        iter_var: &str,
+        source_var: &str,
+        url_template: &str,
+        parallel: Option<u32>,
+    ) -> TestBlock {
+        let mut block = make_loop_block(iter_var, source_var, url_template);
+        if let Some(ref mut fl) = block.for_loop {
+            fl.parallel = parallel;
+        }
+        block
+    }
+
+    #[tokio::test]
+    async fn parallel_loop_preserves_iteration_count_and_order() {
+        use crate::variables::VariableStore;
+        // 12 iters, parallel=4 → workers compete for indexes from atomic
+        // counter. After sort, iteration[i].index must == i for all i, and
+        // iter_value must match arr[i].
+        let block = make_parallel_loop_block(
+            "item",
+            "items",
+            "http://127.0.0.1:0/x/{{item}}",
+            Some(4),
+        );
+        let mut vs = VariableStore::new();
+        vs.set(
+            "items",
+            r#"["a","b","c","d","e","f","g","h","i","j","k","l"]"#,
+        );
+
+        let result = execute_block_or_loop(block, vs, vec![], None, None).await;
+
+        assert_eq!(result.iterations.len(), 12);
+        let expected = ["a","b","c","d","e","f","g","h","i","j","k","l"];
+        for (i, expected_val) in expected.iter().enumerate() {
+            assert_eq!(result.iterations[i].index, i, "index for slot {}", i);
+            assert_eq!(
+                result.iterations[i].iter_value, *expected_val,
+                "iter_value for slot {}", i
+            );
+            assert!(
+                result.iterations[i].block_result.request_url.ends_with(&format!("/x/{}", expected_val)),
+                "iter {} url should end with /x/{}", i, expected_val
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_one_is_equivalent_to_sequential() {
+        use crate::variables::VariableStore;
+        // parallel: Some(1) MUST take the sequential code path (parallel
+        // path requires N>1 workers to be useful and would just add
+        // overhead). The runner clamps to sequential — verify ordered
+        // results regardless.
+        let block_seq = make_parallel_loop_block(
+            "x", "xs", "http://127.0.0.1:0/{{x}}", None,
+        );
+        let block_par1 = make_parallel_loop_block(
+            "x", "xs", "http://127.0.0.1:0/{{x}}", Some(1),
+        );
+        let mut vs = VariableStore::new();
+        vs.set("xs", r#"["one","two","three"]"#);
+
+        let r_seq = execute_block_or_loop(block_seq, vs.clone(), vec![], None, None).await;
+        let r_par = execute_block_or_loop(block_par1, vs, vec![], None, None).await;
+
+        assert_eq!(r_seq.iterations.len(), r_par.iterations.len());
+        for i in 0..r_seq.iterations.len() {
+            assert_eq!(r_seq.iterations[i].index, r_par.iterations[i].index);
+            assert_eq!(r_seq.iterations[i].iter_value, r_par.iterations[i].iter_value);
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_loop_with_more_workers_than_iters_works() {
+        use crate::variables::VariableStore;
+        // parallel=8 but only 3 iters: only 3 workers should spawn (we
+        // clamp to total). All 3 results must come back.
+        let block = make_parallel_loop_block(
+            "item",
+            "items",
+            "http://127.0.0.1:0/{{item}}",
+            Some(8),
+        );
+        let mut vs = VariableStore::new();
+        vs.set("items", r#"["a","b","c"]"#);
+
+        let result = execute_block_or_loop(block, vs, vec![], None, None).await;
+
+        assert_eq!(result.iterations.len(), 3);
+        assert_eq!(result.iterations[0].iter_value, "a");
+        assert_eq!(result.iterations[1].iter_value, "b");
+        assert_eq!(result.iterations[2].iter_value, "c");
+    }
+
+    #[tokio::test]
+    async fn parallel_loop_pre_cancelled_skips_all_iterations() {
+        use crate::variables::VariableStore;
+        // Pre-cancelled token: workers see cancel before pulling indexes,
+        // so all iters become synthetic skipped results.
+        let block = make_parallel_loop_block(
+            "item",
+            "items",
+            "http://127.0.0.1:0/{{item}}",
+            Some(4),
+        );
+        let mut vs = VariableStore::new();
+        vs.set("items", r#"["a","b","c","d","e"]"#);
+        let cancel = CancelToken::new();
+        cancel.cancel();
+
+        let result = execute_block_or_loop(block, vs, vec![], None, Some(cancel)).await;
+
+        // All 5 iters present (synthetic skipped fills the gaps).
+        assert_eq!(result.iterations.len(), 5);
+        for it in &result.iterations {
+            assert_eq!(it.status, "skipped", "iter {} should be skipped", it.index);
+            assert!(
+                it.block_result.error.as_deref().map_or(false, |e| e.contains("Cancelled")),
+                "iter {} should have a cancellation error", it.index
+            );
+        }
+        assert_eq!(result.status, "failed");
+    }
+
+    #[tokio::test]
+    async fn sequential_loop_pre_cancelled_skips_all_iterations() {
+        use crate::variables::VariableStore;
+        // Symmetry check: sequential path also synthesizes skipped results
+        // when cancel fires before the first iter.
+        let block = make_parallel_loop_block(
+            "item",
+            "items",
+            "http://127.0.0.1:0/{{item}}",
+            None,
+        );
+        let mut vs = VariableStore::new();
+        vs.set("items", r#"["a","b","c"]"#);
+        let cancel = CancelToken::new();
+        cancel.cancel();
+
+        let result = execute_block_or_loop(block, vs, vec![], None, Some(cancel)).await;
+
+        assert_eq!(result.iterations.len(), 3);
+        for it in &result.iterations {
+            assert_eq!(it.status, "skipped");
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_loop_progress_events_cover_all_iterations() {
+        use crate::variables::VariableStore;
+        // Even though events arrive interleaved in parallel mode, every
+        // iter should fire at least one running and one terminal event.
+        let recorder = Arc::new(RecordingHandler {
+            events: std::sync::Mutex::new(Vec::new()),
+        });
+        let handler: Arc<dyn ProgressHandler> = recorder.clone();
+        let block = make_parallel_loop_block(
+            "item",
+            "items",
+            "http://127.0.0.1:0/{{item}}",
+            Some(3),
+        );
+        let mut vs = VariableStore::new();
+        vs.set("items", r#"["a","b","c","d","e","f"]"#);
+
+        let _ = execute_block_or_loop(block, vs, vec![], Some(handler), None).await;
+
+        let events = recorder.events.lock().unwrap();
+        // 6 iters × 2 events (running + terminal) = 12 events
+        assert_eq!(events.len(), 12, "expected 12 progress events, got {}", events.len());
+        // Each index should have exactly one running and one terminal event.
+        for idx in 0..6 {
+            let for_idx: Vec<_> = events.iter().filter(|e| e.index == idx).collect();
+            assert_eq!(for_idx.len(), 2, "iter {} should have 2 events", idx);
+            assert!(for_idx.iter().any(|e| e.status == "running"));
+            assert!(for_idx.iter().any(|e| e.status != "running"));
+        }
     }
 }

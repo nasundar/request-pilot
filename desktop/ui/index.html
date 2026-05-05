@@ -435,6 +435,10 @@
                   <label>Loop source var</label>
                   <input type="text" id="metaLoopSourceVar" class="meta-input" placeholder="e.g. user_ids (JSON array variable)" spellcheck="false">
                 </div>
+                <div class="meta-field" title="Run loop iterations concurrently. Leave blank or 1 for sequential. Clamped to 1–32; default when @@parallel is bare is 4.">
+                  <label>Parallel</label>
+                  <input type="number" id="metaLoopParallel" class="meta-input" placeholder="1 (sequential)" min="1" max="32" step="1">
+                </div>
               </div>
             </div>
           </div>

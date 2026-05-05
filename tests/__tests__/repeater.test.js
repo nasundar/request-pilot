@@ -508,7 +508,7 @@ describe('repeater V1 — # @@for UI', () => {
       srcInput.value = 'project_ids';
       const changed = app.bridge.applyMetadataToBlock();
       expect(changed).toBe(true);
-      expect(block.for_loop).toEqual({ iter_var: 'pid', source_var: 'project_ids' });
+      expect(block.for_loop).toEqual({ iter_var: 'pid', source_var: 'project_ids', parallel: null });
 
       // Clearing one of the inputs clears the directive entirely.
       iterInput.value = '';
@@ -519,7 +519,74 @@ describe('repeater V1 — # @@for UI', () => {
       iterInput.value = 'x';
       srcInput.value = 'xs';
       app.bridge.applyMetadataToBlock();
-      expect(block.for_loop).toEqual({ iter_var: 'x', source_var: 'xs' });
+      expect(block.for_loop).toEqual({ iter_var: 'x', source_var: 'xs', parallel: null });
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  // V1.2 — # @@parallel UI round-trip
+  test('metadata-accordion parallel input round-trips block.for_loop.parallel', async () => {
+    const app = bootDesktopApp();
+    try {
+      const file = makeLoopLoadedFile();
+      app.bridge.setLoadedFiles([file]);
+      app.bridge.setActiveFileIndex(0);
+      app.bridge.setActiveBlockIndex(0);
+
+      const block = file.suite.blocks[0];
+      // Pre-set parallel so populate sees it.
+      block.for_loop = { iter_var: 'user_id', source_var: 'user_ids', parallel: 4 };
+      app.bridge.populateMetadata(block);
+
+      const parInput = app.document.getElementById('metaLoopParallel');
+      expect(parInput).not.toBeNull();
+      expect(parInput.value).toBe('4');
+
+      // User changes to 8.
+      parInput.value = '8';
+      app.bridge.applyMetadataToBlock();
+      expect(block.for_loop.parallel).toBe(8);
+
+      // Empty input clears parallel back to null (sequential).
+      parInput.value = '';
+      app.bridge.applyMetadataToBlock();
+      expect(block.for_loop.parallel).toBeNull();
+
+      // Value 1 is treated as sequential (null) — regenerator omits it.
+      parInput.value = '1';
+      app.bridge.applyMetadataToBlock();
+      expect(block.for_loop.parallel).toBeNull();
+
+      // Value above 32 clamps to 32.
+      parInput.value = '100';
+      app.bridge.applyMetadataToBlock();
+      expect(block.for_loop.parallel).toBe(32);
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('parallel input is hidden visually when populated for non-loop block', async () => {
+    // Defensive: switching between blocks should reset the parallel input
+    // when the new block has no parallel set.
+    const app = bootDesktopApp();
+    try {
+      const file = makeLoopLoadedFile();
+      app.bridge.setLoadedFiles([file]);
+      app.bridge.setActiveFileIndex(0);
+      app.bridge.setActiveBlockIndex(0);
+
+      const block = file.suite.blocks[0];
+      block.for_loop = { iter_var: 'x', source_var: 'xs', parallel: 6 };
+      app.bridge.populateMetadata(block);
+      const parInput = app.document.getElementById('metaLoopParallel');
+      expect(parInput.value).toBe('6');
+
+      // Switch to a block without parallel.
+      block.for_loop = { iter_var: 'x', source_var: 'xs', parallel: null };
+      app.bridge.populateMetadata(block);
+      expect(parInput.value).toBe('');
     } finally {
       await app.cleanup();
     }

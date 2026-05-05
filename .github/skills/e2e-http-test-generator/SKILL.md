@@ -88,6 +88,7 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 # @@diff <step_a> <step_b>             — compare responses of two steps
 # @@assert $diff.match == true          — diff assertion example
 # @@for <iter_var> in <source_var>     — iterate block once per element of `source_var` (a JSON-array variable). Bare var name, NOT `{{source_var}}`. Auto-binds `{{$index}}` (0-based) and `{{$iteration}}` (1-based). For object elements, use dotted paths: `{{iter_var.field}}`. Cannot combine with `@@compare`.
+# @@parallel <N>                        — run `# @@for` iterations concurrently with N workers (default 4 if bare; clamped to [1,32])
 # @@redact body $.json.path             — scrub a JSON field from recorded bodies (JSONPath: $.foo, $.foo.bar, $.foo[0], $.foo[*])
 # @@redact body /regex/                 — scrub bytes matching a regex from recorded bodies (file- or block-level)
 ```
@@ -797,20 +798,61 @@ Content-Type: application/json
 - An empty array runs zero iterations and the block status is `passed` (not `skipped`).
 - A missing or non-JSON-array source is a block-level error (`Loop source 'X' is undefined` / `is not a JSON array`).
 
-#### Constraints (V1)
+#### Constraints
 
 | Rule | Why |
 |------|-----|
-| Sequential execution only | `# @@parallel` deferred to V1.5 |
 | Cannot combine `# @@compare` and `# @@for` on the same block | Parser rejects with a clear error — they'd produce ambiguous result shapes |
-| Per-iteration extracts stay local | The final variable store excludes per-iteration extracts. Use a downstream block to aggregate, or wait for V1.5's `# @@collect` directive. |
+| Per-iteration extracts stay local | The final variable store excludes per-iteration extracts. Use a downstream block to aggregate, or wait for the future `# @@collect` directive. |
 | Storage trims successful iteration bodies | Failed iterations + first/last success retain full bodies; successes 2..N-1 store summary only. The desktop UI annotates `(body omitted)`. |
+| `# @@parallel` clamped to [1, 32] | A non-load-test engine; raising beyond 32 risks rate-limit storms and resource contention. |
 
 #### Authoring tips
 
 - Prefer scalar loops when the request only needs an ID or name. They're easier to read and the source variable is just `$.array_path`.
 - For object loops, extract the array of objects in setup (`# @@extract users = $.users`) so the iter binding can dot-traverse without a second HTTP round-trip.
 - Combine `# @@for` with `# @@group` to fan out a per-element validation group, then run a downstream block via `# @@depends` after all iterations pass.
+
+#### Concurrency: `# @@parallel <N>`
+
+For loops over many independent iterations (e.g., validating 50 user IDs), add `# @@parallel <N>` directly under the `# @@for` line to run iterations concurrently:
+
+```http
+### @@test Validate every user
+# @@for user_id in user_ids
+# @@parallel 8
+GET {{base_url}}/users/{{user_id}}
+Authorization: Bearer {{access_token}}
+
+# @@assert status == 200
+```
+
+| Form | Behavior |
+|---|---|
+| `# @@parallel <N>` | Runs up to N iterations concurrently via a bounded worker pool |
+| `# @@parallel` (bare) | Defaults to **4** workers |
+| Omitted | Sequential — one iteration at a time |
+| `# @@parallel 1` | Equivalent to omitted (sequential); not emitted on regen |
+| `# @@parallel 0` / negative | Treated as 1 (sequential) with a warning |
+| `# @@parallel 100` | Clamped to **32** (max) with a warning |
+
+**Order-insensitive:** the directive can appear before or after `# @@for` on the same block — the parser collects it and attaches to the loop after the block is finalized.
+
+##### When to use it
+
+- ✅ Per-element validations that DON'T mutate shared resources — `GET /resources/{id}`, `GET /metrics?id={id}`, etc.
+- ✅ Idempotent reads against APIs that tolerate burst traffic.
+- ❌ Iterations that share extracted state — extracts in parallel iterations are still local-only, but you can't rely on iter-N's extract being available to iter-N+1.
+- ❌ Endpoints with strict rate limits — concurrent fan-out trips them faster.
+- ❌ Authentication / token-fetch loops — the underlying HTTP client doesn't pool/share tokens across concurrent iters.
+
+##### Footgun: nested concurrency multiplies
+
+A `# @@parallel 8` loop block inside a `# @@group` that ALSO runs in parallel with three other groups means up to **8 × 4 = 32** concurrent in-flight requests against the target. Audit your group/loop combination before raising parallel above 4.
+
+##### Cancellation
+
+The Stop button (or any cancel signal) halts new iter pickup mid-flight. In-flight iters complete; remaining iters are recorded as `skipped` with a `Cancelled by user` error. The UI sees the full N-iteration set so failure introspection still works.
 
 #### Debugging failed iterations
 

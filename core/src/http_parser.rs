@@ -155,6 +155,13 @@ pub struct DiffDirective {
 pub struct ForLoop {
     pub iter_var: String,
     pub source_var: String,
+    /// Optional `# @@parallel <N>` directive — bounded concurrency for
+    /// iteration execution. `None` (or `Some(1)`) runs iterations
+    /// sequentially. `Some(N)` runs up to N iterations concurrently using
+    /// a worker-pool pattern. Clamped to `[1, 32]` by the parser.
+    /// V1.2: parser-validated; runner-supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel: Option<u32>,
 }
 
 impl TestBlock {
@@ -773,6 +780,11 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
     let mut is_compare = false;
     let mut diff_directives: Vec<DiffDirective> = Vec::new();
     let mut for_loop: Option<ForLoop> = None;
+    // V1.2: `# @@parallel <N>` is order-insensitive relative to `# @@for`.
+    // We collect it during the per-line directive sweep and only attach it
+    // to `for_loop.parallel` after the whole block has been parsed (and we
+    // know whether `for_loop` survived final validation).
+    let mut parallel_n: Option<u32> = None;
     // Block-level assertions (used for $diff.* in compare blocks, or normal assertions)
     let mut assertions = Vec::new();
     let mut extracts = Vec::new();
@@ -921,7 +933,7 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
                             "duplicate `# @@for` directive — keeping the first"
                         ));
                     } else {
-                        for_loop = Some(ForLoop { iter_var, source_var });
+                        for_loop = Some(ForLoop { iter_var, source_var, parallel: None });
                     }
                 }
             } else {
@@ -929,6 +941,53 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
                     "invalid `# @@for` directive: expected `<iter_var> in <source_var>`, got `{}`",
                     rest
                 ));
+            }
+            continue;
+        }
+        if let Some(rest) = match_directive(line, "parallel") {
+            // `# @@parallel <N>` — bounded concurrency for `# @@for` blocks.
+            // Order-insensitive relative to `# @@for` (collected here, attached
+            // to ForLoop.parallel after the block finishes parsing). Bare
+            // directive defaults to 4. Clamped to [1, 32]. Invalid values are
+            // dropped with a warning so the rest of the block still parses.
+            const PARALLEL_DEFAULT: u32 = 4;
+            const PARALLEL_MAX: u32 = 32;
+            let trimmed = rest.trim();
+            if parallel_n.is_some() {
+                errors.push(format!(
+                    "duplicate `# @@parallel` directive — keeping the first"
+                ));
+                continue;
+            }
+            if trimmed.is_empty() {
+                parallel_n = Some(PARALLEL_DEFAULT);
+            } else {
+                match trimmed.parse::<i64>() {
+                    Ok(n) if n >= 1 && n <= PARALLEL_MAX as i64 => {
+                        parallel_n = Some(n as u32);
+                    }
+                    Ok(n) if n > PARALLEL_MAX as i64 => {
+                        errors.push(format!(
+                            "`# @@parallel {}` exceeds maximum {} — clamped to {}",
+                            n, PARALLEL_MAX, PARALLEL_MAX
+                        ));
+                        parallel_n = Some(PARALLEL_MAX);
+                    }
+                    Ok(n) if n <= 0 => {
+                        errors.push(format!(
+                            "`# @@parallel {}` must be >= 1 — using 1 (sequential)",
+                            n
+                        ));
+                        parallel_n = Some(1);
+                    }
+                    Ok(_) => unreachable!(),
+                    Err(_) => {
+                        errors.push(format!(
+                            "invalid `# @@parallel` value `{}` — directive dropped",
+                            trimmed
+                        ));
+                    }
+                }
             }
             continue;
         }
@@ -1093,6 +1152,20 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
         for_loop = None;
     }
 
+    // V1.2: finalize `# @@parallel`. It only makes sense WITH `# @@for` —
+    // if for_loop was dropped (compare conflict, or never set), warn and
+    // discard `parallel_n` so the round-trip doesn't keep emitting an
+    // orphaned directive.
+    if let Some(n) = parallel_n {
+        if let Some(ref mut fl) = for_loop {
+            fl.parallel = Some(n);
+        } else {
+            errors.push(format!(
+                "`# @@parallel` requires a `# @@for` directive on the same block — directive dropped"
+            ));
+        }
+    }
+
     Some(TestBlock {
         block_type,
         name: block_name,
@@ -1255,6 +1328,14 @@ pub fn generate_http_content(suite: &TestSuite) -> String {
         if !block.compare {
             if let Some(ref fl) = block.for_loop {
                 output.push_str(&format!("# @@for {} in {}\n", fl.iter_var, fl.source_var));
+                // V1.2: emit `# @@parallel N` right after `# @@for` so the
+                // two related directives stay visually grouped. Skip when
+                // `parallel.is_none()` or `Some(1)` (sequential default).
+                if let Some(n) = fl.parallel {
+                    if n > 1 {
+                        output.push_str(&format!("# @@parallel {}\n", n));
+                    }
+                }
             }
         }
 
@@ -4070,6 +4151,197 @@ GET {{host}}/items
         let input = "### @test Normal\nGET https://api.example.com/items\n";
         let suite = parse_test_suite(input);
         assert!(suite.blocks[0].for_loop.is_none());
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // V1.2: # @@parallel <N>
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parallel_directive_basic_attaches_to_for_loop() {
+        let input = r#"### @test Parallel basic
+# @@for x in xs
+# @@parallel 4
+GET https://api.example.com/{{x}}
+"#;
+        let suite = parse_test_suite(input);
+        let fl = suite.blocks[0].for_loop.as_ref().expect("for_loop set");
+        assert_eq!(fl.iter_var, "x");
+        assert_eq!(fl.source_var, "xs");
+        assert_eq!(fl.parallel, Some(4));
+    }
+
+    #[test]
+    fn parallel_directive_bare_defaults_to_four() {
+        let input = r#"### @test Bare parallel
+# @@for x in xs
+# @@parallel
+GET https://api.example.com/{{x}}
+"#;
+        let suite = parse_test_suite(input);
+        let fl = suite.blocks[0].for_loop.as_ref().expect("for_loop set");
+        assert_eq!(fl.parallel, Some(4));
+    }
+
+    #[test]
+    fn parallel_directive_clamps_above_thirtytwo() {
+        let input = r#"### @test Clamp high
+# @@for x in xs
+# @@parallel 100
+GET https://api.example.com/{{x}}
+"#;
+        let suite = parse_test_suite(input);
+        let fl = suite.blocks[0].for_loop.as_ref().expect("for_loop set");
+        assert_eq!(fl.parallel, Some(32), "values > 32 clamp to 32");
+    }
+
+    #[test]
+    fn parallel_directive_zero_becomes_one_with_warning() {
+        let input = r#"### @test Zero
+# @@for x in xs
+# @@parallel 0
+GET https://api.example.com/{{x}}
+"#;
+        let suite = parse_test_suite(input);
+        let fl = suite.blocks[0].for_loop.as_ref().expect("for_loop set");
+        assert_eq!(fl.parallel, Some(1));
+        assert!(
+            suite.blocks[0].errors.iter().any(|e| e.contains("parallel") && e.contains("0")),
+            "should warn about value 0, got errors: {:?}",
+            suite.blocks[0].errors
+        );
+    }
+
+    #[test]
+    fn parallel_directive_negative_is_dropped_with_warning() {
+        let input = r#"### @test Negative
+# @@for x in xs
+# @@parallel -3
+GET https://api.example.com/{{x}}
+"#;
+        let suite = parse_test_suite(input);
+        let fl = suite.blocks[0].for_loop.as_ref().expect("for_loop set");
+        // Negative values clamp to 1 (sequential) — they're nonsensical as
+        // concurrency counts, but treating them as "user wanted sequential"
+        // is friendlier than silently dropping.
+        assert_eq!(fl.parallel, Some(1));
+        assert!(
+            suite.blocks[0].errors.iter().any(|e| e.contains("parallel") && e.contains("-3")),
+            "should warn about negative value"
+        );
+    }
+
+    #[test]
+    fn parallel_directive_non_numeric_is_dropped_with_warning() {
+        let input = r#"### @test Garbage
+# @@for x in xs
+# @@parallel banana
+GET https://api.example.com/{{x}}
+"#;
+        let suite = parse_test_suite(input);
+        let fl = suite.blocks[0].for_loop.as_ref().expect("for_loop set");
+        assert!(fl.parallel.is_none(), "non-numeric drops directive");
+        assert!(
+            suite.blocks[0].errors.iter().any(|e| e.contains("parallel")),
+            "should warn about non-numeric value"
+        );
+    }
+
+    #[test]
+    fn parallel_directive_before_for_is_order_insensitive() {
+        let input = r#"### @test Order swap
+# @@parallel 6
+# @@for x in xs
+GET https://api.example.com/{{x}}
+"#;
+        let suite = parse_test_suite(input);
+        let fl = suite.blocks[0].for_loop.as_ref().expect("for_loop set");
+        assert_eq!(fl.parallel, Some(6));
+    }
+
+    #[test]
+    fn parallel_without_for_warns_and_drops() {
+        let input = r#"### @test Orphan parallel
+# @@parallel 4
+GET https://api.example.com/items
+"#;
+        let suite = parse_test_suite(input);
+        assert!(suite.blocks[0].for_loop.is_none());
+        assert!(
+            suite.blocks[0].errors.iter().any(|e|
+                e.contains("parallel") && e.contains("requires a `# @@for`")
+            ),
+            "expected warning about parallel-without-for, got errors: {:?}",
+            suite.blocks[0].errors
+        );
+    }
+
+    #[test]
+    fn duplicate_parallel_keeps_first_with_warning() {
+        let input = r#"### @test Dup
+# @@for x in xs
+# @@parallel 4
+# @@parallel 8
+GET https://api.example.com/{{x}}
+"#;
+        let suite = parse_test_suite(input);
+        let fl = suite.blocks[0].for_loop.as_ref().expect("for_loop set");
+        assert_eq!(fl.parallel, Some(4), "first @@parallel wins");
+        assert!(
+            suite.blocks[0].errors.iter().any(|e| e.contains("duplicate") && e.contains("parallel")),
+            "expected duplicate warning"
+        );
+    }
+
+    #[test]
+    fn parallel_directive_roundtrips_through_generator() {
+        let input = "### @test RT\n# @@for x in xs\n# @@parallel 8\nGET https://api.example.com/{{x}}\n";
+        let suite = parse_test_suite(input);
+        let regenerated = generate_http_content(&suite);
+        assert!(
+            regenerated.contains("# @@for x in xs"),
+            "regen missing @@for: {}", regenerated
+        );
+        assert!(
+            regenerated.contains("# @@parallel 8"),
+            "regen missing @@parallel 8: {}", regenerated
+        );
+        // Round-trip again — second pass should match first.
+        let suite2 = parse_test_suite(&regenerated);
+        let fl = suite2.blocks[0].for_loop.as_ref().expect("for_loop set");
+        assert_eq!(fl.parallel, Some(8));
+    }
+
+    #[test]
+    fn parallel_one_does_not_emit_directive() {
+        // `# @@parallel 1` is equivalent to no directive, so the regenerator
+        // omits it to avoid noise in code-mode round-trips.
+        let input = "### @test One\n# @@for x in xs\n# @@parallel 1\nGET https://api.example.com/{{x}}\n";
+        let suite = parse_test_suite(input);
+        let regenerated = generate_http_content(&suite);
+        assert!(
+            !regenerated.contains("# @@parallel"),
+            "parallel 1 should not be emitted, got: {}", regenerated
+        );
+    }
+
+    #[test]
+    fn parallel_with_compare_conflict_drops_both() {
+        // @@for + @@compare is rejected; @@parallel was attached to that
+        // for_loop, so it should be dropped along with it.
+        let input = r#"### @test Conflict
+# @@compare
+# @@for x in xs
+# @@parallel 4
+GET https://api.example.com/{{x}}
+"#;
+        let suite = parse_test_suite(input);
+        assert!(suite.blocks[0].for_loop.is_none(), "for_loop dropped");
+        // Sanity: error about for+compare conflict was raised.
+        assert!(
+            suite.blocks[0].errors.iter().any(|e| e.contains("@@for") && e.contains("@@compare")),
+            "expected for+compare conflict error"
+        );
     }
 }
 
