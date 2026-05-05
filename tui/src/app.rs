@@ -1330,6 +1330,7 @@ impl App {
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
         };
         if let Some(file) = self.loaded_files.get_mut(fi) {
             file.suite.blocks.push(blank);
@@ -2299,6 +2300,7 @@ impl App {
                         step_results: Vec::new(),
                         diff_result: None,
                     diff_results: Vec::new(),
+                    iterations: Vec::new(),
                     });
                 }
                 if let Some(single_br) = single_results.block_results.into_iter().next() {
@@ -2580,6 +2582,7 @@ impl App {
                     step_results: Vec::new(),
                     diff_result: None,
                     diff_results: Vec::new(),
+                    iterations: Vec::new(),
                 }).collect();
 
                 for (br, &orig_idx) in result_blocks.into_iter().zip(indices.iter()) {
@@ -2873,6 +2876,7 @@ mod auto_record_tests {
                 step_results: vec![],
                 diff_result: None,
                     diff_results: Vec::new(),
+                    iterations: Vec::new(),
             }],
             final_variables: HashMap::new(),
             telemetry: None,
@@ -3053,6 +3057,7 @@ mod snapshot_load_tests {
                 step_results: vec![],
                 diff_result: None,
                     diff_results: Vec::new(),
+                    iterations: Vec::new(),
             }],
             final_variables: HashMap::new(),
             telemetry: None,
@@ -3203,6 +3208,7 @@ mod replay_block_tests {
             step_results: vec![],
             diff_result: None,
                     diff_results: Vec::new(),
+                    iterations: Vec::new(),
         }
     }
 

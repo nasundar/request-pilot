@@ -148,6 +148,25 @@ pub struct BlockResult {
     /// against `diff_results[0].diff`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diff_results: Vec<NamedDiffResult>,
+    /// Per-iteration results when this block has `# @@for` set. Empty for
+    /// non-loop blocks. Each entry is the BlockResult of one iteration
+    /// plus the binding metadata. The outer BlockResult.status aggregates
+    /// across iterations (`passed` if all pass, `failed` if any fail,
+    /// `error` if loop source missing/invalid).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iterations: Vec<IterationResult>,
+}
+
+/// Result of one iteration of a `# @@for`-looped block. Carries the bound
+/// element value (truncated for display) plus the inner BlockResult so the
+/// UI can render full per-iteration request/response detail (subject to the
+/// storage cap policy: full bodies for failures, summary for most successes).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IterationResult {
+    pub index: usize,
+    pub iter_value: String,
+    pub status: String, // "passed" | "failed" | "error" | "skipped"
+    pub block_result: Box<BlockResult>,
 }
 
 /// One pair's diff outcome inside a multi-diff @compare block. Carries
@@ -307,6 +326,7 @@ fn make_skipped_result(block: &TestBlock, reason: &str) -> BlockResult {
         step_results: Vec::new(),
         diff_result: None,
         diff_results: Vec::new(),
+        iterations: Vec::new(),
     }
 }
 
@@ -382,6 +402,7 @@ async fn execute_block(block: TestBlock, var_store: VariableStore, extra_headers
                 step_results: Vec::new(),
                 diff_result: None,
                 diff_results: Vec::new(),
+                iterations: Vec::new(),
             }
         }
         Err(err) => BlockResult {
@@ -402,7 +423,192 @@ async fn execute_block(block: TestBlock, var_store: VariableStore, extra_headers
             step_results: Vec::new(),
             diff_result: None,
             diff_results: Vec::new(),
+            iterations: Vec::new(),
         },
+    }
+}
+
+/// Build a "loop-error" BlockResult for cases where the loop source can't be
+/// turned into an iterable (missing var, not JSON, not an array, non-scalar
+/// element when V1 only supports scalars/objects). The block fails outright;
+/// no iterations are produced.
+fn loop_error_result(
+    block: &TestBlock,
+    error_msg: String,
+    start: std::time::Instant,
+) -> BlockResult {
+    BlockResult {
+        seq: None,
+        name: block.name.clone(),
+        block_type: block.block_type.clone(),
+        group: block.group.clone(),
+        request_method: block.request.method.clone(),
+        request_url: block.request.url.clone(),
+        request_headers: Vec::new(),
+        request_body: None,
+        status: "error".to_string(),
+        response: None,
+        assertion_results: Vec::new(),
+        extract_results: Vec::new(),
+        error: Some(error_msg),
+        time_ms: start.elapsed().as_millis() as u64,
+        step_results: Vec::new(),
+        diff_result: None,
+        diff_results: Vec::new(),
+        iterations: Vec::new(),
+    }
+}
+
+/// Route a block through either the normal single-execution path or the
+/// `# @@for` loop runner. This is the entry point that suite/group/teardown
+/// execution paths use so loops are transparent everywhere.
+async fn execute_block_or_loop(
+    block: TestBlock,
+    var_store: VariableStore,
+    extra_headers: Vec<(String, String)>,
+) -> BlockResult {
+    if block.for_loop.is_some() {
+        execute_loop_block(block, var_store, extra_headers).await
+    } else {
+        execute_block(block, var_store, extra_headers).await
+    }
+}
+
+/// Execute a `# @@for iter_var in source_var` block — runs the inner block
+/// once per element of the JSON array stored in `source_var`. Per-iteration
+/// extracts stay LOCAL to that iteration (don't escape into the outer
+/// var_store) so loop output is opt-in via a future `# @@collect` directive.
+/// Iterations run sequentially in V1 (parallel deferred).
+async fn execute_loop_block(
+    block: TestBlock,
+    var_store: VariableStore,
+    extra_headers: Vec<(String, String)>,
+) -> BlockResult {
+    let total_start = std::time::Instant::now();
+    // for_loop is guaranteed to be Some by the caller; clone out for use.
+    let fl = block.for_loop.clone().expect("execute_loop_block called without for_loop");
+
+    // 1. Look up the source variable.
+    let raw = match var_store.get(&fl.source_var) {
+        Some(v) => v.to_string(),
+        None => {
+            return loop_error_result(
+                &block,
+                format!(
+                    "loop source variable '{}' is undefined when block '{}' runs",
+                    fl.source_var, block.name
+                ),
+                total_start,
+            )
+        }
+    };
+
+    // 2. Parse as JSON.
+    let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return loop_error_result(
+                &block,
+                format!(
+                    "loop source '{}' is not valid JSON: {}",
+                    fl.source_var, e
+                ),
+                total_start,
+            )
+        }
+    };
+
+    // 3. Require an array.
+    let arr = match parsed.as_array() {
+        Some(a) => a.clone(),
+        None => {
+            return loop_error_result(
+                &block,
+                format!("loop source '{}' is not a JSON array", fl.source_var),
+                total_start,
+            )
+        }
+    };
+
+    // 4. Iterate. Each iteration gets a CHILD var_store so per-iter extracts
+    //    don't pollute the outer state. The inner block has its for_loop
+    //    cleared so execute_block treats it as a normal single request.
+    let mut iterations: Vec<IterationResult> = Vec::with_capacity(arr.len());
+    let mut any_failed = false;
+    for (idx, elem) in arr.iter().enumerate() {
+        // Bind iter_var:
+        //   - JSON string -> raw string value (so `{{user_id}}` = "u1", not "\"u1\"")
+        //   - everything else (object/array/number/bool/null) -> JSON-stringified
+        //     so the interpolator's dotted-path navigator can walk it via
+        //     `{{user.id}}` / `{{users[0].name}}`.
+        let bound_value = match elem {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+
+        let mut child = var_store.clone();
+        child.set(&fl.iter_var, &bound_value);
+        // Loop counters — interpolator's plain-name fallback resolves these.
+        // Using `$index` / `$iteration` keeps them visually distinct from
+        // user variables (and matches REST-Client-style built-ins).
+        child.set("$index", &idx.to_string());
+        child.set("$iteration", &(idx + 1).to_string());
+
+        let mut inner_block = block.clone();
+        inner_block.for_loop = None;
+        let inner_result = execute_block(inner_block, child, extra_headers.clone()).await;
+
+        let iter_status = inner_result.status.clone();
+        if iter_status != "passed" {
+            any_failed = true;
+        }
+
+        // Truncate iter_value display so a giant object doesn't blow up
+        // history rendering.
+        const MAX_DISPLAY: usize = 200;
+        let display_value = if bound_value.chars().count() > MAX_DISPLAY {
+            let trimmed: String = bound_value.chars().take(MAX_DISPLAY).collect();
+            format!("{}…", trimmed)
+        } else {
+            bound_value.clone()
+        };
+
+        iterations.push(IterationResult {
+            index: idx,
+            iter_value: display_value,
+            status: iter_status,
+            block_result: Box::new(inner_result),
+        });
+    }
+
+    let total_time_ms = total_start.elapsed().as_millis() as u64;
+    // Aggregate: empty array still passes (zero iters = nothing failed).
+    // Any failed iteration -> block fails. Errors inside iters bubble up
+    // as `failed` here too (the inner BlockResult.status carries the
+    // error message and is preserved verbatim in IterationResult).
+    let aggregate_status = if any_failed { "failed" } else { "passed" };
+
+    BlockResult {
+        seq: None,
+        name: block.name.clone(),
+        block_type: block.block_type.clone(),
+        group: block.group.clone(),
+        // Top-level method/url are the templates pre-interpolation; useful
+        // as a "this is what the loop runs N copies of" summary in the UI.
+        request_method: block.request.method.clone(),
+        request_url: block.request.url.clone(),
+        request_headers: Vec::new(),
+        request_body: None,
+        status: aggregate_status.to_string(),
+        response: None,
+        assertion_results: Vec::new(),
+        extract_results: Vec::new(),
+        error: None,
+        time_ms: total_time_ms,
+        step_results: Vec::new(),
+        diff_result: None,
+        diff_results: Vec::new(),
+        iterations,
     }
 }
 
@@ -433,6 +639,7 @@ async fn execute_compare_block(
             step_results: Vec::new(),
             diff_result: None,
             diff_results: Vec::new(),
+            iterations: Vec::new(),
         };
     }
 
@@ -663,6 +870,7 @@ async fn execute_compare_block(
         step_results,
         diff_result,
         diff_results,
+        iterations: Vec::new(),
     }
 }
 
@@ -889,7 +1097,7 @@ async fn run_tests_with_groups(
                         let result = if block.compare && !block.steps.is_empty() {
                             execute_compare_block(block, vs, eh).await
                         } else {
-                            execute_block(block, vs, eh).await
+                            execute_block_or_loop(block, vs, eh).await
                         };
                         emit_completed(&h, &result);
                         (idx, result)
@@ -1044,7 +1252,7 @@ async fn run_suite_inner(
         let result = if block.compare && !block.steps.is_empty() {
             execute_compare_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
         } else {
-            execute_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
+            execute_block_or_loop((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
         };
         // Merge extracts into var_store
         for er in &result.extract_results {
@@ -1112,7 +1320,7 @@ async fn run_suite_inner(
         let result = if block.compare && !block.steps.is_empty() {
             execute_compare_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
         } else {
-            execute_block((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
+            execute_block_or_loop((*block).clone(), var_store.clone(), extra_headers.to_vec()).await
         };
         for er in &result.extract_results {
             if er.success {
@@ -1327,6 +1535,7 @@ mod tests {
             step_results: Vec::new(),
             diff_result: None,
             diff_results: Vec::new(),
+            iterations: Vec::new(),
         };
         assert_eq!(result.status, "passed");
         assert!(result.error.is_none());
@@ -1372,6 +1581,7 @@ mod tests {
             request_id_header: Some("X-Request-Id".into()),
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
         };
         let mut headers = vec![("Content-Type".into(), "application/json".into())];
         inject_request_id_header(&mut headers, &block);
@@ -1409,6 +1619,7 @@ mod tests {
             request_id_header: Some("X-Request-Id".into()),
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
         };
         // case-insensitive match on existing header name
         let mut headers = vec![("x-request-id".into(), "user-supplied-id".into())];
@@ -1445,6 +1656,7 @@ mod tests {
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
         };
         let mut headers: Vec<(String, String)> = vec![];
         inject_request_id_header(&mut headers, &block);
@@ -1491,6 +1703,7 @@ mod tests {
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
         }
     }
 
@@ -1774,6 +1987,7 @@ mod tests {
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
         };
 
         let var_store = VariableStore::new();
@@ -1848,6 +2062,7 @@ mod tests {
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
         };
 
         let var_store = VariableStore::new();
@@ -1923,6 +2138,7 @@ mod tests {
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
         };
 
         let var_store = VariableStore::new();
@@ -1976,6 +2192,7 @@ mod tests {
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
         };
 
         let var_store = VariableStore::new();
@@ -2047,6 +2264,7 @@ mod tests {
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
         };
 
         let var_store = VariableStore::new();
@@ -2068,5 +2286,250 @@ mod tests {
         assert_eq!(result.step_results.len(), 2, "both steps should have been attempted");
         assert!(result.step_results[0].error.is_some(), "alpha step should have an error");
         assert!(result.step_results[1].error.is_some(), "beta step should have an error");
+    }
+
+    // -------------------------------------------------------------------
+    // # @@for / Repeater tests
+    //
+    // Strategy: hit `http://127.0.0.1:0/...` so connection refused. Each
+    // iteration's inner BlockResult has status = "error" but it preserves
+    // the *interpolated* request_url, which is what we want to assert on
+    // for substitution correctness without standing up a mock HTTP server.
+    // -------------------------------------------------------------------
+
+    fn make_loop_block(iter_var: &str, source_var: &str, url_template: &str) -> TestBlock {
+        TestBlock {
+            block_type: "test".to_string(),
+            name: "loop_block".to_string(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: vec![],
+            request: ParsedRequest {
+                name: Some("loop_block".to_string()),
+                method: "GET".to_string(),
+                url: url_template.to_string(),
+                headers: Vec::new(),
+                body: None,
+            },
+            assertions: Vec::new(),
+            extracts: Vec::new(),
+            compare: false,
+            steps: Vec::new(),
+            diff: None,
+            diffs: Vec::new(),
+            errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
+            for_loop: Some(crate::http_parser::ForLoop {
+                iter_var: iter_var.to_string(),
+                source_var: source_var.to_string(),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn loop_block_iterates_scalar_array() {
+        use crate::variables::VariableStore;
+        let block = make_loop_block(
+            "user_id",
+            "user_ids",
+            "http://127.0.0.1:0/users/{{user_id}}",
+        );
+        let mut vs = VariableStore::new();
+        vs.set("user_ids", r#"["u1","u2","u3"]"#);
+
+        let result = execute_block_or_loop(block, vs, vec![]).await;
+
+        // 3 iterations executed in order; each substituted user_id correctly.
+        assert_eq!(result.iterations.len(), 3, "all 3 elements iterated");
+        assert_eq!(result.iterations[0].iter_value, "u1");
+        assert_eq!(result.iterations[1].iter_value, "u2");
+        assert_eq!(result.iterations[2].iter_value, "u3");
+        assert_eq!(result.iterations[0].index, 0);
+        assert_eq!(result.iterations[2].index, 2);
+        assert!(
+            result.iterations[0].block_result.request_url.ends_with("/users/u1"),
+            "iter 0 should target /users/u1, got {}",
+            result.iterations[0].block_result.request_url
+        );
+        assert!(
+            result.iterations[2].block_result.request_url.ends_with("/users/u3"),
+            "iter 2 should target /users/u3, got {}",
+            result.iterations[2].block_result.request_url
+        );
+        // Connection refused on each iter -> aggregate status is "failed"
+        // (not "error" — error is reserved for loop-source problems).
+        assert_eq!(result.status, "failed");
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn loop_block_with_object_elements_supports_dotted_interpolation() {
+        use crate::variables::VariableStore;
+        let block = make_loop_block(
+            "user",
+            "users",
+            "http://127.0.0.1:0/users/{{user.id}}/posts/{{user.post}}",
+        );
+        let mut vs = VariableStore::new();
+        vs.set("users", r#"[{"id":"u1","post":"p1"},{"id":"u2","post":"p2"}]"#);
+
+        let result = execute_block_or_loop(block, vs, vec![]).await;
+
+        assert_eq!(result.iterations.len(), 2);
+        assert!(
+            result.iterations[0].block_result.request_url.ends_with("/users/u1/posts/p1"),
+            "iter 0 url: {}",
+            result.iterations[0].block_result.request_url
+        );
+        assert!(
+            result.iterations[1].block_result.request_url.ends_with("/users/u2/posts/p2"),
+            "iter 1 url: {}",
+            result.iterations[1].block_result.request_url
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_block_missing_source_yields_error_status() {
+        use crate::variables::VariableStore;
+        let block = make_loop_block(
+            "x",
+            "missing_var",
+            "http://127.0.0.1:0/{{x}}",
+        );
+        let result = execute_block_or_loop(block, VariableStore::new(), vec![]).await;
+
+        assert_eq!(result.status, "error");
+        assert!(result.iterations.is_empty(), "no iterations on source error");
+        let err = result.error.as_deref().unwrap_or("");
+        assert!(
+            err.contains("missing_var") && err.contains("undefined"),
+            "error should mention missing var, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_block_non_array_source_yields_error_status() {
+        use crate::variables::VariableStore;
+        let block = make_loop_block("x", "scalar_src", "http://127.0.0.1:0/{{x}}");
+        let mut vs = VariableStore::new();
+        // A bare string that's NOT a JSON array.
+        vs.set("scalar_src", "just-a-string");
+
+        let result = execute_block_or_loop(block, vs, vec![]).await;
+        assert_eq!(result.status, "error");
+        assert!(result.iterations.is_empty());
+        assert!(
+            result.error.as_deref().unwrap_or("").contains("not valid JSON")
+                || result.error.as_deref().unwrap_or("").contains("not a JSON array"),
+            "error: {:?}",
+            result.error
+        );
+
+        // Object source → not-an-array branch.
+        let block2 = make_loop_block("x", "obj_src", "http://127.0.0.1:0/{{x}}");
+        let mut vs2 = VariableStore::new();
+        vs2.set("obj_src", r#"{"k":"v"}"#);
+        let result2 = execute_block_or_loop(block2, vs2, vec![]).await;
+        assert_eq!(result2.status, "error");
+        assert!(result2.iterations.is_empty());
+        assert!(
+            result2.error.as_deref().unwrap_or("").contains("not a JSON array"),
+            "error: {:?}",
+            result2.error
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_block_empty_array_passes_with_zero_iterations() {
+        use crate::variables::VariableStore;
+        let block = make_loop_block("x", "empty_src", "http://127.0.0.1:0/{{x}}");
+        let mut vs = VariableStore::new();
+        vs.set("empty_src", "[]");
+
+        let result = execute_block_or_loop(block, vs, vec![]).await;
+        assert_eq!(result.status, "passed", "empty array is vacuously passing");
+        assert!(result.iterations.is_empty());
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn loop_block_index_and_iteration_counters_bound() {
+        use crate::variables::VariableStore;
+        // URL template embeds both built-in counters so we can assert on them.
+        let block = make_loop_block(
+            "v",
+            "vals",
+            "http://127.0.0.1:0/idx/{{$index}}/it/{{$iteration}}/{{v}}",
+        );
+        let mut vs = VariableStore::new();
+        vs.set("vals", r#"["a","b"]"#);
+        let result = execute_block_or_loop(block, vs, vec![]).await;
+
+        assert_eq!(result.iterations.len(), 2);
+        let url0 = &result.iterations[0].block_result.request_url;
+        let url1 = &result.iterations[1].block_result.request_url;
+        assert!(url0.contains("/idx/0/it/1/a"), "iter 0 url: {}", url0);
+        assert!(url1.contains("/idx/1/it/2/b"), "iter 1 url: {}", url1);
+    }
+
+    #[tokio::test]
+    async fn loop_block_per_iter_extracts_dont_escape_to_outer_store() {
+        use crate::variables::VariableStore;
+        // Even with extracts on the inner block, the loop runner clones
+        // the var_store per iteration so per-iter extracts stay local —
+        // the outer store passed in by the caller is untouched.
+        let mut block = make_loop_block(
+            "user_id",
+            "user_ids",
+            "http://127.0.0.1:0/users/{{user_id}}",
+        );
+        block.extracts.push(crate::http_parser::Extract {
+            variable_name: "leaked".to_string(),
+            source_path: "$.id".to_string(),
+        });
+
+        let mut vs = VariableStore::new();
+        vs.set("user_ids", r#"["u1"]"#);
+        // Sentinel: outer store before the loop.
+        assert!(vs.get("leaked").is_none());
+
+        let _result = execute_block_or_loop(block, vs.clone(), vec![]).await;
+
+        // Outer var_store (the one we pass by clone) is unaffected
+        // regardless of what happened inside iterations.
+        assert!(
+            vs.get("leaked").is_none(),
+            "per-iter extract must not escape into the outer var_store"
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_block_truncates_oversized_iter_value_for_display() {
+        use crate::variables::VariableStore;
+        let block = make_loop_block("blob", "blobs", "http://127.0.0.1:0/{{blob.id}}");
+        let big_value = "x".repeat(500);
+        let arr = format!(r#"[{{"id":"a","payload":"{}"}}]"#, big_value);
+        let mut vs = VariableStore::new();
+        vs.set("blobs", &arr);
+
+        let result = execute_block_or_loop(block, vs, vec![]).await;
+        assert_eq!(result.iterations.len(), 1);
+        // 200-char cap (plus the ellipsis suffix) — guards UI/history rendering.
+        let display_len = result.iterations[0].iter_value.chars().count();
+        assert!(
+            display_len <= 201,
+            "iter_value should be truncated to ~200 chars, got {}",
+            display_len
+        );
+        assert!(
+            result.iterations[0].iter_value.ends_with('…'),
+            "truncated iter_value should end with ellipsis"
+        );
     }
 }

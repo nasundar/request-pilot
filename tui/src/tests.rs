@@ -234,6 +234,7 @@ GET https://example.com/third
             }],
             diff_result: None,
             diff_results: Vec::new(),
+            iterations: Vec::new(),
         }
     }
 
@@ -1710,6 +1711,7 @@ GET https://example.com/third
                 step_results: vec![],
                 diff_result: None,
                 diff_results: Vec::new(),
+                iterations: Vec::new(),
             }],
             final_variables: HashMap::new(),
             telemetry: None,

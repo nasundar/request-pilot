@@ -108,6 +108,14 @@ pub struct TestBlock {
     /// time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redact_body_rules: Vec<BodyRedactRule>,
+    /// Optional `# @@for <iter_var> in <source_var>` directive turning this
+    /// block into a repeater. When `Some`, the runner executes the block
+    /// once per element of the JSON array in `source_var`, binding
+    /// `iter_var` (plus `$index` / `$iteration`) into a child var-store.
+    /// V1 supports scalar AND object elements (object access via dotted
+    /// `{{iter_var.field}}` interpolation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub for_loop: Option<ForLoop>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -137,6 +145,16 @@ pub struct CompareStep {
 pub struct DiffDirective {
     pub step_a: String,
     pub step_b: String,
+}
+
+/// `# @@for <iter_var> in <source_var>` directive — turns a normal block
+/// into a repeater. The runner reads `source_var` from the var-store at
+/// execution time, parses it as a JSON array, and runs the block once per
+/// element with `iter_var` bound to the element's JSON-stringified form.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ForLoop {
+    pub iter_var: String,
+    pub source_var: String,
 }
 
 impl TestBlock {
@@ -754,6 +772,7 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
     let mut block_redact_body_rules: Vec<BodyRedactRule> = Vec::new();
     let mut is_compare = false;
     let mut diff_directives: Vec<DiffDirective> = Vec::new();
+    let mut for_loop: Option<ForLoop> = None;
     // Block-level assertions (used for $diff.* in compare blocks, or normal assertions)
     let mut assertions = Vec::new();
     let mut extracts = Vec::new();
@@ -885,6 +904,31 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
                     step_a: parts[0].to_string(),
                     step_b: parts[1].to_string(),
                 });
+            }
+            continue;
+        }
+        if let Some(rest) = match_directive(line, "for") {
+            // `# @@for <iter_var> in <source_var>`
+            // Tolerant of extra whitespace; rejects malformed lines silently
+            // (parser-level non-fatal — block runs as non-loop).
+            let toks: Vec<&str> = rest.split_whitespace().collect();
+            if toks.len() == 3 && toks[1].eq_ignore_ascii_case("in") {
+                let iter_var = toks[0].to_string();
+                let source_var = toks[2].to_string();
+                if !iter_var.is_empty() && !source_var.is_empty() {
+                    if for_loop.is_some() {
+                        errors.push(format!(
+                            "duplicate `# @@for` directive — keeping the first"
+                        ));
+                    } else {
+                        for_loop = Some(ForLoop { iter_var, source_var });
+                    }
+                }
+            } else {
+                errors.push(format!(
+                    "invalid `# @@for` directive: expected `<iter_var> in <source_var>`, got `{}`",
+                    rest
+                ));
             }
             continue;
         }
@@ -1039,6 +1083,16 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
     // `block.diff` still see the primary pair instead of `null`.
     let primary_diff = diff_directives.first().cloned();
 
+    // V1: reject `@@for` + `@@compare` on the same block. Both can be valid
+    // someday (loop the entire compare block) but that's a separate design
+    // exercise; for now we surface the conflict clearly so users notice.
+    if for_loop.is_some() && is_compare {
+        errors.push(format!(
+            "`# @@for` and `# @@compare` cannot be used on the same block in V1"
+        ));
+        for_loop = None;
+    }
+
     Some(TestBlock {
         block_type,
         name: block_name,
@@ -1059,6 +1113,7 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
         request_id_header: block_request_id_header,
         request_id_disabled: block_request_id_disabled,
         redact_body_rules: block_redact_body_rules,
+        for_loop,
     })
 }
 
@@ -1192,6 +1247,15 @@ pub fn generate_http_content(suite: &TestSuite) -> String {
         // Compare directive
         if block.compare {
             output.push_str("# @@compare\n");
+        }
+
+        // For-loop directive (# @@for iter_var in source_var) — V1 rejects
+        // simultaneous compare + for, but defensive code: emit only when
+        // compare is false to keep round-trips clean even if data is malformed.
+        if !block.compare {
+            if let Some(ref fl) = block.for_loop {
+                output.push_str(&format!("# @@for {} in {}\n", fl.iter_var, fl.source_var));
+            }
         }
 
         if block.compare && !block.steps.is_empty() {
@@ -1765,6 +1829,7 @@ GET {{base_url}}\n";
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
             }],
             ..Default::default()
         };
@@ -1805,6 +1870,7 @@ GET {{base_url}}\n";
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
             }],
             ..Default::default()
         };
@@ -1860,6 +1926,7 @@ GET {{base_url}}\n";
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
             }],
             ..Default::default()
         };
@@ -1912,6 +1979,7 @@ GET {{base_url}}\n";
                 request_id_header: None,
                 request_id_disabled: false,
                 redact_body_rules: Vec::new(),
+                for_loop: None,
                 },
                 TestBlock {
                     block_type: "test".into(),
@@ -1950,6 +2018,7 @@ GET {{base_url}}\n";
                 request_id_header: None,
                 request_id_disabled: false,
                 redact_body_rules: Vec::new(),
+                for_loop: None,
                 },
                 TestBlock {
                     block_type: "teardown".into(),
@@ -1977,6 +2046,7 @@ GET {{base_url}}\n";
                     request_id_header: None,
                     request_id_disabled: false,
                     redact_body_rules: Vec::new(),
+                    for_loop: None,
                 },
             ],
             ..Default::default()
@@ -2032,6 +2102,7 @@ GET {{base_url}}\n";
                 request_id_header: None,
                 request_id_disabled: false,
                 redact_body_rules: Vec::new(),
+                for_loop: None,
                 },
                 TestBlock {
                     block_type: "test".into(),
@@ -2063,6 +2134,7 @@ GET {{base_url}}\n";
                 request_id_header: None,
                 request_id_disabled: false,
                 redact_body_rules: Vec::new(),
+                for_loop: None,
                 },
                 TestBlock {
                     block_type: "teardown".into(),
@@ -2090,6 +2162,7 @@ GET {{base_url}}\n";
                     request_id_header: None,
                     request_id_disabled: false,
                     redact_body_rules: Vec::new(),
+                    for_loop: None,
                 },
             ],
             ..Default::default()
@@ -2205,6 +2278,7 @@ GET {{base_url}}\n";
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
             }],
             ..Default::default()
         };
@@ -2283,6 +2357,7 @@ grant_type=client_credentials
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
             }],
             ..Default::default()
         };
@@ -2336,6 +2411,7 @@ grant_type=client_credentials
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
             }],
             ..Default::default()
         };
@@ -2398,6 +2474,7 @@ grant_type=client_credentials
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
             }],
             ..Default::default()
         };
@@ -2651,6 +2728,7 @@ Authorization: Bearer {{token}}
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
             }],
             ..Default::default()
         };
@@ -2992,6 +3070,7 @@ GET https://api.example.com/v2
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
         };
         let eff = block.effective_diffs();
         assert_eq!(eff.len(), 2, "must use diffs vec, not double-count diff");
@@ -3033,6 +3112,7 @@ GET https://api.example.com/v2
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
         };
         let eff = block.effective_diffs();
         assert_eq!(eff.len(), 1);
@@ -3068,6 +3148,7 @@ GET https://api.example.com/v2
             request_id_header: None,
             request_id_disabled: false,
             redact_body_rules: Vec::new(),
+            for_loop: None,
         };
         assert_eq!(block.effective_diffs().len(), 0);
     }
@@ -3892,6 +3973,103 @@ GET {{host}}/items
         assert_eq!(b.assertions.len(), 1);
         assert_eq!(b.extracts.len(), 1);
         assert!(b.redact_body_rules.is_empty());
+    }
+
+    // ── Repeater (`# @@for var in src`) parser tests ──────────────────
+
+    #[test]
+    fn parse_for_directive_basic() {
+        let input = "### @test Validate each user\n# @for user_id in user_ids\nGET https://api.example.com/users/{{user_id}}\n\n# @assert status == 200\n";
+        let suite = parse_test_suite(input);
+        let block = &suite.blocks[0];
+        assert!(block.for_loop.is_some(), "block should carry for_loop");
+        let fl = block.for_loop.as_ref().unwrap();
+        assert_eq!(fl.iter_var, "user_id");
+        assert_eq!(fl.source_var, "user_ids");
+        // Errors should be empty for a well-formed directive.
+        assert!(block.errors.is_empty(), "no errors expected, got: {:?}", block.errors);
+    }
+
+    #[test]
+    fn for_directive_double_at_form_also_works() {
+        // The canonical NEW syntax uses `# @@for ...` (double-at).
+        let input = "### @@test Validate\n# @@for x in xs\nGET https://api.example.com/{{x}}\n";
+        let suite = parse_test_suite(input);
+        let fl = suite.blocks[0].for_loop.as_ref().expect("for_loop missing");
+        assert_eq!(fl.iter_var, "x");
+        assert_eq!(fl.source_var, "xs");
+    }
+
+    #[test]
+    fn for_directive_roundtrips_through_generator() {
+        let original = "### @@test Each user\n# @@for uid in user_ids\nGET https://api.example.com/users/{{uid}}\n\n# @@assert status == 200\n";
+        let suite = parse_test_suite(original);
+        let regenerated = generate_http_content(&suite);
+        assert!(
+            regenerated.contains("# @@for uid in user_ids"),
+            "expected # @@for line in regenerated output, got:\n{}",
+            regenerated
+        );
+        // And re-parsing the regenerated output preserves the loop.
+        let suite2 = parse_test_suite(&regenerated);
+        let fl = suite2.blocks[0].for_loop.as_ref().expect("for_loop lost on re-parse");
+        assert_eq!(fl.iter_var, "uid");
+        assert_eq!(fl.source_var, "user_ids");
+    }
+
+    #[test]
+    fn for_with_compare_is_rejected_in_v1() {
+        // Mixing `# @@for` and `# @@compare` on the same block is an error
+        // in V1; the loop is dropped and a parse error is recorded so the
+        // UI can surface it.
+        let input = "### @test Conflict\n# @compare\n# @for x in xs\n# @step a\nGET https://api.example.com/a\n";
+        let suite = parse_test_suite(input);
+        let block = &suite.blocks[0];
+        assert!(block.compare, "compare flag should still be set");
+        assert!(block.for_loop.is_none(), "for_loop should be cleared on conflict");
+        assert!(
+            block.errors.iter().any(|e| e.contains("@@compare") && e.contains("@@for")),
+            "expected validation error for compare+for conflict, got: {:?}",
+            block.errors
+        );
+    }
+
+    #[test]
+    fn duplicate_for_directive_keeps_first_and_errors() {
+        let input = "### @test Dup\n# @for a in xs\n# @for b in ys\nGET https://api.example.com/x\n";
+        let suite = parse_test_suite(input);
+        let block = &suite.blocks[0];
+        let fl = block.for_loop.as_ref().expect("first for_loop should win");
+        assert_eq!(fl.iter_var, "a");
+        assert_eq!(fl.source_var, "xs");
+        assert!(
+            block.errors.iter().any(|e| e.contains("duplicate") && e.contains("@@for")),
+            "expected duplicate-directive error, got: {:?}",
+            block.errors
+        );
+    }
+
+    #[test]
+    fn malformed_for_directive_is_silently_dropped_with_error() {
+        // `# @@for foo` (no `in src_var`) — invalid; we drop the directive
+        // and record a parse error.
+        let input = "### @test Bad\n# @for missing_in_keyword\nGET https://api.example.com/x\n";
+        let suite = parse_test_suite(input);
+        let block = &suite.blocks[0];
+        assert!(block.for_loop.is_none(), "malformed for should be dropped");
+        assert!(
+            block.errors.iter().any(|e| e.contains("invalid") && e.contains("@@for")),
+            "expected invalid-directive error, got: {:?}",
+            block.errors
+        );
+    }
+
+    #[test]
+    fn block_without_for_directive_has_none() {
+        // Sanity check: a normal block leaves for_loop as None.
+        let input = "### @test Normal\nGET https://api.example.com/items\n";
+        let suite = parse_test_suite(input);
+        assert!(suite.blocks[0].for_loop.is_none());
     }
 }
 

@@ -181,7 +181,40 @@ fn resolve_token(
             if parts.next().is_some() {
                 return None;
             }
-            vars.get(head).cloned()
+            // 1) Direct lookup. Handles plain names AND variables that
+            //    contain a literal `.` in their name (e.g. defined as
+            //    `@my.var = ...`).
+            if let Some(v) = vars.get(head) {
+                return Some(v.clone());
+            }
+            // 2) Dotted-path / bracket-path access on a JSON-typed variable.
+            //    Split into root + suffix at the first `.` or `[`; if the
+            //    root resolves to a JSON object/array, walk the suffix via
+            //    the existing JSONPath-lite navigator. Used by `# @@for` so
+            //    tests can write `{{user.id}}` (object) or `{{users[0].id}}`
+            //    (array) inside the loop body. Only attempted when the
+            //    token contains `.` or `[`; preserves existing behavior
+            //    for plain identifiers.
+            let split_idx = head.find(|c: char| c == '.' || c == '[');
+            if let Some(idx) = split_idx {
+                let root = &head[..idx];
+                let split_char = head.as_bytes()[idx];
+                // For `.` separator we strip it; for `[` we keep it because
+                // resolve_json_path expects bracket form to remain intact.
+                let suffix = if split_char == b'.' {
+                    &head[idx + 1..]
+                } else {
+                    &head[idx..]
+                };
+                if !root.is_empty() && !suffix.is_empty() {
+                    if let Some(raw) = vars.get(root) {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw) {
+                            return resolve_json_path(&json, suffix);
+                        }
+                    }
+                }
+            }
+            None
         }
     }
 }
@@ -562,5 +595,77 @@ mod tests {
         let mut store = VariableStore::new();
         store.set("plain_name", "hello");
         assert_eq!(store.interpolate("{{plain_name}}"), "hello");
+    }
+
+    // ── Dotted-path access on JSON-typed variables (for `# @@for` over arrays of objects) ──
+
+    #[test]
+    fn dotted_access_on_json_object_variable() {
+        // When a variable's value is a JSON object, `{{var.field}}` should
+        // resolve to the field value. Used by `# @@for user in users` so
+        // tests can write `{{user.id}}` inside the loop body.
+        let mut store = VariableStore::new();
+        store.set("user", r#"{"id":"u1","name":"Alice"}"#);
+        assert_eq!(store.interpolate("{{user.id}}"), "u1");
+        assert_eq!(store.interpolate("{{user.name}}"), "Alice");
+    }
+
+    #[test]
+    fn dotted_access_on_nested_json_object() {
+        let mut store = VariableStore::new();
+        store.set("user", r#"{"id":"u1","address":{"city":"Seattle","zip":"98101"}}"#);
+        assert_eq!(store.interpolate("{{user.address.city}}"), "Seattle");
+        assert_eq!(store.interpolate("{{user.address.zip}}"), "98101");
+    }
+
+    #[test]
+    fn dotted_access_on_json_array_with_index() {
+        // `{{var[0].field}}` style access reuses the existing JSONPath-lite
+        // navigator. Useful when an extract returns the whole array.
+        let mut store = VariableStore::new();
+        store.set("users", r#"[{"id":"u1"},{"id":"u2"}]"#);
+        assert_eq!(store.interpolate("{{users[0].id}}"), "u1");
+        assert_eq!(store.interpolate("{{users[1].id}}"), "u2");
+    }
+
+    #[test]
+    fn dotted_access_with_missing_field_left_unresolved() {
+        // Missing field paths leave the placeholder unchanged so users see
+        // exactly what failed (consistent with how plain unknown vars behave).
+        let mut store = VariableStore::new();
+        store.set("user", r#"{"id":"u1"}"#);
+        assert_eq!(store.interpolate("{{user.bogus}}"), "{{user.bogus}}");
+    }
+
+    #[test]
+    fn dotted_access_on_non_json_root_left_unresolved() {
+        // A plain string variable like `host = "example.com"` should NOT be
+        // dotted-accessed (no JSON parse). Falls through to unresolved.
+        let mut store = VariableStore::new();
+        store.set("host", "example.com");
+        assert_eq!(store.interpolate("{{host.com}}"), "{{host.com}}");
+    }
+
+    #[test]
+    fn dotted_access_does_not_break_plain_variable_lookup() {
+        // Sanity check: a plain `{{name}}` still resolves directly even when
+        // the store also holds JSON-typed vars. The dotted-path branch must
+        // not regress simple lookups.
+        let mut store = VariableStore::new();
+        store.set("name", "world");
+        store.set("user", r#"{"id":"u1"}"#);
+        assert_eq!(store.interpolate("{{name}}"), "world");
+        assert_eq!(store.interpolate("{{user.id}}"), "u1");
+    }
+
+    #[test]
+    fn literal_dotted_var_name_still_wins_over_field_access() {
+        // If a variable is literally defined with a dotted name (e.g. via
+        // `@my.thing = ...`), the direct lookup must still work. Field
+        // navigation only kicks in when the direct lookup fails.
+        let mut store = VariableStore::new();
+        store.set("my.thing", "literal-value");
+        // No `my` root defined — must fall through to `vars["my.thing"]`.
+        assert_eq!(store.interpolate("{{my.thing}}"), "literal-value");
     }
 }

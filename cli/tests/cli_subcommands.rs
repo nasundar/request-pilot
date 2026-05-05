@@ -57,6 +57,7 @@ fn dummy_block(name: &str, status: &str) -> BlockResult {
         step_results: vec![],
         diff_result: None,
         diff_results: Vec::new(),
+        iterations: Vec::new(),
     }
 }
 
