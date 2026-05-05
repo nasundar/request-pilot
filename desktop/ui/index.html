@@ -426,6 +426,16 @@
                   </label>
                 </div>
               </div>
+              <div class="meta-field-row" id="metaLoopRow" title="Loop this block over each element of a JSON-array variable. Bound element is accessible as {{iter_var}} or {{iter_var.field}} for object elements.">
+                <div class="meta-field">
+                  <label>Loop iter var</label>
+                  <input type="text" id="metaLoopIterVar" class="meta-input" placeholder="e.g. user_id" spellcheck="false">
+                </div>
+                <div class="meta-field">
+                  <label>Loop source var</label>
+                  <input type="text" id="metaLoopSourceVar" class="meta-input" placeholder="e.g. user_ids (JSON array variable)" spellcheck="false">
+                </div>
+              </div>
             </div>
           </div>
 
@@ -512,7 +522,7 @@
 
           <!-- Response content -->
           <div id="responseContent" class="response-content hidden">
-            <!-- Step tabs (only visible for @@compare blocks) -->
+            <!-- Step tabs (visible for @@compare blocks AND # @@for-looped blocks) -->
             <div id="responseStepTabs" class="response-step-tabs hidden"></div>
             <div class="sub-tabs">
               <button class="sub-tab active" data-subtab="resp-body">Body</button>

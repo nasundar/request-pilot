@@ -5492,6 +5492,51 @@ input:focus, select:focus, textarea:focus { outline: none; }
   background: color-mix(in srgb, var(--green) 15%, transparent);
 }
 
+/* `# @@for` loop sub-items in the sidebar (mirrors .compare-steps). */
+.loop-iterations {
+  margin-left: 28px;
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+}
+.loop-iteration-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.1s;
+}
+.loop-iteration-item:hover {
+  background: var(--hover);
+}
+.loop-iteration-item .step-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.loop-omitted-flag {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+/* `× N` badge on the parent loop block in the sidebar. */
+.block-loop-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  margin-left: 4px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--purple) 18%, transparent);
+  color: var(--purple);
+  white-space: nowrap;
+}
+
 /* Diff summary */
 .diff-summary {
   display: grid;

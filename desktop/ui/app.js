@@ -100,6 +100,28 @@ function getBlockDiffs(block) {
 }
 
 /**
+ * Whether a block has a `# @@for` loop directive set. Both fields must be
+ * non-empty strings — a half-filled directive (e.g. iter_var only) is
+ * treated as "not yet a loop" for UI purposes (avoids flicker while the
+ * user is typing).
+ */
+function hasLoopDirective(block) {
+  const fl = block?.for_loop;
+  return !!(fl && typeof fl.iter_var === 'string' && fl.iter_var.trim()
+    && typeof fl.source_var === 'string' && fl.source_var.trim());
+}
+
+/**
+ * Returns the per-iteration result list for a looped block result. Empty
+ * for non-loop blocks or when no iterations were produced. Each entry has
+ * shape `{ index, iter_value, status, block_result, body_omitted }`.
+ */
+function getBlockIterations(br) {
+  if (!br) return [];
+  return Array.isArray(br.iterations) ? br.iterations : [];
+}
+
+/**
  * Returns the per-pair diff result list for a block result, falling back
  * to the legacy single `diff_result` field when the runner that produced
  * the result predates multi-diff. Each entry has shape
@@ -542,6 +564,8 @@ const metaMode        = $('#metaMode');
 const metaDevAuth     = $('#metaDevAuth');
 const metaDisabled    = $('#metaDisabled');
 const metaCompare     = $('#metaCompare');
+const metaLoopIterVar   = $('#metaLoopIterVar');
+const metaLoopSourceVar = $('#metaLoopSourceVar');
 const builderNormal   = $('#builderNormal');
 const compareStepsView = $('#compareStepsView');
 const compareStepsTabs = $('#compareStepsTabs');
@@ -2815,9 +2839,13 @@ function displayResponse(resp) {
 let activeResponseStepIdx = 0;
 
 /**
- * Render the per-step tabs above the response panel's sub-tabs. Hidden
- * for non-compare blocks. Click on a step tab triggers
- * `showResponseForBlock` to swap the displayed step.
+ * Render the per-step (compare) OR per-iteration (loop) tabs above the
+ * response panel's sub-tabs. Hidden for plain blocks. Click on a tab
+ * triggers `showResponseForBlock` to swap the displayed step/iteration.
+ *
+ * Compare blocks and `# @@for`-looped blocks are mutually exclusive in V1
+ * (parser rejects the combination), so a single tab strip can serve both
+ * — `block.compare` wins when somehow both are set.
  */
 function renderResponseStepTabs(fileIdx, blockIdx) {
   if (!responseStepTabs) return;
@@ -2825,25 +2853,48 @@ function renderResponseStepTabs(fileIdx, blockIdx) {
   const block = file?.suite?.blocks?.[blockIdx];
   const br = file?.results?.block_results?.[blockIdx];
 
-  if (!block || !block.compare || !block.steps || block.steps.length === 0) {
+  const isCompare = !!(block?.compare && block?.steps && block.steps.length > 0);
+  const iters = !isCompare && hasLoopDirective(block) ? getBlockIterations(br) : [];
+  const isLoop = !isCompare && iters.length > 0;
+
+  if (!isCompare && !isLoop) {
     responseStepTabs.classList.add('hidden');
     responseStepTabs.innerHTML = '';
     return;
   }
 
   let html = '';
-  block.steps.forEach((step, si) => {
-    const sr = br?.step_results?.[si];
-    let dot = '';
-    if (sr) {
-      const cls = sr.error ? 'failed' : 'passed';
-      dot = `<span class="step-status ${cls}"></span>`;
-    } else if (br) {
-      dot = `<span class="step-status pending"></span>`;
-    }
-    const active = si === activeResponseStepIdx ? ' active' : '';
-    html += `<button class="response-step-tab${active}" data-step-idx="${si}">${escapeHtml(step.name)}${dot}</button>`;
-  });
+  if (isCompare) {
+    block.steps.forEach((step, si) => {
+      const sr = br?.step_results?.[si];
+      let dot = '';
+      if (sr) {
+        const cls = sr.error ? 'failed' : 'passed';
+        dot = `<span class="step-status ${cls}"></span>`;
+      } else if (br) {
+        dot = `<span class="step-status pending"></span>`;
+      }
+      const active = si === activeResponseStepIdx ? ' active' : '';
+      html += `<button class="response-step-tab${active}" data-step-idx="${si}">${escapeHtml(step.name)}${dot}</button>`;
+    });
+  } else {
+    // Loop block: one tab per iteration. Label is "N: <truncated value>"
+    // so identical iter values still show up as distinct tabs and the
+    // user can see at a glance which value drove which response.
+    iters.forEach((it, ii) => {
+      const cls = it.status === 'passed' ? 'passed'
+        : it.status === 'failed' ? 'failed'
+        : it.status === 'error' ? 'failed'
+        : 'pending';
+      const dot = `<span class="step-status ${cls}"></span>`;
+      const active = ii === activeResponseStepIdx ? ' active' : '';
+      const label = `#${it.index + 1}: ${escapeHtml(truncateForTab(it.iter_value))}`;
+      const tip = it.body_omitted
+        ? `Iteration ${it.index} — body trimmed by storage cap (status & assertions kept)`
+        : `Iteration ${it.index}`;
+      html += `<button class="response-step-tab${active}" data-step-idx="${ii}" title="${escapeAttr(tip)}">${label}${dot}</button>`;
+    });
+  }
   responseStepTabs.innerHTML = html;
   responseStepTabs.classList.remove('hidden');
 
@@ -2855,6 +2906,18 @@ function renderResponseStepTabs(fileIdx, blockIdx) {
       showResponseForBlock(fileIdx, blockIdx, idx);
     });
   });
+}
+
+/**
+ * Truncate an iter_value for display in a tab label. The Rust runner
+ * already caps stored iter_value at 200 chars (with ellipsis), but tabs
+ * should be much shorter — keep them snappy at ~30 chars.
+ */
+function truncateForTab(s) {
+  if (typeof s !== 'string') return '';
+  const max = 30;
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + '…';
 }
 
 /**
@@ -2884,8 +2947,10 @@ function showResponseForBlock(fileIdx, blockIdx, preferredStepIdx) {
   }
 
   const isCompare = !!(block.compare && block.steps && block.steps.length > 0);
+  const iters = !isCompare && hasLoopDirective(block) ? getBlockIterations(br) : [];
+  const isLoop = !isCompare && iters.length > 0;
 
-  if (!isCompare) {
+  if (!isCompare && !isLoop) {
     if (responseStepTabs) {
       responseStepTabs.classList.add('hidden');
       responseStepTabs.innerHTML = '';
@@ -2898,6 +2963,40 @@ function showResponseForBlock(fileIdx, blockIdx, preferredStepIdx) {
       displayError(br.error);
       return null;
     }
+    return null;
+  }
+
+  // ── Loop block ──
+  if (isLoop) {
+    let pick = (typeof preferredStepIdx === 'number' && preferredStepIdx >= 0)
+      ? preferredStepIdx
+      : (activeResponseStepIdx >= 0 ? activeResponseStepIdx : 0);
+    if (pick >= iters.length) pick = 0;
+    if (pick < 0) pick = 0;
+    activeResponseStepIdx = pick;
+
+    renderResponseStepTabs(fileIdx, blockIdx);
+
+    const it = iters[pick];
+    const inner = it?.block_result;
+    if (it?.body_omitted) {
+      // Iteration was trimmed by the storage cap — show a friendly note
+      // instead of an empty body so users understand it's intentional.
+      displayError(`Iteration #${it.index + 1} body was omitted by the storage cap policy.\n\nKept: status, assertions, extracts, timing, URL, headers.\nDropped: request body, response body.\n\nTo capture full bodies for all iterations, switch the run's capture policy to "full debug" or re-run with the iter focused on (TODO).`);
+      return null;
+    }
+    if (inner?.response) {
+      displayResponse(inner.response);
+      return inner.response;
+    }
+    if (inner?.error) {
+      displayError(inner.error);
+      return null;
+    }
+    responseEmpty.classList.remove('hidden');
+    responseContent.classList.add('hidden');
+    responseContent.classList.remove('visible');
+    responseMeta.classList.add('hidden');
     return null;
   }
 
@@ -3941,13 +4040,27 @@ function createBlockItem(file, fileIdx, block, blockIdx) {
   const modeBadgeHtml = block.mode ? `<span class="mode-badge mode-${block.mode}">${block.mode.toUpperCase()}</span>` : '';
   const descHtml = block.description ? `<span class="block-desc" title="${escapeAttr(block.description)}">${escapeHtml(block.description)}</span>` : '';
   const depsHtml = block.depends && block.depends.length > 0 ? `<span class="block-depends" title="Depends: ${escapeAttr(block.depends.join(', '))}">⤷ ${escapeHtml(block.depends.join(', '))}</span>` : '';
+  // Loop badge: shown when the block has a `# @@for` directive. After a
+  // run, the count comes from the actual iteration result list; pre-run
+  // it falls back to a generic "× loop" hint so the user knows the
+  // directive is set even before any iterations exist.
+  let loopBadgeHtml = '';
+  if (hasLoopDirective(block)) {
+    const loopBr = file.results?.block_results?.[blockIdx];
+    const iterCount = getBlockIterations(loopBr).length;
+    const loopTip = `Loop: for ${block.for_loop.iter_var} in ${block.for_loop.source_var}` +
+      (iterCount > 0 ? ` (${iterCount} iterations)` : '');
+    const loopLabel = iterCount > 0 ? `× ${iterCount}` : '× loop';
+    loopBadgeHtml = `<span class="block-loop-badge" title="${escapeAttr(loopTip)}">${escapeHtml(loopLabel)}</span>`;
+  }
   item.innerHTML = `
     <input type="checkbox" class="block-toggle" title="Enable/disable this step" ${isDisabled ? '' : 'checked'}>
     <span class="block-status ${statusClass}"></span>
-    <span class="block-icon">${block.compare ? '\u21C4' : getBlockIcon(block.block_type)}</span>
+    <span class="block-icon">${block.compare ? '\u21C4' : (hasLoopDirective(block) ? '\u21BB' : getBlockIcon(block.block_type))}</span>
     <span class="block-name-group">
       <span class="block-name" title="${escapeAttr(block.name)}">${escapeHtml(block.name || block.block_type)}</span>
       ${modeBadgeHtml}
+      ${loopBadgeHtml}
       ${descHtml}
       ${depsHtml}
     </span>
@@ -4020,6 +4133,42 @@ function createBlockItem(file, fileIdx, block, blockIdx) {
     item.appendChild(stepsContainer);
   }
 
+  // Add per-iteration sub-items for # @@for-looped blocks (mutually
+  // exclusive with compare in V1). Only renders after a run produces
+  // iterations — pre-run, the loop badge above is the only hint.
+  if (!block.compare && hasLoopDirective(block)) {
+    const br = file.results?.block_results?.[blockIdx];
+    const iters = getBlockIterations(br);
+    if (iters.length > 0) {
+      const itersContainer = document.createElement('div');
+      itersContainer.className = 'loop-iterations';
+      iters.forEach((it, ii) => {
+        const itEl = document.createElement('div');
+        itEl.className = 'loop-iteration-item';
+        const cls = it.status === 'passed' ? 'passed'
+          : it.status === 'failed' ? 'failed'
+          : it.status === 'error' ? 'error'
+          : '';
+        const omittedHint = it.body_omitted ? ' (body omitted)' : '';
+        const tip = `Iteration ${it.index + 1}: ${it.iter_value} — ${it.status}${omittedHint}`;
+        itEl.innerHTML = `
+          <span class="block-status ${cls ? 'status-' + cls : ''}"></span>
+          <span class="step-label" title="${escapeAttr(tip)}">#${it.index + 1}: ${escapeHtml(truncateForTab(it.iter_value))}</span>
+          ${it.body_omitted ? '<span class="loop-omitted-flag" title="Body omitted by storage cap">∅</span>' : ''}
+        `;
+        itEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          // Switch to the parent block and show this iter's response.
+          activeResponseStepIdx = ii;
+          selectBlock(fileIdx, blockIdx);
+          showResponseForBlock(fileIdx, blockIdx, ii);
+        });
+        itersContainer.appendChild(itEl);
+      });
+      item.appendChild(itersContainer);
+    }
+  }
+
   return item;
 }
 
@@ -4082,6 +4231,8 @@ function populateMetadata(block) {
   metaDevAuth.value = block.dev_auth || '';
   metaDisabled.checked = !!block.disabled;
   metaCompare.checked = !!block.compare;
+  metaLoopIterVar.value = block.for_loop?.iter_var || '';
+  metaLoopSourceVar.value = block.for_loop?.source_var || '';
 
   // Build summary line
   const parts = [];
@@ -4089,6 +4240,7 @@ function populateMetadata(block) {
   if (block.block_type && block.block_type !== 'test') parts.push(`[${block.block_type}]`);
   if (block.group) parts.push(`group: ${block.group}`);
   if (block.compare) parts.push('compare');
+  if (hasLoopDirective(block)) parts.push(`for ${block.for_loop.iter_var} in ${block.for_loop.source_var}`);
   blockMetaSummary.textContent = parts.join('  ·  ');
 }
 
@@ -4115,6 +4267,23 @@ function applyMetadataToBlock() {
   const newDeps = metaDepends.value.split(',').map(s => s.trim()).filter(Boolean);
   if (JSON.stringify(block.depends) !== JSON.stringify(newDeps)) {
     block.depends = newDeps;
+    changed = true;
+  }
+
+  // # @@for directive: both fields required to form a valid directive.
+  // Compare blocks reject loops at parse time, so clear the directive
+  // entirely when compare mode is on (defensive — keeps the round-trip
+  // sane when a user toggles compare on a previously-looped block).
+  const iter = metaLoopIterVar.value.trim();
+  const src = metaLoopSourceVar.value.trim();
+  const newLoop = (!metaCompare.checked && iter && src)
+    ? { iter_var: iter, source_var: src }
+    : null;
+  const oldLoop = block.for_loop || null;
+  const sameLoop = (newLoop === oldLoop) ||
+    (newLoop && oldLoop && newLoop.iter_var === oldLoop.iter_var && newLoop.source_var === oldLoop.source_var);
+  if (!sameLoop) {
+    block.for_loop = newLoop;
     changed = true;
   }
 
@@ -4154,6 +4323,7 @@ function onMetaFieldChange() {
         if (block.block_type && block.block_type !== 'test') parts.push(`[${block.block_type}]`);
         if (block.group) parts.push(`group: ${block.group}`);
         if (block.compare) parts.push('compare');
+        if (hasLoopDirective(block)) parts.push(`for ${block.for_loop.iter_var} in ${block.for_loop.source_var}`);
         blockMetaSummary.textContent = parts.join('  ·  ');
       }
       renderFileTree();
@@ -4208,7 +4378,7 @@ metaCompare.addEventListener('change', async () => {
 
   renderFileTree();
 });
-[metaName, metaDescription, metaGroup, metaDepends, metaDevAuth].forEach(el => {
+[metaName, metaDescription, metaGroup, metaDepends, metaDevAuth, metaLoopIterVar, metaLoopSourceVar].forEach(el => {
   el.addEventListener('input', onMetaFieldChange);
 });
 [metaBlockType, metaMode, metaDisabled].forEach(el => {

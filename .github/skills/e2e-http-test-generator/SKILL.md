@@ -87,6 +87,7 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 # @@step <name>                        — define a named request step
 # @@diff <step_a> <step_b>             — compare responses of two steps
 # @@assert $diff.match == true          — diff assertion example
+# @@for <iter_var> in <source_var>     — iterate block once per element of `source_var` (a JSON-array variable). Bare var name, NOT `{{source_var}}`. Auto-binds `{{$index}}` (0-based) and `{{$iteration}}` (1-based). For object elements, use dotted paths: `{{iter_var.field}}`. Cannot combine with `@@compare`.
 # @@redact body $.json.path             — scrub a JSON field from recorded bodies (JSONPath: $.foo, $.foo.bar, $.foo[0], $.foo[*])
 # @@redact body /regex/                 — scrub bytes matching a regex from recorded bodies (file- or block-level)
 ```
@@ -721,6 +722,96 @@ Authorization: Bearer {{access_token}}
 - Use `$diff.similarity >= 0.95` to allow small acceptable drift during incremental migration rollouts
 - Use `$diff.changed_count == 0` for strict parity checks where no field differences are allowed
 
+### Pattern 11: Repeater (`# @@for` over a JSON-array variable)
+
+When a setup step produces a list of values (IDs, names, objects) and the test must run once **per value**, use `# @@for <iter_var> in <source_var>` on the test block. The runner iterates sequentially, binding `iter_var` to each element. The test block — including its assertions and extracts — runs once per iteration; per-iteration extracts stay scoped to that iteration and do NOT leak into the global variable store.
+
+#### Scalar element loop (V1 happy path)
+
+```http
+### @@setup Get user list
+# @@description Fetches the array of user IDs to drive the loop below.
+GET {{base_url}}/users
+Authorization: Bearer {{access_token}}
+
+# @@extract user_ids = $.user_ids
+# @@assert status == 200
+# @@assert $.user_ids.length > 0
+
+### @@test Validate each user
+# @@for user_id in user_ids
+# @@description Runs once per element in user_ids — N HTTP requests, N assertion sets.
+GET {{base_url}}/users/{{user_id}}
+Authorization: Bearer {{access_token}}
+
+# @@assert status == 200
+# @@assert $.id == {{user_id}}
+```
+
+#### Object element loop (`{{item.field}}` traversal)
+
+When the source variable holds an array of objects, bind to each object and reach fields with dotted paths. The element variable behaves like any other JSON-valued variable:
+
+```http
+### @@setup Get user objects
+GET {{base_url}}/users
+# @@extract users = $.users           # users is a JSON array like [{"id":"u1","email":"a@x"},…]
+# @@assert status == 200
+
+### @@test Each user matches expected email
+# @@for user in users
+# @@description Per-iteration: user.id and user.email available via dotted paths.
+GET {{base_url}}/users/{{user.id}}
+Authorization: Bearer {{access_token}}
+
+# @@assert status == 200
+# @@assert $.id == {{user.id}}
+# @@assert $.email == {{user.email}}
+```
+
+#### Built-in iteration counters
+
+Inside a `# @@for` block, two extra variables are auto-bound on every iteration:
+
+| Variable | Type | Value |
+|----------|------|-------|
+| `{{$index}}` | integer | 0-based iteration index |
+| `{{$iteration}}` | integer | 1-based iteration index (for human-readable names) |
+
+```http
+### @@test Tag each created resource with its iteration
+# @@for tag in tag_list
+POST {{base_url}}/resources/{{resource_id}}/tags
+Content-Type: application/json
+
+{ "tag": "{{tag}}", "order": {{$iteration}} }
+
+# @@assert status == 201
+# @@assert $.order == {{$iteration}}
+```
+
+#### Source-variable contract
+
+- `<source_var>` MUST be the **bare** variable name — NOT `{{source_var}}`. The directive parser reads it directly, identical to `# @@group <name>` and `# @@depends <name>`.
+- The variable's value MUST be a **JSON array string** at run time. Use `# @@extract foo = $.path.to.array` to populate it.
+- An empty array runs zero iterations and the block status is `passed` (not `skipped`).
+- A missing or non-JSON-array source is a block-level error (`Loop source 'X' is undefined` / `is not a JSON array`).
+
+#### Constraints (V1)
+
+| Rule | Why |
+|------|-----|
+| Sequential execution only | `# @@parallel` deferred to V1.5 |
+| Cannot combine `# @@compare` and `# @@for` on the same block | Parser rejects with a clear error — they'd produce ambiguous result shapes |
+| Per-iteration extracts stay local | The final variable store excludes per-iteration extracts. Use a downstream block to aggregate, or wait for V1.5's `# @@collect` directive. |
+| Storage trims successful iteration bodies | Failed iterations + first/last success retain full bodies; successes 2..N-1 store summary only. The desktop UI annotates `(body omitted)`. |
+
+#### Authoring tips
+
+- Prefer scalar loops when the request only needs an ID or name. They're easier to read and the source variable is just `$.array_path`.
+- For object loops, extract the array of objects in setup (`# @@extract users = $.users`) so the iter binding can dot-traverse without a second HTTP round-trip.
+- Combine `# @@for` with `# @@group` to fan out a per-element validation group, then run a downstream block via `# @@depends` after all iterations pass.
+
 ## Common Pitfalls
 
 ### Never write into the Sessions store
@@ -826,6 +917,37 @@ Use this form if the `.http` file must run in REST Client, IntelliJ HTTP, `curl`
 @query_endpoint =
 @access_token =
 ```
+
+### `# @@for` source variable wrapped in `{{...}}`
+**Problem:** Writing `# @@for user_id in {{user_ids}}` looks intuitive but the parser reads `<source_var>` as a bare variable name, identical to `# @@group <name>` and `# @@depends <name>`. Wrapping in `{{}}` makes the directive lookup fail.
+
+**Solution:** Use the bare name:
+```http
+# ✗ WRONG — interpolation form, the parser cannot resolve this
+# @@for user_id in {{user_ids}}
+
+# ✓ RIGHT — bare variable name
+# @@for user_id in user_ids
+```
+`{{user_id}}` interpolation inside the request body / URL / headers IS still correct — the directive line is the only place that uses the bare name.
+
+### `# @@for` combined with `# @@compare` on the same block
+**Problem:** A loop iterates a single request shape; a compare block fans out N parallel-shaped requests. Combining them produces an ambiguous result tree (do you compare iteration 1 against iteration 2? Or run each compare-step N times?). V1 rejects the combination at parse time.
+
+**Solution:** Pick one. Most "compare across N iterations" intents are better served by a `# @@for` over a list of values + post-loop assertion comparing extracts, not by `@@compare`.
+
+### `# @@for` source is not a JSON array
+**Problem:** `# @@extract user_ids = $.user_ids[*].id` does NOT work — extract paths don't support `[*]` wildcards. The variable ends up as a plain string and the loop fails with `Loop source 'user_ids' is not a JSON array`.
+
+**Solution:** Have the upstream API return the IDs as a top-level array, then extract the whole array with a non-wildcard path:
+```http
+# Upstream returns: { "user_ids": ["u1", "u2", "u3"] }
+# @@extract user_ids = $.user_ids
+
+# ✗ Does NOT work — wildcards aren't supported in extract paths
+# @@extract user_ids = $.users[*].id
+```
+If you only have a list of objects (`{ "users": [{...}, {...}] }`), extract the object array (`$.users`) and use object-element loops with `{{user.id}}`.
 
 ## How to Analyze a Code Change
 
