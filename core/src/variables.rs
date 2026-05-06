@@ -69,6 +69,9 @@ impl VariableStore {
     /// | Built-in                         | Value                                   |
     /// |----------------------------------|-----------------------------------------|
     /// | `{{$timestamp}}`                 | Unix epoch seconds                      |
+    /// | `{{$timestamp <offset> <unit>}}` | Unix epoch seconds with offset, e.g.    |
+    /// |                                  | `-1 h` (minus 1 hour). Units: y, M, w,  |
+    /// |                                  | d, h, m, s, ms (M=month, m=minute).     |
     /// | `{{$datetime}}`                  | Current UTC time, ISO 8601              |
     /// | `{{$uuid}}` / `{{$guid}}`        | UUIDv4                                  |
     /// | `{{$randomInt}}`                 | Random int 0..9999                      |
@@ -150,7 +153,20 @@ fn resolve_token(
     let mut parts = inner.split_whitespace();
     let head = parts.next()?;
     match head {
-        "$timestamp" => Some(chrono::Utc::now().timestamp().to_string()),
+        "$timestamp" => {
+            let now = chrono::Utc::now();
+            let offset_str = parts.next();
+            let unit = parts.next();
+            let dt = match (offset_str, unit) {
+                (None, None) => now,
+                (Some(off_s), Some(u)) => {
+                    let offset: i64 = off_s.parse().ok()?;
+                    apply_timestamp_offset(now, offset, u)?
+                }
+                _ => return None,
+            };
+            Some(dt.timestamp().to_string())
+        }
         "$datetime" => Some(chrono::Utc::now().to_rfc3339()),
         "$uuid" | "$guid" => Some(uuid::Uuid::new_v4().to_string()),
         "$randomInt" => {
@@ -216,6 +232,42 @@ fn resolve_token(
             }
             None
         }
+    }
+}
+
+fn apply_timestamp_offset(
+    now: chrono::DateTime<chrono::Utc>,
+    offset: i64,
+    unit: &str,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::Duration;
+    match unit {
+        "y" => {
+            let months = i64::from(12).checked_mul(offset)?;
+            apply_months(now, months)
+        }
+        "M" => apply_months(now, offset),
+        "w" => now.checked_add_signed(Duration::try_weeks(offset)?),
+        "d" => now.checked_add_signed(Duration::try_days(offset)?),
+        "h" => now.checked_add_signed(Duration::try_hours(offset)?),
+        "m" => now.checked_add_signed(Duration::try_minutes(offset)?),
+        "s" => now.checked_add_signed(Duration::try_seconds(offset)?),
+        "ms" => now.checked_add_signed(Duration::try_milliseconds(offset)?),
+        _ => None,
+    }
+}
+
+fn apply_months(
+    dt: chrono::DateTime<chrono::Utc>,
+    months: i64,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::Months;
+    if months >= 0 {
+        let m: u32 = u32::try_from(months).ok()?;
+        dt.checked_add_months(Months::new(m))
+    } else {
+        let m: u32 = u32::try_from(months.checked_neg()?).ok()?;
+        dt.checked_sub_months(Months::new(m))
     }
 }
 
@@ -367,6 +419,106 @@ mod tests {
         let store = VariableStore::new();
         let result = store.interpolate("{{$timestamp}}");
         assert!(result.parse::<i64>().is_ok(), "timestamp should be a number: {}", result);
+    }
+
+    fn interpolate_timestamp(token: &str) -> i64 {
+        let store = VariableStore::new();
+        store
+            .interpolate(token)
+            .parse::<i64>()
+            .expect("timestamp should parse as i64")
+    }
+
+    fn assert_timestamp_approx(token: &str, offset_seconds: i64) {
+        let result = interpolate_timestamp(token);
+        let expected = chrono::Utc::now().timestamp() + offset_seconds;
+        let diff = (result - expected).abs();
+        assert!(
+            diff <= 5,
+            "{token} produced {result}, expected approximately {expected} (diff {diff}s)"
+        );
+    }
+
+    #[test]
+    fn builtin_timestamp_zero_seconds_offset_is_now() {
+        assert_timestamp_approx("{{$timestamp 0 s}}", 0);
+    }
+
+    #[test]
+    fn builtin_timestamp_negative_hour_offset() {
+        assert_timestamp_approx("{{$timestamp -1 h}}", -3600);
+    }
+
+    #[test]
+    fn builtin_timestamp_positive_minute_offset() {
+        assert_timestamp_approx("{{$timestamp 30 m}}", 1800);
+    }
+
+    #[test]
+    fn builtin_timestamp_positive_day_offset() {
+        assert_timestamp_approx("{{$timestamp 2 d}}", 172800);
+    }
+
+    #[test]
+    fn builtin_timestamp_positive_week_offset() {
+        assert_timestamp_approx("{{$timestamp 1 w}}", 604800);
+    }
+
+    #[test]
+    fn builtin_timestamp_positive_month_offset_is_calendar_correct() {
+        let result = interpolate_timestamp("{{$timestamp 1 M}}");
+        let diff = result - chrono::Utc::now().timestamp();
+        let min = 28 * 24 * 60 * 60 - 5;
+        let max = 31 * 24 * 60 * 60 + 5;
+        assert!(
+            (min..=max).contains(&diff),
+            "expected 1 month offset to be 28-31 days, got {diff}s"
+        );
+    }
+
+    #[test]
+    fn builtin_timestamp_negative_year_offset_is_calendar_correct() {
+        let result = interpolate_timestamp("{{$timestamp -1 y}}");
+        let diff = chrono::Utc::now().timestamp() - result;
+        let min = 365 * 24 * 60 * 60 - 5;
+        let max = 366 * 24 * 60 * 60 + 5;
+        assert!(
+            (min..=max).contains(&diff),
+            "expected -1 year offset to be 365-366 days, got {diff}s"
+        );
+    }
+
+    #[test]
+    fn builtin_timestamp_millisecond_offset_truncates_to_seconds() {
+        assert_timestamp_approx("{{$timestamp 5 ms}}", 0);
+    }
+
+    #[test]
+    fn builtin_timestamp_unknown_unit_is_unresolved() {
+        let store = VariableStore::new();
+        let result = store.interpolate("{{$timestamp -1 X}}");
+        assert_eq!(result, "{{$timestamp -1 X}}");
+    }
+
+    #[test]
+    fn builtin_timestamp_invalid_offset_is_unresolved() {
+        let store = VariableStore::new();
+        let result = store.interpolate("{{$timestamp abc h}}");
+        assert_eq!(result, "{{$timestamp abc h}}");
+    }
+
+    #[test]
+    fn builtin_timestamp_requires_offset_and_unit() {
+        let store = VariableStore::new();
+        let result = store.interpolate("{{$timestamp -1}}");
+        assert_eq!(result, "{{$timestamp -1}}");
+    }
+
+    #[test]
+    fn find_unresolved_skips_timestamp_with_offset() {
+        let store = VariableStore::new();
+        let unresolved = store.find_unresolved("{{$timestamp -1 h}}");
+        assert!(unresolved.is_empty());
     }
 
     #[test]

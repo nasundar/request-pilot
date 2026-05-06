@@ -483,9 +483,39 @@ If a variable is not found, `{{variableName}}` is left as-is (not replaced).
 
 | Variable | Description | Example Output |
 |----------|-------------|---------------|
-| `{{$timestamp}}` | Current Unix timestamp (seconds) | `1710694104` |
-| `{{$uuid}}` | Random UUID v4 | `a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d` |
-| `{{$randomInt}}` | Random integer 0–9999 | `4217` |
+| `{{$timestamp}}` | Current Unix timestamp (seconds) | `1710694104` (see below for offsets) |
+| `{{$timestamp <offset> <unit>}}` | Current Unix timestamp shifted by a signed offset | `{{$timestamp -1 h}}` → one hour ago |
+| `{{$datetime}}` | Current UTC time in RFC 3339 / ISO 8601 | `2024-03-18T12:34:56+00:00` |
+| `{{$uuid}}` / `{{$guid}}` | Random UUID v4 | `a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d` |
+| `{{$randomInt}}` | Random integer in [0, 10000) | `4217` |
+| `{{$randomInt min max}}` | Random integer in [min, max) | `{{$randomInt 1 100}}` → `42` |
+| `{{$processEnv VARNAME}}` | Value of an OS environment variable (resolved during test-suite runs only) | `{{$processEnv API_KEY}}` |
+| `{{$localHostname}}` | Local machine hostname (resolved during test-suite runs only) | `dev-host` |
+
+#### `$timestamp` offsets
+
+`{{$timestamp <offset> <unit>}}` returns the current Unix timestamp shifted by
+the given offset. Both `<offset>` and `<unit>` are required; either alone is
+left unresolved. Unknown units and non-integer offsets are also left unresolved.
+
+| Unit | Meaning | Example |
+|------|---------|---------|
+| `y` | year | `{{$timestamp 1 y}}` — one year ahead |
+| `M` | month (capital) | `{{$timestamp -3 M}}` — three months ago |
+| `w` | week | `{{$timestamp 2 w}}` — two weeks ahead |
+| `d` | day | `{{$timestamp -7 d}}` — a week ago |
+| `h` | hour | `{{$timestamp -1 h}}` — one hour ago |
+| `m` | minute (lowercase) | `{{$timestamp 30 m}}` — 30 minutes ahead |
+| `s` | second | `{{$timestamp -10 s}}` — 10 seconds ago |
+| `ms` | millisecond | `{{$timestamp -500 ms}}` — half a second ago |
+
+> Note `M` (capital) means month and `m` (lowercase) means minute — same
+> convention as VS Code REST Client.
+
+Year and month offsets use calendar-correct arithmetic. Week/day/hour/minute/
+second/millisecond offsets are exact fixed-duration math.
+
+Note: `$processEnv` and `$localHostname` resolve only during full test-suite runs (which use the Rust core). When using the single-shot Send button in the desktop UI, those tokens are left unresolved as `{{$processEnv VAR}}`.
 
 ```http
 POST https://api.example.com/events

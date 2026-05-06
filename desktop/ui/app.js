@@ -1603,14 +1603,79 @@ bodyInput.addEventListener('scroll', () => {
 //   1. .http file `@variables` (defaults shipped in repo)
 //   2. active .env file values (loaded user overrides)
 //   3. runtimeOverrides (`@@extract` results, post-run final_variables)
+function _rpUuidV4() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const b = new Uint8Array(16);
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) crypto.getRandomValues(b);
+  else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256);
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, x => x.toString(16).padStart(2, '0'));
+  return `${h.slice(0,4).join('')}-${h.slice(4,6).join('')}-${h.slice(6,8).join('')}-${h.slice(8,10).join('')}-${h.slice(10,16).join('')}`;
+}
+
+function _rpParseStrictInt(s) {
+  if (typeof s !== 'string' || !/^[-+]?\d+$/.test(s)) return undefined;
+  const n = Number(s);
+  return Number.isSafeInteger(n) ? n : undefined;
+}
+
+function _rpApplyTimestampOffset(nowMs, offset, unit) {
+  const HOUR = 3600 * 1000;
+  const DAY = 24 * HOUR;
+  switch (unit) {
+    case 'y': {
+      const d = new Date(nowMs);
+      d.setUTCFullYear(d.getUTCFullYear() + offset);
+      return d.getTime();
+    }
+    case 'M': {
+      const d = new Date(nowMs);
+      d.setUTCMonth(d.getUTCMonth() + offset);
+      return d.getTime();
+    }
+    case 'w':  return nowMs + offset * 7 * DAY;
+    case 'd':  return nowMs + offset * DAY;
+    case 'h':  return nowMs + offset * HOUR;
+    case 'm':  return nowMs + offset * 60 * 1000;
+    case 's':  return nowMs + offset * 1000;
+    case 'ms': return nowMs + offset;
+    default:   return null;
+  }
+}
+
 function interpolateVariables(str) {
   if (!str) return str;
   const merged = buildMergedVarsObject();
-  return str.replace(/\{\{(\w+)\}\}/g, (match, name) => {
-    if (name === '$timestamp') return Date.now().toString();
-    if (name === '$uuid') return crypto.randomUUID();
-    if (name === '$randomInt') return Math.floor(Math.random() * 10000).toString();
-    return merged[name] !== undefined ? merged[name] : match;
+  return str.replace(/\{\{([^{}]+)\}\}/g, (match, inner) => {
+    const tokens = inner.trim().split(/\s+/);
+    const head = tokens[0];
+    const args = tokens.slice(1);
+    if (head === '$timestamp') {
+      if (args.length === 0) {
+        return Math.floor(Date.now() / 1000).toString();
+      }
+      if (args.length !== 2) return match;
+      const offset = _rpParseStrictInt(args[0]);
+      if (offset === undefined) return match;
+      const unit = args[1];
+      const dt = _rpApplyTimestampOffset(Date.now(), offset, unit);
+      if (dt === null) return match;
+      return Math.floor(dt / 1000).toString();
+    }
+    if (head === '$datetime') return new Date().toISOString().replace(/Z$/, '+00:00');
+    if (head === '$uuid' || head === '$guid') return _rpUuidV4();
+    if (head === '$randomInt') {
+      const parsedMin = args[0] !== undefined ? _rpParseStrictInt(args[0]) : undefined;
+      const parsedMax = args[1] !== undefined ? _rpParseStrictInt(args[1]) : undefined;
+      const min = parsedMin !== undefined ? parsedMin : 0;
+      const max = parsedMax !== undefined ? parsedMax : 10000;
+      if (max <= min) return min.toString();
+      return (Math.floor(Math.random() * (max - min)) + min).toString();
+    }
+    if (head === '$processEnv' || head === '$localHostname') return match;
+    if (tokens.length === 1 && Object.prototype.hasOwnProperty.call(merged, head)) return merged[head];
+    return match;
   });
 }
 
@@ -1644,23 +1709,26 @@ function renderVariableChips(text) {
   const merged = buildMergedVarsObject();
   let html = '';
   let i = 0;
-  const re = /\{\{([\w$]+)\}\}/g;
+  const re = /\{\{([^{}]+)\}\}/g;
   let m;
   const seen = new Set();
   const varList = [];
   while ((m = re.exec(text)) !== null) {
     if (m.index > i) html += escapeOverlayHtml(text.slice(i, m.index));
-    const name = m[1];
+    const token = m[1].trim();
+    const name = token.split(/\s+/)[0];
     let resolved;
     let isResolved = true;
     if (name === '$timestamp') resolved = '(generated at run time)';
+    else if (name === '$datetime') resolved = '(ISO datetime at run time)';
     else if (name === '$uuid') resolved = '(random UUID at run time)';
+    else if (name === '$guid') resolved = '(random GUID at run time)';
     else if (name === '$randomInt') resolved = '(random int at run time)';
     else if (Object.prototype.hasOwnProperty.call(merged, name)) resolved = merged[name];
     else { resolved = '(undefined)'; isResolved = false; }
-    if (!seen.has(name)) {
-      seen.add(name);
-      varList.push(`{{${name}}} = ${resolved}`);
+    if (!seen.has(token)) {
+      seen.add(token);
+      varList.push(`{{${token}}} = ${resolved}`);
     }
     const cls = isResolved ? 'hl-var' : 'hl-var unresolved';
     html += `<span class="${cls}">${escapeOverlayHtml(m[0])}</span>`;
@@ -6876,7 +6944,7 @@ function renderEnvPanel() {
   const builtins = document.createElement('div');
   builtins.className = 'env-builtins-hint';
   builtins.style.cssText = 'font-size:10px;color:var(--text-muted);padding:6px 4px 0 4px;border-top:1px dashed var(--border);margin-top:6px;';
-  builtins.innerHTML = 'Built-ins: <code>{{$timestamp}}</code> <code>{{$uuid}}</code> <code>{{$randomInt}}</code>';
+  builtins.innerHTML = 'Built-ins: <code>{{$timestamp}}</code> <code>{{$datetime}}</code> <code>{{$uuid}}</code> <code>{{$guid}}</code> <code>{{$randomInt}}</code>';
   envList.appendChild(builtins);
 
   // Env vars just changed — refresh tooltips on every {{var}} chip in URL,
@@ -7544,7 +7612,9 @@ function collectAllVarNames() {
   });
   // Built-ins
   vars.set('$timestamp', '(Unix timestamp)');
+  vars.set('$datetime', '(ISO 8601 datetime)');
   vars.set('$uuid', '(Random UUID v4)');
+  vars.set('$guid', '(Random UUID v4)');
   vars.set('$randomInt', '(Random 0–9999)');
   return Array.from(vars.entries()).map(([name, value]) => ({ name, value }))
     .sort((a, b) => a.name.localeCompare(b.name));
