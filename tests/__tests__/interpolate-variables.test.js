@@ -13,12 +13,63 @@ function extractFunction(name) {
   const match = re.exec(jsSource);
   if (!match) throw new Error(`Function "${name}" not found in app.js`);
 
-  let depth = 0;
   let start = match.index;
   let i = match.index + match[0].length - 1;
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let inRegex = false;
+  let inRegexClass = false;
   for (; i < jsSource.length; i++) {
-    if (jsSource[i] === '{') depth++;
-    else if (jsSource[i] === '}') {
+    const ch = jsSource[i];
+    const next = jsSource[i + 1];
+    if (inLineComment) {
+      if (ch === '\n') inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (ch === '*' && next === '/') {
+        inBlockComment = false;
+        i++;
+      }
+      continue;
+    }
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (inRegex) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '[') inRegexClass = true;
+      else if (ch === ']') inRegexClass = false;
+      else if (ch === '/' && !inRegexClass) inRegex = false;
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      inLineComment = true;
+      i++;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      inBlockComment = true;
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '/' && ['(', '=', ':', ',', '[', '!', '?'].includes(previousNonWhitespace(jsSource, i))) {
+      inRegex = true;
+      continue;
+    }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
       depth--;
       if (depth === 0) break;
     }
@@ -26,27 +77,29 @@ function extractFunction(name) {
   return jsSource.slice(start, i + 1);
 }
 
-function evalFunctions(code, exportName) {
-  const wrapped = `(function() { ${code}; return ${exportName}; })()`;
-  const script = new vm.Script(wrapped, { filename: 'interpolate-variables-eval.js' });
-  return script.runInNewContext({ console, JSON, RegExp, Map, Set, Array, Object, parseInt, parseFloat });
+function previousNonWhitespace(source, index) {
+  for (let i = index - 1; i >= 0; i--) {
+    if (!/\s/.test(source[i])) return source[i];
+  }
+  return '';
 }
 
-function loadInterpolateVariables() {
-  const uuidSource = extractFunction('_rpUuidV4');
-  const strictIntSource = extractFunction('_rpParseStrictInt');
-  const timestampOffsetSource = extractFunction('_rpApplyTimestampOffset');
-  const interpolateSource = extractFunction('interpolateVariables');
-  const wrapped = `(function() { ${uuidSource}\n${strictIntSource}\n${timestampOffsetSource}\n${interpolateSource}; return interpolateVariables; })()`;
+function evalFunctions(code, exportName) {
+  const wrapped = `(function() { ${code}; return ${exportName}; })()`;
   const script = new vm.Script(wrapped, { filename: 'interpolate-variables-eval.js' });
   return script.runInNewContext({
     Array,
     Date,
+    JSON,
+    Map,
     Math,
     Number,
     Object,
+    RegExp,
+    Set,
     Uint8Array,
     console,
+    parseFloat,
     parseInt,
     crypto: {
       randomUUID: () => '11111111-2222-4333-8444-555555555555',
@@ -55,10 +108,27 @@ function loadInterpolateVariables() {
         return a;
       },
     },
-    buildMergedVarsObject: () => ({
-      name: 'Alice',
-    }),
   });
+}
+
+function evalWithMerged(mergedFn) {
+  const uuidSource = extractFunction('_rpUuidV4');
+  const strictIntSource = extractFunction('_rpParseStrictInt');
+  const timestampOffsetSource = extractFunction('_rpApplyTimestampOffset');
+  const innerSource = extractFunction('_rpInterpolateInner');
+  const interpolateSource = extractFunction('interpolateVariables');
+  return evalFunctions(
+    `const buildMergedVarsObject = ${mergedFn.toString()};\n${uuidSource}\n${strictIntSource}\n${timestampOffsetSource}\n${innerSource}\n${interpolateSource}`,
+    'interpolateVariables'
+  );
+}
+
+function loadInterpolateVariables() {
+  return evalWithMerged(
+    () => ({
+      name: 'Alice',
+    })
+  );
 }
 
 describe('interpolateVariables', () => {
@@ -269,5 +339,60 @@ describe('renderVariableChips', () => {
     const { html } = renderVariableChips('{{a"b}}');
     expect(html).not.toContain('a"b');
     expect(html).toContain('&quot;');
+  });
+});
+
+describe('interpolateVariables transitive resolution', () => {
+  test('expands user variable containing {{$timestamp}}', () => {
+    const interpolateVariables = evalWithMerged(() => ({ a: '{{$timestamp}}' }));
+    const value = interpolateVariables('{{a}}');
+    const numeric = Number(value);
+    expect(value).toMatch(/^\d+$/);
+    expect(Math.abs(numeric - Math.floor(Date.now() / 1000))).toBeLessThanOrEqual(5);
+  });
+
+  test('expands timestamp range variables transitively', () => {
+    const interpolateVariables = evalWithMerged(() => ({
+      x: '{{$timestamp -2 h}}',
+      y: '{{$timestamp}}',
+    }));
+    const result = interpolateVariables('start={{x}}&end={{y}}');
+    const match = result.match(/^start=(\d+)&end=(\d+)$/);
+    expect(match).not.toBeNull();
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    expect(end - start).toBeGreaterThanOrEqual(7200);
+    expect(end - start).toBeLessThanOrEqual(7205);
+  });
+
+  test('expands chained user variables', () => {
+    const interpolateVariables = evalWithMerged(() => ({
+      a: '{{b}}',
+      b: '{{c}}',
+      c: 'deep',
+    }));
+    expect(interpolateVariables('{{a}}')).toBe('deep');
+  });
+
+  test('terminates on cycles and leaves a visible raw placeholder', () => {
+    const interpolateVariables = evalWithMerged(() => ({
+      a: '{{b}}',
+      b: '{{a}}',
+    }));
+    const result = interpolateVariables('{{a}}');
+    expect(result).toMatch(/\{\{[ab]\}\}/);
+  });
+
+  test('terminates on self-reference', () => {
+    const interpolateVariables = evalWithMerged(() => ({ a: '{{a}}' }));
+    expect(interpolateVariables('{{a}}')).toBe('{{a}}');
+  });
+
+  test('expands repeated top-level references independently', () => {
+    const interpolateVariables = evalWithMerged(() => ({ a: '{{$timestamp}}' }));
+    const parts = interpolateVariables('{{a}} {{a}}').split(' ');
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toMatch(/^\d+$/);
+    expect(parts[1]).toMatch(/^\d+$/);
   });
 });

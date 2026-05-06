@@ -1647,6 +1647,10 @@ function _rpApplyTimestampOffset(nowMs, offset, unit) {
 function interpolateVariables(str) {
   if (!str) return str;
   const merged = buildMergedVarsObject();
+  return _rpInterpolateInner(str, merged, new Set());
+}
+
+function _rpInterpolateInner(str, merged, visited) {
   return str.replace(/\{\{([^{}]+)\}\}/g, (match, inner) => {
     const tokens = inner.trim().split(/\s+/);
     const head = tokens[0];
@@ -1674,7 +1678,16 @@ function interpolateVariables(str) {
       return (Math.floor(Math.random() * (max - min)) + min).toString();
     }
     if (head === '$processEnv' || head === '$localHostname') return match;
-    if (tokens.length === 1 && Object.prototype.hasOwnProperty.call(merged, head)) return merged[head];
+    if (tokens.length === 1 && Object.prototype.hasOwnProperty.call(merged, head)) {
+      const v = merged[head];
+      if (typeof v !== 'string') return String(v);
+      if (v.indexOf('{{') === -1) return v;
+      if (visited.has(head)) return v;
+      visited.add(head);
+      const expanded = _rpInterpolateInner(v, merged, visited);
+      visited.delete(head);
+      return expanded;
+    }
     return match;
   });
 }
@@ -1724,7 +1737,13 @@ function renderVariableChips(text) {
     else if (name === '$uuid') resolved = '(random UUID at run time)';
     else if (name === '$guid') resolved = '(random GUID at run time)';
     else if (name === '$randomInt') resolved = '(random int at run time)';
-    else if (Object.prototype.hasOwnProperty.call(merged, name)) resolved = merged[name];
+    else if (Object.prototype.hasOwnProperty.call(merged, name)) {
+      const raw = merged[name];
+      // If the merged value still has placeholders, expand transitively for tooltip clarity.
+      resolved = (typeof raw === 'string' && raw.indexOf('{{') !== -1)
+        ? interpolateVariables(raw)
+        : raw;
+    }
     else { resolved = '(undefined)'; isResolved = false; }
     if (!seen.has(token)) {
       seen.add(token);
