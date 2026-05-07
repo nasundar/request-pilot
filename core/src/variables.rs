@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use regex::Regex;
 
@@ -69,6 +69,9 @@ impl VariableStore {
     /// | Built-in                         | Value                                   |
     /// |----------------------------------|-----------------------------------------|
     /// | `{{$timestamp}}`                 | Unix epoch seconds                      |
+    /// | `{{$timestamp <offset> <unit>}}` | Unix epoch seconds with offset, e.g.    |
+    /// |                                  | `-1 h` (minus 1 hour). Units: y, M, w,  |
+    /// |                                  | d, h, m, s, ms (M=month, m=minute).     |
     /// | `{{$datetime}}`                  | Current UTC time, ISO 8601              |
     /// | `{{$uuid}}` / `{{$guid}}`        | UUIDv4                                  |
     /// | `{{$randomInt}}`                 | Random int 0..9999                      |
@@ -79,13 +82,113 @@ impl VariableStore {
     ///
     /// Leaves unresolved variables as-is (e.g. `{{missing}}` stays `{{missing}}`).
     pub fn interpolate(&self, text: &str) -> String {
+        let mut visited = HashSet::new();
+        self.interpolate_inner(text, &mut visited)
+    }
+
+    fn interpolate_inner(&self, text: &str, visited: &mut HashSet<String>) -> String {
         let re = Regex::new(r"\{\{\s*([^{}]+?)\s*\}\}").unwrap();
         re.replace_all(text, |caps: &regex::Captures| {
             let inner = caps[1].trim();
-            resolve_token(inner, &self.variables, &self.responses)
+            self.resolve_token(inner, visited)
                 .unwrap_or_else(|| format!("{{{{{}}}}}", inner))
         })
         .to_string()
+    }
+
+    /// Resolve a single `{{...}}` token's inner text. Returns `None` if the token
+    /// is unknown / unresolvable.
+    fn resolve_token(&self, inner: &str, visited: &mut HashSet<String>) -> Option<String> {
+        // Response-chain reference: `<name>.response.<kind>[.<path>]`
+        if let Some(resolved) = resolve_response_chain(inner, &self.responses) {
+            return Some(resolved);
+        }
+
+        // Built-in handlers.
+        let mut parts = inner.split_whitespace();
+        let head = parts.next()?;
+        match head {
+            "$timestamp" => {
+                let now = chrono::Utc::now();
+                let offset_str = parts.next();
+                let unit = parts.next();
+                let dt = match (offset_str, unit) {
+                    (None, None) => now,
+                    (Some(off_s), Some(u)) => {
+                        let offset: i64 = off_s.parse().ok()?;
+                        apply_timestamp_offset(now, offset, u)?
+                    }
+                    _ => return None,
+                };
+                Some(dt.timestamp().to_string())
+            }
+            "$datetime" => Some(chrono::Utc::now().to_rfc3339()),
+            "$uuid" | "$guid" => Some(uuid::Uuid::new_v4().to_string()),
+            "$randomInt" => {
+                use rand::Rng;
+                let mut rng = rand::thread_rng();
+                let min: i64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                let max: i64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(10_000);
+                if max <= min {
+                    return Some(min.to_string());
+                }
+                Some(rng.gen_range(min..max).to_string())
+            }
+            "$processEnv" => {
+                let name = parts.next()?;
+                std::env::var(name).ok()
+            }
+            "$localHostname" => hostname::get().ok().and_then(|h| h.into_string().ok()),
+            _ => {
+                // User variable: must be a single identifier (no spaces/args).
+                if parts.next().is_some() {
+                    return None;
+                }
+                // 1) Direct lookup. Handles plain names AND variables that
+                //    contain a literal `.` in their name (e.g. defined as
+                //    `@my.var = ...`).
+                if let Some(v) = self.variables.get(head) {
+                    if v.contains("{{") {
+                        if visited.contains(head) {
+                            return Some(v.clone());
+                        }
+                        visited.insert(head.to_string());
+                        let expanded = self.interpolate_inner(v, visited);
+                        visited.remove(head);
+                        return Some(expanded);
+                    }
+                    return Some(v.clone());
+                }
+                // 2) Dotted-path / bracket-path access on a JSON-typed variable.
+                //    Split into root + suffix at the first `.` or `[`; if the
+                //    root resolves to a JSON object/array, walk the suffix via
+                //    the existing JSONPath-lite navigator. Used by `# @@for` so
+                //    tests can write `{{user.id}}` (object) or `{{users[0].id}}`
+                //    (array) inside the loop body. Only attempted when the
+                //    token contains `.` or `[`; preserves existing behavior
+                //    for plain identifiers.
+                let split_idx = head.find(|c: char| c == '.' || c == '[');
+                if let Some(idx) = split_idx {
+                    let root = &head[..idx];
+                    let split_char = head.as_bytes()[idx];
+                    // For `.` separator we strip it; for `[` we keep it because
+                    // resolve_json_path expects bracket form to remain intact.
+                    let suffix = if split_char == b'.' {
+                        &head[idx + 1..]
+                    } else {
+                        &head[idx..]
+                    };
+                    if !root.is_empty() && !suffix.is_empty() {
+                        if let Some(raw) = self.variables.get(root) {
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw) {
+                                return resolve_json_path(&json, suffix);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+        }
     }
 
     pub fn to_map(&self) -> HashMap<String, String> {
@@ -107,7 +210,8 @@ impl VariableStore {
         let mut unresolved = Vec::new();
         for caps in re.captures_iter(text) {
             let inner = caps[1].trim();
-            if resolve_token(inner, &self.variables, &self.responses).is_some() {
+            let mut visited = HashSet::new();
+            if self.resolve_token(inner, &mut visited).is_some() {
                 continue;
             }
             let head = inner.split_whitespace().next().unwrap_or("");
@@ -134,88 +238,39 @@ impl VariableStore {
     }
 }
 
-/// Resolve a single `{{...}}` token's inner text. Returns `None` if the token
-/// is unknown / unresolvable.
-fn resolve_token(
-    inner: &str,
-    vars: &HashMap<String, String>,
-    responses: &HashMap<String, CapturedResponse>,
-) -> Option<String> {
-    // Response-chain reference: `<name>.response.<kind>[.<path>]`
-    if let Some(resolved) = resolve_response_chain(inner, responses) {
-        return Some(resolved);
+fn apply_timestamp_offset(
+    now: chrono::DateTime<chrono::Utc>,
+    offset: i64,
+    unit: &str,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::Duration;
+    match unit {
+        "y" => {
+            let months = i64::from(12).checked_mul(offset)?;
+            apply_months(now, months)
+        }
+        "M" => apply_months(now, offset),
+        "w" => now.checked_add_signed(Duration::try_weeks(offset)?),
+        "d" => now.checked_add_signed(Duration::try_days(offset)?),
+        "h" => now.checked_add_signed(Duration::try_hours(offset)?),
+        "m" => now.checked_add_signed(Duration::try_minutes(offset)?),
+        "s" => now.checked_add_signed(Duration::try_seconds(offset)?),
+        "ms" => now.checked_add_signed(Duration::try_milliseconds(offset)?),
+        _ => None,
     }
+}
 
-    // Built-in handlers.
-    let mut parts = inner.split_whitespace();
-    let head = parts.next()?;
-    match head {
-        "$timestamp" => Some(chrono::Utc::now().timestamp().to_string()),
-        "$datetime" => Some(chrono::Utc::now().to_rfc3339()),
-        "$uuid" | "$guid" => Some(uuid::Uuid::new_v4().to_string()),
-        "$randomInt" => {
-            use rand::Rng;
-            let mut rng = rand::thread_rng();
-            let min: i64 = parts
-                .next()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            let max: i64 = parts
-                .next()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(10_000);
-            if max <= min {
-                return Some(min.to_string());
-            }
-            Some(rng.gen_range(min..max).to_string())
-        }
-        "$processEnv" => {
-            let name = parts.next()?;
-            std::env::var(name).ok()
-        }
-        "$localHostname" => hostname::get()
-            .ok()
-            .and_then(|h| h.into_string().ok()),
-        _ => {
-            // User variable: must be a single identifier (no spaces/args).
-            if parts.next().is_some() {
-                return None;
-            }
-            // 1) Direct lookup. Handles plain names AND variables that
-            //    contain a literal `.` in their name (e.g. defined as
-            //    `@my.var = ...`).
-            if let Some(v) = vars.get(head) {
-                return Some(v.clone());
-            }
-            // 2) Dotted-path / bracket-path access on a JSON-typed variable.
-            //    Split into root + suffix at the first `.` or `[`; if the
-            //    root resolves to a JSON object/array, walk the suffix via
-            //    the existing JSONPath-lite navigator. Used by `# @@for` so
-            //    tests can write `{{user.id}}` (object) or `{{users[0].id}}`
-            //    (array) inside the loop body. Only attempted when the
-            //    token contains `.` or `[`; preserves existing behavior
-            //    for plain identifiers.
-            let split_idx = head.find(|c: char| c == '.' || c == '[');
-            if let Some(idx) = split_idx {
-                let root = &head[..idx];
-                let split_char = head.as_bytes()[idx];
-                // For `.` separator we strip it; for `[` we keep it because
-                // resolve_json_path expects bracket form to remain intact.
-                let suffix = if split_char == b'.' {
-                    &head[idx + 1..]
-                } else {
-                    &head[idx..]
-                };
-                if !root.is_empty() && !suffix.is_empty() {
-                    if let Some(raw) = vars.get(root) {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw) {
-                            return resolve_json_path(&json, suffix);
-                        }
-                    }
-                }
-            }
-            None
-        }
+fn apply_months(
+    dt: chrono::DateTime<chrono::Utc>,
+    months: i64,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::Months;
+    if months >= 0 {
+        let m: u32 = u32::try_from(months).ok()?;
+        dt.checked_add_months(Months::new(m))
+    } else {
+        let m: u32 = u32::try_from(months.checked_neg()?).ok()?;
+        dt.checked_sub_months(Months::new(m))
     }
 }
 
@@ -366,7 +421,111 @@ mod tests {
     fn builtin_timestamp_is_numeric() {
         let store = VariableStore::new();
         let result = store.interpolate("{{$timestamp}}");
-        assert!(result.parse::<i64>().is_ok(), "timestamp should be a number: {}", result);
+        assert!(
+            result.parse::<i64>().is_ok(),
+            "timestamp should be a number: {}",
+            result
+        );
+    }
+
+    fn interpolate_timestamp(token: &str) -> i64 {
+        let store = VariableStore::new();
+        store
+            .interpolate(token)
+            .parse::<i64>()
+            .expect("timestamp should parse as i64")
+    }
+
+    fn assert_timestamp_approx(token: &str, offset_seconds: i64) {
+        let result = interpolate_timestamp(token);
+        let expected = chrono::Utc::now().timestamp() + offset_seconds;
+        let diff = (result - expected).abs();
+        assert!(
+            diff <= 5,
+            "{token} produced {result}, expected approximately {expected} (diff {diff}s)"
+        );
+    }
+
+    #[test]
+    fn builtin_timestamp_zero_seconds_offset_is_now() {
+        assert_timestamp_approx("{{$timestamp 0 s}}", 0);
+    }
+
+    #[test]
+    fn builtin_timestamp_negative_hour_offset() {
+        assert_timestamp_approx("{{$timestamp -1 h}}", -3600);
+    }
+
+    #[test]
+    fn builtin_timestamp_positive_minute_offset() {
+        assert_timestamp_approx("{{$timestamp 30 m}}", 1800);
+    }
+
+    #[test]
+    fn builtin_timestamp_positive_day_offset() {
+        assert_timestamp_approx("{{$timestamp 2 d}}", 172800);
+    }
+
+    #[test]
+    fn builtin_timestamp_positive_week_offset() {
+        assert_timestamp_approx("{{$timestamp 1 w}}", 604800);
+    }
+
+    #[test]
+    fn builtin_timestamp_positive_month_offset_is_calendar_correct() {
+        let result = interpolate_timestamp("{{$timestamp 1 M}}");
+        let diff = result - chrono::Utc::now().timestamp();
+        let min = 28 * 24 * 60 * 60 - 5;
+        let max = 31 * 24 * 60 * 60 + 5;
+        assert!(
+            (min..=max).contains(&diff),
+            "expected 1 month offset to be 28-31 days, got {diff}s"
+        );
+    }
+
+    #[test]
+    fn builtin_timestamp_negative_year_offset_is_calendar_correct() {
+        let result = interpolate_timestamp("{{$timestamp -1 y}}");
+        let diff = chrono::Utc::now().timestamp() - result;
+        let min = 365 * 24 * 60 * 60 - 5;
+        let max = 366 * 24 * 60 * 60 + 5;
+        assert!(
+            (min..=max).contains(&diff),
+            "expected -1 year offset to be 365-366 days, got {diff}s"
+        );
+    }
+
+    #[test]
+    fn builtin_timestamp_millisecond_offset_truncates_to_seconds() {
+        assert_timestamp_approx("{{$timestamp 5 ms}}", 0);
+    }
+
+    #[test]
+    fn builtin_timestamp_unknown_unit_is_unresolved() {
+        let store = VariableStore::new();
+        let result = store.interpolate("{{$timestamp -1 X}}");
+        assert_eq!(result, "{{$timestamp -1 X}}");
+    }
+
+    #[test]
+    fn builtin_timestamp_invalid_offset_is_unresolved() {
+        let store = VariableStore::new();
+        let result = store.interpolate("{{$timestamp abc h}}");
+        assert_eq!(result, "{{$timestamp abc h}}");
+    }
+
+    #[test]
+    fn builtin_timestamp_requires_offset_and_unit() {
+        let store = VariableStore::new();
+        let result = store.interpolate("{{$timestamp -1}}");
+        assert_eq!(result, "{{$timestamp -1}}");
+    }
+
+    #[test]
+    fn find_unresolved_skips_timestamp_with_offset() {
+        let store = VariableStore::new();
+        let unresolved = store.find_unresolved("{{$timestamp -1 h}}");
+        assert!(unresolved.is_empty());
     }
 
     #[test]
@@ -382,7 +541,11 @@ mod tests {
         let store = VariableStore::new();
         let result = store.interpolate("{{$randomInt}}");
         let num: i64 = result.parse().expect("randomInt should be a number");
-        assert!((0..10000).contains(&num), "randomInt should be 0-9999: {}", num);
+        assert!(
+            (0..10000).contains(&num),
+            "randomInt should be 0-9999: {}",
+            num
+        );
     }
 
     #[test]
@@ -445,6 +608,94 @@ mod tests {
         assert!(unresolved.is_empty());
     }
 
+    #[test]
+    fn transitive_resolves_builtin_in_user_var() {
+        let store = VariableStore::from_pairs(&[("query_time".into(), "{{$timestamp}}".into())]);
+        let result = store.interpolate("{{query_time}}");
+        let n: i64 = result.parse().expect("should be a numeric Unix timestamp");
+        let now = chrono::Utc::now().timestamp();
+        assert!((n - now).abs() < 5, "expected ≈ now, got {}", n);
+    }
+
+    #[test]
+    fn transitive_resolves_timestamp_offset_in_user_var() {
+        let store = VariableStore::from_pairs(&[
+            ("range_start_short".into(), "{{$timestamp -2 h}}".into()),
+            ("range_end".into(), "{{$timestamp}}".into()),
+        ]);
+        let body = "start={{range_start_short}}&end={{range_end}}";
+        let result = store.interpolate(body);
+        let re = regex::Regex::new(r"start=(\d+)&end=(\d+)").unwrap();
+        let caps = re
+            .captures(&result)
+            .unwrap_or_else(|| panic!("expected start/end resolved, got: {}", result));
+        let start: i64 = caps[1].parse().unwrap();
+        let end: i64 = caps[2].parse().unwrap();
+        let diff = end - start;
+        // Allow ±2 seconds slop (now() called twice across the recursion).
+        assert!(
+            diff >= 7198 && diff <= 7202,
+            "expected diff ≈ 7200, got {}",
+            diff
+        );
+    }
+
+    #[test]
+    fn transitive_resolves_chain_of_user_vars() {
+        let store = VariableStore::from_pairs(&[
+            ("a".into(), "{{b}}".into()),
+            ("b".into(), "{{c}}".into()),
+            ("c".into(), "deep".into()),
+        ]);
+        assert_eq!(store.interpolate("{{a}}"), "deep");
+    }
+
+    #[test]
+    fn transitive_handles_cycle_without_infinite_loop() {
+        let store = VariableStore::from_pairs(&[
+            ("a".into(), "{{b}}".into()),
+            ("b".into(), "{{a}}".into()),
+        ]);
+        // Should terminate. Result is the raw cycle-break value, prefixed by "{{a}}" or "{{b}}".
+        let out = store.interpolate("{{a}}");
+        // Just assert it terminates and contains the literal placeholder.
+        assert!(
+            out.contains("{{") && out.contains("}}"),
+            "expected literal placeholder in cycle, got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn transitive_self_reference_terminates() {
+        let store = VariableStore::from_pairs(&[("a".into(), "{{a}}".into())]);
+        let out = store.interpolate("{{a}}");
+        assert!(out.contains("{{a}}"), "expected raw self-ref, got: {}", out);
+    }
+
+    #[test]
+    fn transitive_uses_fresh_now_per_top_level_reference() {
+        let store = VariableStore::from_pairs(&[("ts".into(), "{{$timestamp}}".into())]);
+        let out = store.interpolate("{{ts}} {{ts}}");
+        let parts: Vec<&str> = out.split_whitespace().collect();
+        assert_eq!(parts.len(), 2);
+        let a: i64 = parts[0].parse().unwrap();
+        let b: i64 = parts[1].parse().unwrap();
+        // Both should be ≈ now; not strictly required to differ.
+        assert!((a - b).abs() <= 1);
+    }
+
+    #[test]
+    fn find_unresolved_is_empty_for_transitive_user_var() {
+        let store = VariableStore::from_pairs(&[("query_time".into(), "{{$timestamp}}".into())]);
+        let unresolved = store.find_unresolved("{{query_time}}");
+        assert!(
+            unresolved.is_empty(),
+            "expected no unresolved, got {:?}",
+            unresolved
+        );
+    }
+
     // ── Extended built-ins (REST Client compatible) ──
 
     #[test]
@@ -460,8 +711,16 @@ mod tests {
         let store = VariableStore::new();
         let result = store.interpolate("{{$datetime}}");
         // RFC 3339 sample: "2026-04-23T16:55:29.147Z" or "...+00:00"
-        assert!(result.contains('T'), "should contain T separator: {}", result);
-        assert!(result.starts_with("20"), "should start with current century: {}", result);
+        assert!(
+            result.contains('T'),
+            "should contain T separator: {}",
+            result
+        );
+        assert!(
+            result.starts_with("20"),
+            "should start with current century: {}",
+            result
+        );
     }
 
     #[test]
@@ -487,7 +746,11 @@ mod tests {
     fn builtin_process_env_missing_left_as_is() {
         let store = VariableStore::new();
         let result = store.interpolate("{{$processEnv DEFINITELY_MISSING_VAR_XYZ}}");
-        assert!(result.contains("$processEnv"), "unresolved should be preserved: {}", result);
+        assert!(
+            result.contains("$processEnv"),
+            "unresolved should be preserved: {}",
+            result
+        );
     }
 
     #[test]
@@ -613,7 +876,10 @@ mod tests {
     #[test]
     fn dotted_access_on_nested_json_object() {
         let mut store = VariableStore::new();
-        store.set("user", r#"{"id":"u1","address":{"city":"Seattle","zip":"98101"}}"#);
+        store.set(
+            "user",
+            r#"{"id":"u1","address":{"city":"Seattle","zip":"98101"}}"#,
+        );
         assert_eq!(store.interpolate("{{user.address.city}}"), "Seattle");
         assert_eq!(store.interpolate("{{user.address.zip}}"), "98101");
     }
