@@ -1109,6 +1109,13 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
             if let Some(assertion) = parse_assertion_directive(rest) {
                 if current_step_name.is_some() && !assertion.left.starts_with("$diff.") {
                     step_assertions.push(assertion);
+                } else if assertion.left.starts_with("$diff.") {
+                    // V1.3: route to current diff pair, or buffer until first pair.
+                    if let Some(idx) = current_diff_idx {
+                        diff_directives[idx].assertions.push(assertion);
+                    } else {
+                        pre_diff_buffered.push(assertion);
+                    }
                 } else {
                     assertions.push(assertion);
                 }
@@ -1182,6 +1189,19 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
                 assertions: step_assertions,
                 extracts: step_extracts,
             });
+        }
+    }
+
+    // V1.3: flush pre-`# @@diff` buffered `$diff.*` onto first pair, or error.
+    if !pre_diff_buffered.is_empty() {
+        if let Some(first) = diff_directives.first_mut() {
+            let mut buf = std::mem::take(&mut pre_diff_buffered);
+            buf.append(&mut first.assertions);
+            first.assertions = buf;
+        } else {
+            errors.push(
+                "`$diff.*` assertions present but no `# @@diff` directive declared".to_string(),
+            );
         }
     }
 
@@ -1506,14 +1526,22 @@ pub fn generate_http_content(suite: &TestSuite) -> String {
                 }
             }
 
-            // Diff directives — emit one `# @@diff a b` per pair so
-            // multi-diff blocks roundtrip through generate_http without
-            // collapsing back to a single pair.
+            // V1.3: emit `# @@diff a b [allow_mismatch]` then per-pair `$diff.*`.
             for diff in block.effective_diffs() {
-                output.push_str(&format!("# @@diff {} {}\n", diff.step_a, diff.step_b));
+                output.push_str(&format!("# @@diff {} {}", diff.step_a, diff.step_b));
+                if diff.allow_mismatch {
+                    output.push_str(" allow_mismatch");
+                }
+                output.push('\n');
+                for assertion in &diff.assertions {
+                    output.push_str(&format!(
+                        "# @@assert {} {} {}\n",
+                        assertion.left, assertion.operator, assertion.right
+                    ));
+                }
             }
 
-            // Block-level assertions (comparison assertions)
+            // Legacy block-level assertions (pre-V1.3 only).
             for assertion in &block.assertions {
                 output.push_str(&format!(
                     "# @@assert {} {} {}\n",
@@ -3092,9 +3120,10 @@ Authorization: Bearer token123
         assert_eq!(block.diffs[0].step_a, "baseline");
         assert_eq!(block.diffs[0].step_b, "candidate");
         assert_eq!(block.effective_diffs().len(), 1);
-        // Block-level assertions ($diff.*)
-        assert_eq!(block.assertions.len(), 1);
-        assert_eq!(block.assertions[0].left, "$diff.match");
+        // V1.3: `$diff.*` assertions now route per-pair under `diffs[i].assertions`.
+        assert_eq!(block.assertions.len(), 0);
+        assert_eq!(block.diffs[0].assertions.len(), 1);
+        assert_eq!(block.diffs[0].assertions[0].left, "$diff.match");
     }
 
     #[test]
@@ -3633,10 +3662,11 @@ GET https://api.example.com/v2
         // Step-level assertions (non $diff.*)
         assert_eq!(blk.steps[0].assertions.len(), 1, "baseline has 1 step assertion");
         assert_eq!(blk.steps[1].assertions.len(), 2, "candidate has 2 step assertions");
-        // Block-level assertions ($diff.*)
-        assert_eq!(blk.assertions.len(), 2, "two block-level diff assertions");
-        assert!(blk.assertions[0].left.starts_with("$diff."));
-        assert!(blk.assertions[1].left.starts_with("$diff."));
+        // V1.3: `$diff.*` assertions now route per-pair to `diffs[0].assertions`.
+        assert_eq!(blk.assertions.len(), 0, "block-level assertions empty after per-pair routing");
+        assert_eq!(blk.diffs[0].assertions.len(), 2, "two per-pair $diff.* assertions");
+        assert!(blk.diffs[0].assertions[0].left.starts_with("$diff."));
+        assert!(blk.diffs[0].assertions[1].left.starts_with("$diff."));
     }
 
     #[test]
@@ -4629,6 +4659,146 @@ GET https://api.example.com/{{x}}
         let suite2 = parse_test_suite(&regen);
         assert_eq!(suite1.parallel, suite2.parallel);
         assert_eq!(suite2.parallel, Some(7));
+    }
+
+    // ─── Feature 3: per-pair `$diff.*` assertion routing ───────────────
+
+    #[test]
+    fn f3_diff_assertions_route_to_their_pair() {
+        let input = r#"
+### @@compare Routes
+# @@step a
+GET https://api.example.com/a
+
+# @@step b
+GET https://api.example.com/b
+
+# @@step c
+GET https://api.example.com/c
+
+# @@diff a b
+# @@assert $diff.changed_count == 0
+# @@diff a c
+# @@assert $diff.changed_count == 1
+"#;
+        let suite = parse_test_suite(input);
+        let blk = &suite.blocks[0];
+        assert_eq!(blk.diffs.len(), 2);
+        assert_eq!(blk.diffs[0].assertions.len(), 1);
+        assert_eq!(blk.diffs[0].assertions[0].right, "0");
+        assert_eq!(blk.diffs[1].assertions.len(), 1);
+        assert_eq!(blk.diffs[1].assertions[0].right, "1");
+        assert_eq!(blk.assertions.len(), 0);
+    }
+
+    #[test]
+    fn f3_pre_diff_buffered_attaches_to_first_pair() {
+        let input = r#"
+### @@compare Pre
+# @@step a
+GET https://api.example.com/a
+
+# @@step b
+GET https://api.example.com/b
+
+# @@assert $diff.match == true
+# @@diff a b
+"#;
+        let suite = parse_test_suite(input);
+        let blk = &suite.blocks[0];
+        assert_eq!(blk.diffs.len(), 1);
+        assert_eq!(blk.diffs[0].assertions.len(), 1);
+        assert_eq!(blk.diffs[0].assertions[0].left, "$diff.match");
+    }
+
+    #[test]
+    fn f3_pre_diff_buffered_with_no_diff_emits_error() {
+        let input = r#"
+### @@compare NoDiff
+# @@step a
+GET https://api.example.com/a
+
+# @@assert $diff.match == true
+"#;
+        let suite = parse_test_suite(input);
+        let blk = &suite.blocks[0];
+        assert!(
+            blk.errors
+                .iter()
+                .any(|e| e.contains("no `# @@diff` directive declared")),
+            "expected parse error for dangling $diff.*; got {:?}",
+            blk.errors
+        );
+    }
+
+    #[test]
+    fn f3_allow_mismatch_flag_parsed_and_roundtrips() {
+        let input = r#"
+### @@compare Allow
+# @@step a
+GET https://api.example.com/a
+
+# @@step b
+GET https://api.example.com/b
+
+# @@diff a b allow_mismatch
+# @@assert $diff.changed_count < 10
+"#;
+        let suite = parse_test_suite(input);
+        let blk = &suite.blocks[0];
+        assert_eq!(blk.diffs.len(), 1);
+        assert!(blk.diffs[0].allow_mismatch);
+        assert_eq!(blk.diffs[0].assertions.len(), 1);
+        let regen = generate_http_content(&suite);
+        assert!(
+            regen.contains("# @@diff a b allow_mismatch"),
+            "generator should emit allow_mismatch token; got:\n{}",
+            regen
+        );
+        assert!(regen.contains("# @@assert $diff.changed_count < 10"));
+    }
+
+    #[test]
+    fn f3_per_pair_assertions_roundtrip_through_generator() {
+        let input = r#"
+### @@compare Trip
+# @@step a
+GET https://api.example.com/a
+
+# @@step b
+GET https://api.example.com/b
+
+# @@step c
+GET https://api.example.com/c
+
+# @@diff a b
+# @@assert $diff.match == true
+# @@diff a c
+# @@assert $diff.changed_count == 2
+"#;
+        let s1 = parse_test_suite(input);
+        let regen = generate_http_content(&s1);
+        let s2 = parse_test_suite(&regen);
+        let b1 = &s1.blocks[0];
+        let b2 = &s2.blocks[0];
+        assert_eq!(b1.diffs.len(), b2.diffs.len());
+        for (p1, p2) in b1.diffs.iter().zip(b2.diffs.iter()) {
+            assert_eq!(p1.step_a, p2.step_a);
+            assert_eq!(p1.step_b, p2.step_b);
+            assert_eq!(p1.allow_mismatch, p2.allow_mismatch);
+            assert_eq!(p1.assertions.len(), p2.assertions.len());
+        }
+    }
+
+    #[test]
+    fn f3_diffdirective_serde_back_compat() {
+        // Pre-V1.3 JSON shape — `assertions` / `allow_mismatch` absent.
+        let json = r#"{"step_a":"a","step_b":"b"}"#;
+        let dd: DiffDirective = serde_json::from_str(json).expect("must deserialize");
+        assert_eq!(dd.step_a, "a");
+        assert_eq!(dd.step_b, "b");
+        assert!(dd.assertions.is_empty());
+        assert!(!dd.allow_mismatch);
     }
 }
 

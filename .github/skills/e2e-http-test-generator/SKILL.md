@@ -699,6 +699,28 @@ Authorization: Bearer {{access_token}}
 # @@assert $diff.changed_count == 0
 ```
 
+**Multi-diff with per-pair assertions (V1.3+):** a single `@@compare` block may declare any number of `# @@diff` pairs. Each `# @@assert $diff.*` that follows a `# @@diff` attaches to **that pair only**, and the pair's outcome is independent of others. Optional trailing `allow_mismatch` on a `# @@diff` line tolerates body mismatch (explicit `$diff.*` assertions still run).
+
+```http
+### @@test Cross-region parity
+# @@compare
+
+# @@step eastus
+GET {{base_url_eastus}}/api/v1/users/{{user_id}}
+
+# @@step westus
+GET {{base_url_westus}}/api/v1/users/{{user_id}}
+
+# @@step canary
+GET {{base_url_canary}}/api/v1/users/{{user_id}}
+
+# @@diff eastus westus
+# @@assert $diff.changed_count == 0
+
+# @@diff eastus canary allow_mismatch
+# @@assert $diff.similarity >= 0.9
+```
+
 **`$diff` variable reference:**
 
 | Path | Type | Description |
@@ -719,9 +741,11 @@ Authorization: Bearer {{access_token}}
 **Rules:**
 - ``# @@compare` is a modifier on a `@@test` (or `@@setup`/`@@teardown`) block — place it on the line after the block header
 - ``# @@step <name>` defines a named step within the compare block; each step has its own request line, headers, body, assertions, and extracts
-- ``# @@diff <step_a> <step_b>` triggers comparison between two named steps — place it after all steps
+- ``# @@diff <step_a> <step_b> [allow_mismatch]` triggers comparison between two named steps — place it after all steps. Multiple `# @@diff` lines are allowed; each creates an independent pair.
+- ``# @@assert $diff.*` after a `# @@diff` line routes to **that pair only** (V1.3+); assertions before any `# @@diff` line attach to the first pair declared in the block.
+- ``allow_mismatch` on a `# @@diff` line suppresses the implicit body-match check for that pair only — explicit `$diff.*` assertions still run.
 - Steps execute sequentially; each step's `@@assert` and `@@extract` directives evaluate immediately after that step's HTTP request completes
-- Comparison assertions using `$diff.*` paths evaluate after ALL steps complete
+- A pair fails when its explicit assertions fail OR its required body match fails (unless `allow_mismatch`). Other pairs in the same block keep running independently.
 - JSON responses get deep comparison with path-level diffs (e.g., `user.address.city`); non-JSON responses use character-level similarity scoring
 - Use `$diff.similarity >= 0.95` to allow small acceptable drift during incremental migration rollouts
 - Use `$diff.changed_count == 0` for strict parity checks where no field differences are allowed

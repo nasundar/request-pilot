@@ -4406,7 +4406,7 @@ function createBlockItem(file, fileIdx, block, blockIdx) {
       const stepEl = document.createElement('div');
       stepEl.className = 'compare-step-item';
       const sr = br?.step_results?.[si];
-      const stepStatus = sr ? (sr.error ? 'error' : sr.assertion_results?.every(a => a.passed) !== false ? 'passed' : 'failed') : '';
+      const stepStatus = sr ? (sr.error ? 'error' : sr.diff_failed ? 'failed' : sr.assertion_results?.every(a => a.passed) !== false ? 'passed' : 'failed') : '';
       stepEl.innerHTML = `
         <span class="block-status ${stepStatus ? 'status-' + stepStatus : ''}"></span>
         <span class="step-label">${escapeHtml(step.name)}</span>
@@ -5735,16 +5735,51 @@ function renderAssertions(fileIdx, blockIdx) {
       }
 
       if (diff) {
+        // V1.3: per-pair status badge — `pair.passed` reflects implicit
+        // match (or allow_mismatch) AND all per-pair `$diff.*` asserts.
+        const pairPassed = pair.passed !== false;
+        const pairBadge = pairPassed
+          ? `<span class="pair-badge pair-passed">\u2713 Passed</span>`
+          : `<span class="pair-badge pair-failed">\u2717 Failed</span>`;
+        const allowMismatchTag = pair.allow_mismatch
+          ? `<span class="pair-badge pair-allow-mismatch" title="Body mismatch tolerated">allow_mismatch</span>`
+          : '';
+        const matchOK = diff.match_exact || pair.allow_mismatch;
+        const matchLabel = diff.match_exact
+          ? 'Exact Match \u2713'
+          : pair.allow_mismatch
+            ? 'Differences (tolerated)'
+            : 'Differences Found';
         html += `<div class="assertion-group diff-summary-group">
-          <div class="assertion-group-header">\u21C4 Comparison Result${pairLabelSuffix}</div>
+          <div class="assertion-group-header">\u21C4 Comparison Result${pairLabelSuffix} ${pairBadge}${allowMismatchTag}</div>
           <div class="diff-summary">
-            <div class="diff-stat"><span class="diff-label">Match:</span><span class="diff-value ${diff.match_exact ? 'diff-match' : 'diff-mismatch'}">${diff.match_exact ? 'Exact Match \u2713' : 'Differences Found'}</span></div>
+            <div class="diff-stat"><span class="diff-label">Match:</span><span class="diff-value ${matchOK ? 'diff-match' : 'diff-mismatch'}">${matchLabel}</span></div>
             <div class="diff-stat"><span class="diff-label">Similarity:</span><span class="diff-value">${(diff.similarity * 100).toFixed(1)}%</span></div>
             <div class="diff-stat"><span class="diff-label">Type:</span><span class="diff-value">${diff.is_json ? 'JSON' : 'Text'}</span></div>
             ${diff.added_count ? `<div class="diff-stat"><span class="diff-label">Added:</span><span class="diff-value diff-added">+${diff.added_count}</span></div>` : ''}
             ${diff.removed_count ? `<div class="diff-stat"><span class="diff-label">Removed:</span><span class="diff-value diff-removed">-${diff.removed_count}</span></div>` : ''}
             ${diff.changed_count ? `<div class="diff-stat"><span class="diff-label">Changed:</span><span class="diff-value diff-changed">\u0394${diff.changed_count}</span></div>` : ''}
           </div>`;
+
+        // V1.3: per-pair `$diff.*` assertions declared under this # @@diff.
+        const declaredAsserts = (declared && Array.isArray(declared.assertions)) ? declared.assertions : [];
+        const pairAssertResults = Array.isArray(pair.assertion_results) ? pair.assertion_results : [];
+        if (declaredAsserts.length > 0 || pairAssertResults.length > 0) {
+          html += `<div class="pair-assertions"><div class="pair-assertions-header">Pair Assertions</div>`;
+          const renderLen = Math.max(declaredAsserts.length, pairAssertResults.length);
+          for (let ai = 0; ai < renderLen; ai++) {
+            const decl = declaredAsserts[ai];
+            const ar = pairAssertResults[ai];
+            const assertText = decl
+              ? `${decl.left} ${decl.operator} ${decl.right}`
+              : ar?.assertion || '';
+            const passed = ar ? ar.passed : null;
+            const cls = passed === true ? 'passed' : passed === false ? 'failed' : '';
+            const icon = passed === true ? '\u2713' : passed === false ? '\u2717' : '\u26A1';
+            html += `<div class="assertion-row ${cls}"><span class="assert-icon">${icon}</span><span class="assert-text">${escapeHtml(assertText)}</span></div>`;
+          }
+          html += `</div>`;
+        }
 
         if (diff.changed_paths && diff.changed_paths.length > 0) {
           html += `<div class="diff-paths"><div class="diff-paths-header">Changed Paths</div>`;
@@ -6444,8 +6479,25 @@ function showTestResults(passed, failed, skipped, timeMs, blockResults, pendingB
     const viewState = getViewedState(viewedResults, viewKey, hash);
     row.className = `result-detail-row${viewState !== 'unseen' ? ` ${viewState}` : ''}`;
 
-    const assertionCount = br.assertion_results?.length || 0;
-    const assertionPassed = br.assertion_results?.filter(a => a.passed).length || 0;
+    // V1.3: assertion counts include block-level, per-step, and per-pair assertions.
+    let assertionCount = br.assertion_results?.length || 0;
+    let assertionPassed = br.assertion_results?.filter(a => a.passed).length || 0;
+    if (Array.isArray(br.step_results)) {
+      for (const sr of br.step_results) {
+        if (Array.isArray(sr.assertion_results)) {
+          assertionCount += sr.assertion_results.length;
+          assertionPassed += sr.assertion_results.filter(a => a.passed).length;
+        }
+      }
+    }
+    if (Array.isArray(br.diff_results)) {
+      for (const dr of br.diff_results) {
+        if (Array.isArray(dr.assertion_results)) {
+          assertionCount += dr.assertion_results.length;
+          assertionPassed += dr.assertion_results.filter(a => a.passed).length;
+        }
+      }
+    }
     const allPassed = assertionCount > 0 && assertionPassed === assertionCount;
     const assertClass = assertionCount === 0 ? '' : allPassed ? 'all-passed' : 'has-failed';
     const assertText = assertionCount > 0 ? `${assertionPassed}/${assertionCount}` : '';
@@ -6473,7 +6525,26 @@ function showTestResults(passed, failed, skipped, timeMs, blockResults, pendingB
     // Determine failure reason
     let failReasonHtml = '';
     if (br.status === 'failed' || br.status === 'error') {
-      const failedAssertions = br.assertion_results?.filter(a => !a.passed) || [];
+      // V1.3: gather failed assertions from block-level + per-step + per-pair.
+      const failedAssertions = [...(br.assertion_results || []).filter(a => !a.passed)];
+      if (Array.isArray(br.step_results)) {
+        for (const sr of br.step_results) {
+          if (Array.isArray(sr.assertion_results)) {
+            for (const a of sr.assertion_results) {
+              if (!a.passed) failedAssertions.push(a);
+            }
+          }
+        }
+      }
+      if (Array.isArray(br.diff_results)) {
+        for (const dr of br.diff_results) {
+          if (Array.isArray(dr.assertion_results)) {
+            for (const a of dr.assertion_results) {
+              if (!a.passed) failedAssertions.push(a);
+            }
+          }
+        }
+      }
       const hasAssertionFail = failedAssertions.length > 0;
       const hasError = !!br.error;
       const httpStatus = br.response?.status;

@@ -480,7 +480,17 @@ Defines a named step within a `# @compare` block. Each step has its own HTTP req
 
 Triggers a structured comparison between two named steps in a `# @compare` block. After the comparison runs, assertions using `$diff.*` paths evaluate the comparison result.
 
-**Syntax:** `# @diff <step_a> <step_b>`
+**Syntax:** `# @diff <step_a> <step_b> [allow_mismatch]`
+
+A `@compare` block may declare multiple `# @diff` pairs. Each pair runs independently and produces its own outcome. Any `# @assert $diff.*` directive after a `# @diff` line routes to **that pair only** (V1.3+); assertions before the first `# @diff` line attach to the first pair declared in the block. Optional trailing `allow_mismatch` suppresses the implicit body-match check for that pair only — explicit `$diff.*` assertions still run.
+
+```http
+# @diff eastus westus
+# @assert $diff.changed_count == 0
+
+# @diff eastus canary allow_mismatch
+# @assert $diff.similarity >= 0.9
+```
 
 ---
 

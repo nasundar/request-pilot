@@ -231,6 +231,8 @@ GET https://example.com/third
                 extract_results: vec![],
                 time_ms: 1,
                 error: None,
+                diff_failed: false,
+                diff_failed_pairs: Vec::new(),
             }],
             diff_result: None,
             diff_results: Vec::new(),
