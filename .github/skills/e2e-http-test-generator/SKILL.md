@@ -85,12 +85,13 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 # @@dev_auth <scope>               — Azure scope for user auth (used with @mode app)
 # @@auto_run <interval>            — file-level: auto-re-run tests at interval (e.g. 15m, 1h, 1d)
 # @@request-id [header]            — file-level: auto-inject fresh UUIDv4 per request into `header` (default `X-Request-Id`). Block-level override: # @@request-id X-Custom-Id. Opt out: # @@request-id off
+# @@parallel [<N>]                 — file-level (when placed before the first `###` block): cap how many test blocks run concurrently. Default 16, bare = 16, clamped to [1,256]. Also clamps any `# @@for` `# @@parallel` workers.
 # @@compare                            — enable multi-step comparison mode
 # @@step <name>                        — define a named request step
 # @@diff <step_a> <step_b>             — compare responses of two steps
 # @@assert $diff.match == true          — diff assertion example
 # @@for <iter_var> in <source_var>     — iterate block once per element of `source_var` (a JSON-array variable). Bare var name, NOT `{{source_var}}`. Auto-binds `{{$index}}` (0-based) and `{{$iteration}}` (1-based). For object elements, use dotted paths: `{{iter_var.field}}`. Cannot combine with `@@compare`.
-# @@parallel <N>                        — run `# @@for` iterations concurrently with N workers (default 4 if bare; clamped to [1,32])
+# @@parallel <N>                        — (loop-level, under `# @@for`) run iterations concurrently with N workers (default 4 if bare; clamped to [1,32]; also clamped to file-level cap)
 # @@redact body $.json.path             — scrub a JSON field from recorded bodies (JSONPath: $.foo, $.foo.bar, $.foo[0], $.foo[*])
 # @@redact body /regex/                 — scrub bytes matching a regex from recorded bodies (file- or block-level)
 ```

@@ -4,6 +4,15 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
+tokio::task_local! {
+    /// File-level `# @@parallel <N>` cap propagated into spawned wave
+    /// tasks. Loop blocks (and any future fan-out unit) read this to clamp
+    /// their per-iteration worker count so a loop with `# @@parallel 32`
+    /// inside a file capped at `# @@parallel 4` only runs 4 workers.
+    /// Unset means no clamp is applied (loop uses its own limit).
+    static FILE_PARALLEL_CAP: u32;
+}
+
 /// Shared cancellation flag passed into `run_suite_with_cancel`. The runner
 /// polls this between blocks and at phase boundaries; setting it stops new
 /// work from starting. Teardown still runs so cleanup happens even after a
@@ -205,6 +214,22 @@ pub struct NamedDiffResult {
     pub diff: Option<assertions::DiffResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// V1.3: implicit body-match check on this pair is tolerated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_mismatch: bool,
+    /// V1.3: results of per-pair `$diff.*` assertions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assertion_results: Vec<AssertionResult>,
+    /// V1.3: did the implicit "bodies must match" check pass?
+    #[serde(default = "default_true_diff_pair")]
+    pub required_match_passed: bool,
+    /// V1.3: overall pair outcome (no error, required match, all asserts pass).
+    #[serde(default = "default_true_diff_pair")]
+    pub passed: bool,
+}
+
+fn default_true_diff_pair() -> bool {
+    true
 }
 
 /// Result of executing a single step within a @compare block.
@@ -220,6 +245,12 @@ pub struct StepResult {
     pub extract_results: Vec<ExtractResult>,
     pub time_ms: u64,
     pub error: Option<String>,
+    /// V1.3: true when this step is the candidate side of one or more failing diff pairs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diff_failed: bool,
+    /// V1.3: indices into BlockResult.diff_results of failing pairs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diff_failed_pairs: Vec<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -698,8 +729,15 @@ async fn execute_loop_block(
     let mut any_failed = false;
 
     // Determine concurrency. None or Some(1) => sequential. Some(N>1) =>
-    // parallel via a bounded worker pool.
-    let max_concurrency = fl.parallel.unwrap_or(1).max(1) as usize;
+    // parallel via a bounded worker pool. When the wave scheduler set a
+    // file-level cap via `FILE_PARALLEL_CAP`, clamp loop workers to that
+    // cap too so a `# @@parallel 32` loop inside `# @@parallel 4` only
+    // runs 4 workers (matches the file-level concurrency budget).
+    let loop_parallel = fl.parallel.unwrap_or(1).max(1) as usize;
+    let max_concurrency = match FILE_PARALLEL_CAP.try_with(|c| *c as usize) {
+        Ok(cap) => loop_parallel.min(cap.max(1)),
+        Err(_) => loop_parallel,
+    };
 
     if max_concurrency <= 1 || total <= 1 {
         // ── Sequential path ─────────────────────────────────────────
@@ -966,6 +1004,8 @@ async fn execute_compare_block(
                     extract_results,
                     time_ms,
                     error: None,
+                    diff_failed: false,
+                    diff_failed_pairs: Vec::new(),
                 });
             }
             Err(err) => {
@@ -981,20 +1021,18 @@ async fn execute_compare_block(
                     extract_results: Vec::new(),
                     time_ms,
                     error: Some(err),
+                    diff_failed: false,
+                    diff_failed_pairs: Vec::new(),
                 });
             }
         }
     }
 
-    // Compute diff for every `# @@diff a b` pair declared on the block.
-    // Multi-pair blocks render `baseline ⇄ canary` AND `baseline ⇄ eastus`
-    // side-by-side, so each pair gets its own NamedDiffResult. A bad
-    // step reference for one pair (e.g. typo) is recorded as a per-pair
-    // error rather than failing the whole block, so the other pairs
-    // still display their diff.
+    // V1.3: per-pair diff + assertion evaluation.
     let effective = block.effective_diffs();
     let mut diff_results: Vec<NamedDiffResult> = Vec::with_capacity(effective.len());
-    for diff in effective {
+    let mut failing_pair_indices_per_step: HashMap<String, Vec<usize>> = HashMap::new();
+    for (pair_idx, diff) in effective.iter().enumerate() {
         let missing_a = !step_responses.contains_key(&diff.step_a);
         let missing_b = !step_responses.contains_key(&diff.step_b);
         if missing_a || missing_b {
@@ -1013,6 +1051,10 @@ async fn execute_compare_block(
                     "@diff step not found in responses: {}",
                     missing.join(", ")
                 )),
+                allow_mismatch: diff.allow_mismatch,
+                assertion_results: Vec::new(),
+                required_match_passed: false,
+                passed: false,
             });
             continue;
         }
@@ -1024,61 +1066,91 @@ async fn execute_compare_block(
             .get(&diff.step_b)
             .map(|r| r.body.as_str())
             .unwrap_or("");
+        let computed = assertions::compute_diff(body_a, body_b);
+        let required_match_passed = diff.allow_mismatch || computed.match_exact;
+        let pair_assertion_results: Vec<AssertionResult> = diff
+            .assertions
+            .iter()
+            .map(|a| assertions::evaluate_with_diff(a, &computed))
+            .collect();
+        let all_pair_asserts_pass = pair_assertion_results.iter().all(|r| r.passed);
+        let pair_passed = required_match_passed && all_pair_asserts_pass;
+        if !pair_passed {
+            failing_pair_indices_per_step
+                .entry(diff.step_b.clone())
+                .or_default()
+                .push(pair_idx);
+        }
         diff_results.push(NamedDiffResult {
             step_a: diff.step_a.clone(),
             step_b: diff.step_b.clone(),
-            diff: Some(assertions::compute_diff(body_a, body_b)),
+            diff: Some(computed),
             error: None,
+            allow_mismatch: diff.allow_mismatch,
+            assertion_results: pair_assertion_results,
+            required_match_passed,
+            passed: pair_passed,
         });
     }
 
-    // Mirror the first successful pair into the legacy `diff_result`
-    // field so older history viewers and `$diff.*` assertion code see
-    // the primary pair. Errors don't poison the legacy field — if pair
-    // 0 errored but pair 1 succeeded, `diff_result` reflects pair 0
-    // (the parser-declared primary), which matches the new shape.
+    // Attribute failing pairs onto the candidate step (`step_b`).
+    for sr in step_results.iter_mut() {
+        if let Some(indices) = failing_pair_indices_per_step.remove(&sr.name) {
+            sr.diff_failed = !indices.is_empty();
+            sr.diff_failed_pairs = indices;
+        }
+    }
+
     let diff_result: Option<assertions::DiffResult> = diff_results
         .first()
         .and_then(|d| d.diff.clone());
 
-    // Evaluate comparison assertions ($diff.* assertions). These look
-    // at `diff_result` (the primary pair) so existing single-diff tests
-    // keep working unchanged. Multi-diff blocks may also want indexed
-    // assertion paths in the future (e.g. `$diff[1].match`); not added
-    // here.
-    let comparison_assertions: Vec<AssertionResult> = if let Some(ref diff) = diff_result {
+    // Legacy block-level `$diff.*` mirror + synthetic `$diff.match` entries
+    // for non-`allow_mismatch` pairs that failed the implicit body match.
+    let mut comparison_assertions: Vec<AssertionResult> = if let Some(ref diff) = diff_result {
         block
             .assertions
             .iter()
             .map(|a| assertions::evaluate_with_diff(a, diff))
             .collect()
     } else {
-        // Non-diff assertions — evaluate against last step's response if any
         Vec::new()
     };
+    for pair in &diff_results {
+        if pair.error.is_some() || pair.allow_mismatch {
+            continue;
+        }
+        if let Some(d) = pair.diff.as_ref() {
+            if !d.match_exact {
+                comparison_assertions.push(AssertionResult {
+                    assertion: format!("$diff.match {} -> {}", pair.step_a, pair.step_b),
+                    passed: false,
+                    actual: Some("mismatch".to_string()),
+                    expected: Some("match".to_string()),
+                });
+            }
+        }
+    }
 
-    let all_comparison_passed = comparison_assertions.iter().all(|r| r.passed);
+    let all_legacy_block_passed = block
+        .assertions
+        .iter()
+        .zip(comparison_assertions.iter())
+        .all(|(_, r)| r.passed);
+    let all_pairs_passed = diff_results.iter().all(|d| d.passed);
     let any_diff_pair_errored = diff_results.iter().any(|d| d.error.is_some());
     let total_time_ms = block_start.elapsed().as_millis() as u64;
-    let overall_passed = all_step_assertions_passed
-        && all_comparison_passed
-        && !any_diff_pair_errored;
 
-    // Collect all step extracts for propagation to outer scope
     let all_extracts: Vec<ExtractResult> = step_results
         .iter()
         .flat_map(|sr| sr.extract_results.iter().cloned())
         .collect();
 
-    // Use first step's request info for the block-level fields
     let first_step = step_results.first();
 
-    // If every diff pair errored, surface that as a block-level error
-    // string so the UI status bar shows ERROR (matching pre-multi-diff
-    // behavior where a single failed reference returned status="error").
-    let block_error: Option<String> = if !diff_results.is_empty()
-        && diff_results.iter().all(|d| d.error.is_some())
-    {
+    let all_pairs_errored = !diff_results.is_empty()
+        && diff_results.iter().all(|d| d.error.is_some());
+    let block_error: Option<String> = if all_pairs_errored {
         Some(
             diff_results
                 .iter()
@@ -1089,9 +1161,10 @@ async fn execute_compare_block(
     } else {
         None
     };
-    let status = if block_error.is_some() {
+    // V1.3 status: error if any pair errored, failed if anything else broken, else passed.
+    let status = if any_diff_pair_errored {
         "error"
-    } else if overall_passed {
+    } else if all_step_assertions_passed && all_pairs_passed && all_legacy_block_passed {
         "passed"
     } else {
         "failed"
@@ -1176,7 +1249,8 @@ fn record_block_telemetry(
         None => return,
     };
 
-    let assertions: Vec<(String, String, String, bool)> = result
+    // V1.3: flatten block + per-step + per-pair assertions for telemetry.
+    let mut assertions: Vec<(String, String, String, bool)> = result
         .assertion_results
         .iter()
         .map(|a| {
@@ -1188,6 +1262,27 @@ fn record_block_telemetry(
             )
         })
         .collect();
+    for sr in &result.step_results {
+        for a in &sr.assertion_results {
+            assertions.push((
+                format!("[{}] {}", sr.name, a.assertion),
+                a.expected.clone().unwrap_or_default(),
+                a.actual.clone().unwrap_or_default(),
+                a.passed,
+            ));
+        }
+    }
+    for dr in &result.diff_results {
+        let label = format!("{} -> {}", dr.step_a, dr.step_b);
+        for a in &dr.assertion_results {
+            assertions.push((
+                format!("[{}] {}", label, a.assertion),
+                a.expected.clone().unwrap_or_default(),
+                a.actual.clone().unwrap_or_default(),
+                a.passed,
+            ));
+        }
+    }
 
     let extracts: Vec<(String, Option<String>, bool)> = result
         .extract_results
@@ -1231,6 +1326,7 @@ async fn run_tests_with_groups(
     handler: &Option<Arc<dyn ProgressHandler>>,
     extra_headers: &[(String, String)],
     cancel: Option<&CancelToken>,
+    file_parallel: u32,
 ) -> Vec<BlockResult> {
     // Assign each block to a group (blocks without @group get unique pseudo-groups)
     let mut group_blocks: HashMap<String, Vec<(usize, TestBlock)>> = HashMap::new();
@@ -1318,14 +1414,24 @@ async fn run_tests_with_groups(
             break;
         }
 
-        // Collect all blocks from ready groups and spawn them concurrently
+        // Collect all blocks from ready groups and spawn them with a
+        // bounded scheduler. The previous implementation spawned every
+        // ready block at once (`join_set.spawn` per block); on suites
+        // with hundreds of blocks per wave that produced too many
+        // concurrent HTTP requests for the OS / TLS stack to handle.
+        // We now spawn at most `cap` tasks at a time and, each time one
+        // completes, spawn the next queued block — keeping the live
+        // task count <= cap regardless of wave size.
         let var_snapshot = var_store.clone();
         let mut join_set: JoinSet<(usize, BlockResult)> = JoinSet::new();
+        let cap = file_parallel.max(1) as usize;
+        let mut queue: std::collections::VecDeque<(usize, TestBlock)> =
+            std::collections::VecDeque::new();
 
         for group_name in &ready {
             if let Some(blocks) = group_blocks.remove(group_name) {
                 for (idx, block) in blocks {
-                    // Per-block cancel check at spawn time — if cancelled,
+                    // Per-block cancel check at queue time — if cancelled,
                     // synthesize a skipped result instead of dispatching the
                     // request.
                     if cancel.is_some_and(|c| c.is_cancelled()) {
@@ -1334,25 +1440,59 @@ async fn run_tests_with_groups(
                         all_results.push((idx, result));
                         continue;
                     }
-                    let vs = var_snapshot.clone();
-                    let h = handler.clone();
-                    let eh = extra_headers.to_vec();
-                    let cancel_for_task = cancel.cloned();
-                    join_set.spawn(async move {
-                        emit_start(&h, &block.name, &block.block_type);
-                        let result = if block.compare && !block.steps.is_empty() {
-                            execute_compare_block(block, vs, eh).await
-                        } else {
-                            execute_block_or_loop(block, vs, eh, h.clone(), cancel_for_task).await
-                        };
-                        emit_completed(&h, &result);
-                        (idx, result)
-                    });
+                    queue.push_back((idx, block));
                 }
             }
         }
 
-        // Await all parallel tasks in this wave
+        let spawn_one =
+            |join_set: &mut JoinSet<(usize, BlockResult)>,
+             idx: usize,
+             block: TestBlock,
+             var_snapshot: &VariableStore,
+             handler: &Option<Arc<dyn ProgressHandler>>,
+             extra_headers: &[(String, String)],
+             cancel: Option<&CancelToken>| {
+                let vs = var_snapshot.clone();
+                let h = handler.clone();
+                let eh = extra_headers.to_vec();
+                let cancel_for_task = cancel.cloned();
+                let cap_for_task = cap as u32;
+                join_set.spawn(async move {
+                    FILE_PARALLEL_CAP
+                        .scope(cap_for_task, async move {
+                            emit_start(&h, &block.name, &block.block_type);
+                            let result = if block.compare && !block.steps.is_empty() {
+                                execute_compare_block(block, vs, eh).await
+                            } else {
+                                execute_block_or_loop(block, vs, eh, h.clone(), cancel_for_task)
+                                    .await
+                            };
+                            emit_completed(&h, &result);
+                            (idx, result)
+                        })
+                        .await
+                });
+            };
+
+        // Prime up to `cap` tasks.
+        while join_set.len() < cap {
+            if let Some((idx, block)) = queue.pop_front() {
+                spawn_one(
+                    &mut join_set,
+                    idx,
+                    block,
+                    &var_snapshot,
+                    handler,
+                    extra_headers,
+                    cancel,
+                );
+            } else {
+                break;
+            }
+        }
+
+        // Drain: each time one completes, spawn the next queued block.
         while let Some(join_result) = join_set.join_next().await {
             if let Ok((idx, result)) = join_result {
                 // Merge extracts back into var_store for next wave
@@ -1365,6 +1505,26 @@ async fn run_tests_with_groups(
                 }
                 capture_block_response(var_store, &result);
                 all_results.push((idx, result));
+            }
+            // Refill the pool when there's more work waiting.
+            if let Some((idx, block)) = queue.pop_front() {
+                // If a cancel arrived while we were draining, skip
+                // anything still queued instead of starting new HTTP.
+                if cancel.is_some_and(|c| c.is_cancelled()) {
+                    let result =
+                        emit_skipped_with_result(handler, &block, "Cancelled by user");
+                    all_results.push((idx, result));
+                    continue;
+                }
+                spawn_one(
+                    &mut join_set,
+                    idx,
+                    block,
+                    &var_snapshot,
+                    handler,
+                    extra_headers,
+                    cancel,
+                );
             }
         }
 
@@ -1543,9 +1703,17 @@ async fn run_suite_inner(
             block_results.push(skip_result);
         }
     } else if !setup_failed {
-        let test_results =
-            run_tests_with_groups(&tests, &mut var_store, &handler, extra_headers, cancel.as_ref())
-                .await;
+        let test_results = run_tests_with_groups(
+            &tests,
+            &mut var_store,
+            &handler,
+            extra_headers,
+            cancel.as_ref(),
+            suite
+                .parallel
+                .unwrap_or(crate::http_parser::DEFAULT_FILE_PARALLEL),
+        )
+        .await;
         for (result, block) in test_results.iter().zip(tests.iter()) {
             record_block_telemetry(&mut telemetry, result, block.group.as_deref());
         }
@@ -2304,6 +2472,7 @@ mod tests {
             diff: Some(DiffDirective {
                 step_a: "step_a".to_string(),
                 step_b: "nonexistent".to_string(),
+                ..Default::default()
             }),
             diffs: Vec::new(),
             errors: vec!["@diff references unknown step 'nonexistent'".to_string()],
@@ -2380,6 +2549,7 @@ mod tests {
             diff: Some(DiffDirective {
                 step_a: "step_a".to_string(),
                 step_b: "step_b".to_string(),
+                ..Default::default()
             }),
             diffs: Vec::new(),
             errors: Vec::new(),
@@ -2431,6 +2601,7 @@ mod tests {
             diff: Some(DiffDirective {
                 step_a: "a".to_string(),
                 step_b: "b".to_string(),
+                ..Default::default()
             }),
             diffs: Vec::new(),
             errors: vec![
@@ -2506,6 +2677,7 @@ mod tests {
             diff: Some(DiffDirective {
                 step_a: "alpha".to_string(),
                 step_b: "beta".to_string(),
+                ..Default::default()
             }),
             diffs: Vec::new(),
             errors: Vec::new(),

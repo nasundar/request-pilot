@@ -428,6 +428,34 @@ GET {{base_url}}/health
 - Both TUI (`Ctrl+R` popup) and desktop (dropdown) allow overriding the interval at runtime
 - Runtime overrides are ephemeral — they don't modify the file unless explicitly saved
 
+### `# @@parallel` (file-level)
+
+File-level directive that caps how many test blocks the wave scheduler runs concurrently. Place it at the top of the file before the first runnable `###` block (same placement rules as `# @@auto_run` / `# @@request-id`).
+
+**Syntax:** `# @@parallel [<N>]`
+
+**Rules:**
+- Bare `# @@parallel` (no value) → uses the built-in default of **16**.
+- Numeric value → clamped into `[1, 256]`. `0` / negative / non-numeric values are silently dropped (the default applies).
+- Must appear before the first `###` block — directives after the first runnable block are ignored.
+- Duplicates keep the first occurrence.
+- Files without the directive use the default cap of **16**.
+
+```http
+# @@parallel 4
+
+### @test Block 1
+GET https://api.example.com/a
+
+### @test Block 2
+GET https://api.example.com/b
+```
+
+**Behavior:**
+- The runner's wave scheduler keeps the live in-flight task count below the cap regardless of wave size. This protects suites with hundreds of blocks per wave from socket / connection-pool exhaustion.
+- The cap also propagates into per-block `# @@for` loops: a loop with its own `# @@parallel <M>` is clamped to `min(M, file-level cap)` so a loop can never exceed the file's concurrency budget.
+- File-level `# @@parallel` (this directive) caps wave-wide block execution. Loop-level `# @@parallel <N>` on a `# @@for` block (see below) is a separate, narrower control that bounds per-loop iteration concurrency.
+
 ### `# @compare`
 
 Marks a test block as a multi-step comparison block. Must be combined with `# @step` directives. The block contains multiple named steps that execute sequentially, and their responses can be compared using `# @diff`.

@@ -107,7 +107,7 @@ User clicks Run All
   → JS: runAllTests() → for each file: invoke('run_test_suite', { suite, extraVariables, extraHeaders, runMode, fileName })
   → Rust: test_runner::run_suite_with_headers()
     Phase 1: Setup blocks (sequential)
-    Phase 2: Test blocks (parallel via JoinSet, topological wave scheduling)
+    Phase 2: Test blocks (parallel via JoinSet, topological wave scheduling + bounded by file-level `# @@parallel <N>` so in-flight task count <= cap)
     Phase 3: Teardown blocks (sequential, always runs)
   → During execution: Rust emits 'block-progress' events
   → JS: startBlockProgressListener() updates DOM in-place
@@ -300,7 +300,7 @@ The desktop app runs a WebSocket server on `127.0.0.1:9718` (module: `live_captu
 
 ### Modifying Test Execution
 - `core/src/test_runner.rs::run_suite_inner()` — 3-phase orchestration
-- `core/src/test_runner.rs::run_tests_with_groups()` — parallel wave scheduling
+- `core/src/test_runner.rs::run_tests_with_groups()` — parallel wave scheduling with bounded **spawn-on-completion** dispatcher: at most `file_parallel` tasks are live at a time (cap comes from `TestSuite.parallel` / file-level `# @@parallel <N>`, default 16). Each completion drains a result and spawns the next queued block, so wave size has no effect on peak concurrency. The cap also propagates to per-loop workers via a `tokio::task_local!` (`FILE_PARALLEL_CAP`) read inside `execute_loop_block`.
 - `core/src/test_runner.rs::execute_block()` — single block execution
 
 ### UI Changes (Desktop)

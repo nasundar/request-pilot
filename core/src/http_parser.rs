@@ -1,6 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+/// Default file-level parallel cap when `# @@parallel` is unset. Chosen as a
+/// safe ceiling for HTTP-bound work on typical dev machines (well below
+/// ephemeral-port, file-handle, and per-host connection-pool limits) while
+/// still giving 16x the throughput of sequential execution.
+pub const DEFAULT_FILE_PARALLEL: u32 = 16;
+/// Upper bound on the file-level parallel cap. Values above this clamp.
+pub const MAX_FILE_PARALLEL: u32 = 256;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ParsedRequest {
     pub name: Option<String>,
@@ -35,6 +43,15 @@ pub struct TestSuite {
     /// rules are appended to these at recording time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redact_body_rules: Vec<BodyRedactRule>,
+    /// File-level `# @@parallel <N>` directive — caps how many test blocks
+    /// the wave scheduler runs concurrently. `None` means use
+    /// [`DEFAULT_FILE_PARALLEL`]. Bare `# @@parallel` (no arg) also resolves
+    /// to the default. Numeric values are clamped into
+    /// `[1, MAX_FILE_PARALLEL]`; `0` / negative / non-numeric values are
+    /// dropped silently and the default applies. Duplicate directives keep
+    /// the first occurrence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel: Option<u32>,
 }
 
 /// A single body-redaction rule parsed from a `# @@redact body ...` directive.
@@ -141,10 +158,16 @@ pub struct CompareStep {
 }
 
 /// Specifies which two steps to diff in a @compare block.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct DiffDirective {
     pub step_a: String,
     pub step_b: String,
+    /// V1.3: per-pair `$diff.*` assertions declared under this `# @@diff` line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assertions: Vec<Assertion>,
+    /// V1.3: trailing `allow_mismatch` flag suppresses the implicit body-match check.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_mismatch: bool,
 }
 
 /// `# @@for <iter_var> in <source_var>` directive — turns a normal block
@@ -379,6 +402,8 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
     let mut request_id_header: Option<String> = None;
     let mut prompts: Vec<PromptVariable> = Vec::new();
     let mut redact_body_rules: Vec<BodyRedactRule> = Vec::new();
+    let mut file_parallel: Option<u32> = None;
+    let mut file_parallel_seen: bool = false;
     let raw_blocks = split_into_raw_blocks(content);
 
     for raw_block in raw_blocks.iter() {
@@ -400,6 +425,12 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
             for line in block.lines() {
                 pick_file_directives(line, &mut auto_run, &mut request_id_header, &mut redact_body_rules, true);
                 pick_prompt_directive(line, &mut prompts);
+                pick_file_parallel_directive(
+                    line,
+                    &mut file_parallel,
+                    &mut file_parallel_seen,
+                    blocks.is_empty(),
+                );
             }
             parse_variables_block(block, &mut variables);
             continue;
@@ -426,6 +457,12 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
             for line in block.lines() {
                 pick_file_directives(line, &mut auto_run, &mut request_id_header, &mut redact_body_rules, true);
                 pick_prompt_directive(line, &mut prompts);
+                pick_file_parallel_directive(
+                    line,
+                    &mut file_parallel,
+                    &mut file_parallel_seen,
+                    blocks.is_empty(),
+                );
                 if let Some((name, value)) = parse_var_def(line) {
                     variables.push((name, value));
                 }
@@ -461,6 +498,7 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
         prompts,
         request_id_header,
         redact_body_rules,
+        parallel: file_parallel,
     }
 }
 
@@ -650,6 +688,46 @@ fn pick_prompt_directive(line: &str, prompts: &mut Vec<PromptVariable>) {
     prompts.push(PromptVariable { name, description });
 }
 
+/// Recognize a top-of-file `# @@parallel <N>` directive that caps how many
+/// test blocks the wave scheduler runs concurrently.
+///
+/// Rules (file-level, mirrors the spec for [`TestSuite::parallel`]):
+///   * Must appear before the first runnable block — callers gate this via
+///     the `before_first_runnable` flag. Lines seen after that are ignored.
+///   * Bare `# @@parallel` (no value) → set to [`DEFAULT_FILE_PARALLEL`].
+///   * Numeric value → clamp into `[1, MAX_FILE_PARALLEL]`.
+///   * `0` / negative / non-numeric → drop silently, default applies.
+///   * Duplicates keep the first (subsequent occurrences silently ignored).
+fn pick_file_parallel_directive(
+    line: &str,
+    slot: &mut Option<u32>,
+    seen: &mut bool,
+    before_first_runnable: bool,
+) {
+    let Some(rest) = match_directive(line, "parallel") else {
+        return;
+    };
+    if !before_first_runnable || *seen {
+        return;
+    }
+    *seen = true;
+    let arg = rest.trim();
+    if arg.is_empty() {
+        *slot = Some(DEFAULT_FILE_PARALLEL);
+        return;
+    }
+    if let Ok(n) = arg.parse::<i64>() {
+        if n >= 1 {
+            let clamped = if n > MAX_FILE_PARALLEL as i64 {
+                MAX_FILE_PARALLEL
+            } else {
+                n as u32
+            };
+            *slot = Some(clamped);
+        }
+    }
+}
+
 /// Returns the 0-based starting line number of each runnable block in the same
 /// order and count as `parse_test_suite(content).blocks`. Blocks that the parser
 /// skips (@variables block, file-level comment-only headers) are excluded, so
@@ -792,6 +870,10 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
     let mut request_lines: Vec<&str> = Vec::new();
     let mut first_meaningful = true;
 
+    // V1.3: per-pair `$diff.*` routing state.
+    let mut current_diff_idx: Option<usize> = None;
+    let mut pre_diff_buffered: Vec<Assertion> = Vec::new();
+
     // Compare step tracking
     let mut steps: Vec<CompareStep> = Vec::new();
     let mut current_step_name: Option<String> = None;
@@ -908,14 +990,22 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
         if let Some(rest) = match_directive(line, "diff") {
             let parts: Vec<&str> = rest.split_whitespace().collect();
             if parts.len() >= 2 {
-                // Multiple `# @@diff a b` lines accumulate; each becomes
-                // a separate pair so a block can render v1↔v2 and v1↔v3
-                // side-by-side. Pre-multi-diff `.http` files only had
-                // one such line, so this is a strict superset.
-                diff_directives.push(DiffDirective {
-                    step_a: parts[0].to_string(),
-                    step_b: parts[1].to_string(),
-                });
+                // V1.3: optional trailing `allow_mismatch` token.
+                let mut allow_mismatch = false;
+                let mut end = parts.len();
+                if end >= 3 && parts[end - 1].eq_ignore_ascii_case("allow_mismatch") {
+                    allow_mismatch = true;
+                    end -= 1;
+                }
+                if end >= 2 {
+                    diff_directives.push(DiffDirective {
+                        step_a: parts[0].to_string(),
+                        step_b: parts[1].to_string(),
+                        assertions: Vec::new(),
+                        allow_mismatch,
+                    });
+                    current_diff_idx = Some(diff_directives.len() - 1);
+                }
             }
             continue;
         }
@@ -1284,6 +1374,14 @@ pub fn generate_http_content(suite: &TestSuite) -> String {
             output.push_str("# @@request-id\n");
         } else {
             output.push_str(&format!("# @@request-id {}\n", header));
+        }
+    }
+
+    // File-level parallel cap. Omit when equal to the default so unchanged
+    // files round-trip cleanly without a spurious directive being emitted.
+    if let Some(n) = suite.parallel {
+        if n != DEFAULT_FILE_PARALLEL {
+            output.push_str(&format!("# @@parallel {}\n", n));
         }
     }
 
@@ -3217,15 +3315,18 @@ GET https://api.example.com/v2
             diff: Some(DiffDirective {
                 step_a: "v1".to_string(),
                 step_b: "v2".to_string(),
+                ..Default::default()
             }),
             diffs: vec![
                 DiffDirective {
                     step_a: "v1".to_string(),
                     step_b: "v2".to_string(),
+                ..Default::default()
                 },
                 DiffDirective {
                     step_a: "v1".to_string(),
                     step_b: "v3".to_string(),
+                ..Default::default()
                 },
             ],
             errors: Vec::new(),
@@ -3268,6 +3369,7 @@ GET https://api.example.com/v2
             diff: Some(DiffDirective {
                 step_a: "v1".to_string(),
                 step_b: "v2".to_string(),
+                ..Default::default()
             }),
             diffs: Vec::new(),
             errors: Vec::new(),
@@ -4423,6 +4525,110 @@ GET https://api.example.com/{{x}}
             suite.blocks[0].errors.iter().any(|e| e.contains("@@for") && e.contains("@@compare")),
             "expected for+compare conflict error"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Feature 1: file-level # @@parallel <N>
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn file_parallel_absent_is_none() {
+        let input = "### @test Foo\nGET https://api.example.com/foo\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.parallel, None);
+    }
+
+    #[test]
+    fn file_parallel_numeric_value() {
+        let input = "# @@parallel 8\n\n### @test Foo\nGET https://api.example.com/foo\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.parallel, Some(8));
+    }
+
+    #[test]
+    fn file_parallel_bare_defaults_to_constant() {
+        let input = "# @@parallel\n\n### @test Foo\nGET https://api.example.com/foo\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.parallel, Some(DEFAULT_FILE_PARALLEL));
+    }
+
+    #[test]
+    fn file_parallel_clamps_above_max() {
+        let input = "# @@parallel 9999\n\n### @test Foo\nGET https://api.example.com/foo\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.parallel, Some(MAX_FILE_PARALLEL));
+    }
+
+    #[test]
+    fn file_parallel_zero_dropped() {
+        let input = "# @@parallel 0\n\n### @test Foo\nGET https://api.example.com/foo\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.parallel, None);
+    }
+
+    #[test]
+    fn file_parallel_negative_dropped() {
+        let input = "# @@parallel -3\n\n### @test Foo\nGET https://api.example.com/foo\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.parallel, None);
+    }
+
+    #[test]
+    fn file_parallel_non_numeric_dropped() {
+        let input = "# @@parallel abc\n\n### @test Foo\nGET https://api.example.com/foo\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.parallel, None);
+    }
+
+    #[test]
+    fn file_parallel_duplicates_keep_first() {
+        let input = "# @@parallel 4\n# @@parallel 32\n\n### @test Foo\nGET https://api.example.com/foo\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.parallel, Some(4));
+    }
+
+    #[test]
+    fn file_parallel_after_first_block_ignored() {
+        let input = "### @test Foo\nGET https://api.example.com/foo\n\n# @@parallel 8\n\n### @test Bar\nGET https://api.example.com/bar\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.parallel, None);
+    }
+
+    #[test]
+    fn file_parallel_in_legacy_variables_block() {
+        let input = "@variables\n# @@parallel 6\nfoo = bar\n\n### @test T\nGET https://api.example.com/t\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.parallel, Some(6));
+    }
+
+    #[test]
+    fn file_parallel_regen_omits_when_default() {
+        let suite = TestSuite {
+            parallel: Some(DEFAULT_FILE_PARALLEL),
+            ..Default::default()
+        };
+        let out = generate_http_content(&suite);
+        assert!(!out.contains("# @@parallel"), "default value should not be emitted, got: {}", out);
+    }
+
+    #[test]
+    fn file_parallel_regen_emits_when_non_default() {
+        let suite = TestSuite {
+            parallel: Some(4),
+            ..Default::default()
+        };
+        let out = generate_http_content(&suite);
+        assert!(out.contains("# @@parallel 4\n"), "expected directive, got: {}", out);
+    }
+
+    #[test]
+    fn file_parallel_round_trip_preserves_value() {
+        let input = "# @@parallel 7\n\n### @test Foo\nGET https://api.example.com/foo\n";
+        let suite1 = parse_test_suite(input);
+        let regen = generate_http_content(&suite1);
+        let suite2 = parse_test_suite(&regen);
+        assert_eq!(suite1.parallel, suite2.parallel);
+        assert_eq!(suite2.parallel, Some(7));
     }
 }
 
