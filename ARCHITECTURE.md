@@ -106,6 +106,7 @@ User loads .http file
 User clicks Run All
   → JS: runAllTests() → for each file: invoke('run_test_suite', { suite, extraVariables, extraHeaders, runMode, fileName })
   → Rust: test_runner::run_suite_with_headers()
+    Pre-phase: Variable store seeded from @variables, then the active **in-file `### @@env`** overlay (if any) is merged, then `extra_variables` (sidecar `.env` and/or CLI) override on top. Callers enforce the sidecar-XOR-in-file rule.
     Phase 1: Setup blocks (sequential)
     Phase 2: Test blocks (parallel via JoinSet, topological wave scheduling + bounded by file-level `# @@parallel <N>` so in-flight task count <= cap)
     Phase 3: Teardown blocks (sequential, always runs)

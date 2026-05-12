@@ -456,6 +456,73 @@ GET https://api.example.com/b
 - The cap also propagates into per-block `# @@for` loops: a loop with its own `# @@parallel <M>` is clamped to `min(M, file-level cap)` so a loop can never exceed the file's concurrency budget.
 - File-level `# @@parallel` (this directive) caps wave-wide block execution. Loop-level `# @@parallel <N>` on a `# @@for` block (see below) is a separate, narrower control that bounds per-loop iteration concurrency.
 
+### `### @@env` (in-file environment blocks)
+
+Declare one or more named environments directly in the `.http` file. Each block holds a set of `key = value` definitions that the runner applies to the variable store at suite start.
+
+**Syntax:**
+
+```http
+### @@env <name>
+key = value
+key2 = value2
+```
+
+`<name>` must match `[A-Za-z0-9_.-]+` (letters, digits, `_`, `-`, `.`). Names are unique within a file — duplicate `### @@env` blocks of the same name keep the first occurrence and drop subsequent ones. Empty / invalid names are silently dropped.
+
+**Companion directive — `# @@active_env`:**
+
+A file-level directive that selects which env block applies by default:
+
+```http
+# @@active_env prod
+
+### @@env dev
+host = dev.local
+
+### @@env prod
+host = prod.cloud
+```
+
+Like other file-level directives, `# @@active_env` must appear **before the first `###` block** (the parser ignores it once a runnable block has been seen). The named env must match one of the declared blocks — references to undeclared names are dropped at parse time to avoid silent mis-selection.
+
+**Selection precedence at run time (low → high):**
+
+1. Built-in variables (`{{$timestamp}}`, `{{$uuid}}`, …)
+2. `@variables` block values
+3. **Exactly one of**:
+   - Sidecar `.env` file (Environments tab / Tools), OR
+   - In-file env block (resolved as: UI/CLI override → `# @@active_env` → first declared block → none)
+4. CLI / runtime extras (`--var KEY=VAL`, prompt answers)
+5. `# @@extract` results captured during the run
+
+A `# @@extract` that captures into the same variable name as an env value **overrides** the env value for the rest of the run. The desktop / CLI / TUI is responsible for enforcing the sidecar-vs-in-file XOR; the runner applies whichever overlay the caller selected.
+
+**Example:**
+
+```http
+@variables
+common = shared-value
+
+# @@active_env prod
+
+### @@env dev
+host = dev.local
+api_key = dev-key-xxxx
+
+### @@env prod
+host = prod.cloud
+api_key = prod-key-xxxx
+
+### @test Health
+GET https://{{host}}/healthz
+```
+
+**Notes:**
+- Env values are interpolated through the standard variable store, so cross-references like `key = {{common}}-x` work.
+- Source order is preserved by the round-tripping generator (`### @@env dev` declared first stays first in output).
+- Selecting "no env" via the UI suppresses both sidecar and in-file overlays; only `@variables` and CLI extras apply.
+
 ### `# @compare`
 
 Marks a test block as a multi-step comparison block. Must be combined with `# @step` directives. The block contains multiple named steps that execute sequentially, and their responses can be compared using `# @diff`.

@@ -94,6 +94,8 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 # @@parallel <N>                        — (loop-level, under `# @@for`) run iterations concurrently with N workers (default 4 if bare; clamped to [1,32]; also clamped to file-level cap)
 # @@redact body $.json.path             — scrub a JSON field from recorded bodies (JSONPath: $.foo, $.foo.bar, $.foo[0], $.foo[*])
 # @@redact body /regex/                 — scrub bytes matching a regex from recorded bodies (file- or block-level)
+# @@active_env <name>                   — file-level (when placed before the first `###` block): select which in-file `### @@env <name>` block applies by default. Name must match a declared env. Unmatched references are dropped.
+### @@env <name>                        — declare an in-file environment block. Contents are `key = value` pairs that the runner overlays onto `@variables` at suite start. Name grammar: `[A-Za-z0-9_.-]+`. Duplicates keep the first occurrence.
 ```
 
 **Telemetry variables** (set as top-level `@name = value` definitions or extracted via `@@setup`):
@@ -956,6 +958,63 @@ companion length-check before the wildcard assertions:
 ```http
 # @@assert $.data.result.length > 0
 ```
+
+### Pattern 13: In-file environment blocks (`### @@env`)
+
+When a single `.http` file needs to run against multiple environments (dev / staging / prod, baseline / canary, region A / region B), declare each environment inline with `### @@env <name>` instead of juggling separate `.env` sidecar files. Each block holds `key = value` pairs that overlay the file's `@variables` at suite start.
+
+```http
+@variables
+common = shared-default
+
+# @@active_env prod
+
+### @@env dev
+host = dev.local
+api_key = dev-key-xxxx
+
+### @@env prod
+host = prod.cloud
+api_key = prod-key-xxxx
+
+### @@env staging
+host = staging.cloud
+api_key = staging-key-xxxx
+
+### @test Hit health endpoint
+GET https://{{host}}/healthz
+Authorization: Bearer {{api_key}}
+
+# @@assert status == 200
+```
+
+**Selection precedence at run time (low → high):**
+
+1. Built-ins (`{{$timestamp}}`, `{{$uuid}}`)
+2. `@variables`
+3. **Exactly one of**: sidecar `.env` XOR in-file env XOR none
+4. CLI / runtime extras
+5. `# @@extract` results captured during the run
+
+The in-file env that applies is picked as: UI / CLI override → `# @@active_env <name>` directive → first declared block → none. The UI surfaces a per-file selector so a user can pick `dev` for file A and `prod` for file B independently.
+
+**When to prefer in-file envs over sidecar `.env`:**
+
+- The env values are not secret (host names, region IDs, feature flags) — they ride in the `.http` file alongside the tests.
+- You want different files in the same repo to default to different environments without coordinating a global sidecar.
+- You want round-trip-stable file generation (env source order is preserved by the generator).
+
+**When to prefer sidecar `.env`:**
+
+- Values contain secrets / credentials — keep them out of the `.http` file and out of git.
+- The values are shared across many `.http` files in a workspace.
+
+**Security footgun — don't commit secrets in `### @@env` blocks.** Use sidecar `.env` (gitignored) for tokens, passwords, and other credentials. Treat in-file env blocks like `@variables`: anything you'd be uncomfortable seeing in a code review belongs in a sidecar.
+
+**Notes:**
+- Name grammar: `[A-Za-z0-9_.-]+`. Names with spaces / `/` / other punctuation are silently dropped at parse time.
+- Env values interpolate through the standard variable store, so `host = {{common}}.svc.local` works.
+- A `# @@extract` capturing into a key that an env block also defines **overrides** the env value for the rest of the run.
 
 ## Common Pitfalls
 

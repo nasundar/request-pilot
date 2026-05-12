@@ -340,20 +340,23 @@ Authorization: Bearer {{access_token}}
 
 ---
 
-## Environments (`.env` files)
+## Environments (`.env` files and in-file `### @@env` blocks)
 
-Request Pilot keeps environment handling simple: **committed defaults live
-inside your `.http` file**, and **per-environment overrides live in plain
-`.env` files** that users load at runtime.
+Request Pilot offers **two** ways to keep environment-specific values out of your test logic:
 
-### Where variables come from (precedence, high → low)
+- **`.env` sidecar files** — best for secrets and values shared across many `.http` files.
+- **In-file `### @@env` blocks** — best for non-secret per-environment values (hostnames, region IDs, feature flags) that should travel with the test.
 
-1. Runtime `# @@extract` from prior blocks.
-2. In-app **Variables** panel (interactive edits).
-3. The currently-active `.env` file.
-4. Top-level `@name = value` definitions in the `.http` file.
+Exactly one env layer is active at a time per file (sidecar XOR in-file XOR none); the desktop / TUI surface the choice and persist it per file.
 
-A `.env` value will only shine through if the `.http` file didn't already hard-code one in the Variables panel — that's by design so a committed default can always win if a developer wants it to.
+### Where variables come from (precedence, low → high)
+
+1. Built-ins (`{{$timestamp}}`, `{{$uuid}}`, …).
+2. Top-level `@name = value` (`@variables` block) in the `.http` file.
+3. **Exactly one of** the active sidecar `.env` **OR** the active in-file `### @@env` block.
+4. CLI / runtime extras (`--var KEY=VAL`, prompt answers).
+5. Runtime `# @@extract` results captured during the run.
+6. In-app **Variables** panel (interactive edits).
 
 ### `.env` file format
 
@@ -379,11 +382,31 @@ it. If omitted, the filename stem (e.g. `prod.env` → `prod`) is used.
 - The list + active choice persist across restarts
   (`<config_dir>/request-pilot/env_config.json`).
 
+### In-file `### @@env` blocks
+
+Declare named environments inline with `### @@env <name>`:
+
+```http
+# @@active_env prod
+
+### @@env dev
+host = dev.local
+
+### @@env prod
+host = prod.cloud
+```
+
+- `<name>` grammar: `[A-Za-z0-9_.-]+`. Duplicate names keep the first.
+- `# @@active_env <name>` (top of file) picks the default block; without it, the **first** declared block wins.
+- Don't put secrets here — they live in the file. Use sidecar `.env` for credentials.
+
+See [docs/http-file-format.md](docs/http-file-format.md#-env-in-file-environment-blocks) for the full specification.
+
 ### Desktop
 
 - 🌐 **Environment dropdown** in the toolbar shows the active env.
-- Click it to list loaded files, switch active, remove an entry, or click
-  **+ Load .env file** to add another.
+- Click it to list loaded sidecar files **and** in-file env blocks declared in the currently-open `.http` file. Switch between them, remove a sidecar entry, or click **+ Load .env file** to add another sidecar.
+- Per-file selection is persisted so switching files keeps each file's choice independently.
 
 ### TUI
 
