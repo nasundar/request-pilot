@@ -101,6 +101,15 @@ fn generate_http(suite: http_parser::TestSuite) -> Result<String, String> {
 }
 
 /// Execute a test suite from an .http file, streaming progress via events.
+///
+/// `active_env_override` selects which in-file `### @@env <name>` block (if any)
+/// supplies variables for this run. See
+/// [`test_runner::run_suite_with_active_env`] for semantics:
+///
+///   * `None`           — auto-pick via `# @@active_env` → first env block → none
+///   * `Some("")`       — caller opts out of in-file envs (sidecar-only mode)
+///   * `Some("name")`   — apply the named in-file env block; falls back to the
+///                         auto-pick chain when no block matches the name
 #[tauri::command]
 async fn run_test_suite(
     suite: http_parser::TestSuite,
@@ -108,6 +117,7 @@ async fn run_test_suite(
     extra_headers: Option<Vec<(String, String)>>,
     run_mode: Option<String>,
     file_name: Option<String>,
+    active_env_override: Option<String>,
     store: State<'_, Mutex<HistoryStore>>,
     cancel_state: State<'_, CurrentRunCancel>,
     app: tauri::AppHandle,
@@ -122,13 +132,14 @@ async fn run_test_suite(
         *guard = Some(cancel.clone());
     }
 
-    let mut results = test_runner::run_suite_with_cancel(
+    let mut results = test_runner::run_suite_with_active_env(
         &suite,
         &extra_variables,
         &headers,
         Some(progress),
         run_mode.as_deref(),
         Some(cancel.clone()),
+        active_env_override,
     )
     .await;
 
