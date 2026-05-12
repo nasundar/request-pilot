@@ -48,10 +48,34 @@ pub struct TestSuite {
     /// [`DEFAULT_FILE_PARALLEL`]. Bare `# @@parallel` (no arg) also resolves
     /// to the default. Numeric values are clamped into
     /// `[1, MAX_FILE_PARALLEL]`; `0` / negative / non-numeric values are
-    /// dropped silently and the default applies. Duplicate directives keep
-    /// the first occurrence.
+    /// for-loop blocks. Clamped to `[1, MAX_FILE_PARALLEL]`. Duplicate
+    /// directives keep the first occurrence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel: Option<u32>,
+    /// In-file environment blocks declared via `### @@env <name>`. Each block
+    /// holds a name and a list of `(key, value)` pairs in source order.
+    /// Duplicate names are dropped (first wins). Names must match the grammar
+    /// `[A-Za-z0-9_.-]+` — otherwise the block is dropped silently.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub envs: Vec<EnvBlock>,
+    /// File-level `# @@active_env <name>` directive. Selects which in-file
+    /// env block the runner picks up by default (lower precedence than a
+    /// runtime UI/CLI override, higher than the implicit "first env wins").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_env: Option<String>,
+}
+
+/// An in-file environment block parsed from `### @@env <name>` …
+/// `key = value` lines.
+///
+/// `vars` preserves source order so `generate_http_content` round-trips
+/// produce stable diffs. Values are stored raw; `{{var}}` interpolation
+/// happens at use site through the `VariableStore` pipeline.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct EnvBlock {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vars: Vec<(String, String)>,
 }
 
 /// A single body-redaction rule parsed from a `# @@redact body ...` directive.
@@ -404,11 +428,39 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
     let mut redact_body_rules: Vec<BodyRedactRule> = Vec::new();
     let mut file_parallel: Option<u32> = None;
     let mut file_parallel_seen: bool = false;
+    let mut envs: Vec<EnvBlock> = Vec::new();
+    let mut active_env: Option<String> = None;
+    let mut active_env_seen: bool = false;
     let raw_blocks = split_into_raw_blocks(content);
 
     for raw_block in raw_blocks.iter() {
         let block = raw_block.trim();
         if block.is_empty() {
+            continue;
+        }
+
+        // ── In-file env block (### @@env <name>) ──
+        // Detected BEFORE peel_leading_var_defs / parse_test_block so env
+        // blocks never get mis-classified as runnable tests. Invalid names
+        // and duplicates are dropped (first wins). The block body still gets
+        // scanned for file-level directives so a `# @@active_env` line
+        // physically placed inside an env block still works.
+        if let Some((env_name, env_vars)) = try_parse_env_block(block) {
+            for line in block.lines() {
+                pick_active_env_directive(
+                    line,
+                    &mut active_env,
+                    &mut active_env_seen,
+                    blocks.is_empty(),
+                );
+            }
+            if !is_valid_env_name(&env_name) {
+                continue;
+            }
+            if envs.iter().any(|e| e.name == env_name) {
+                continue;
+            }
+            envs.push(EnvBlock { name: env_name, vars: env_vars });
             continue;
         }
 
@@ -429,6 +481,12 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
                     line,
                     &mut file_parallel,
                     &mut file_parallel_seen,
+                    blocks.is_empty(),
+                );
+                pick_active_env_directive(
+                    line,
+                    &mut active_env,
+                    &mut active_env_seen,
                     blocks.is_empty(),
                 );
             }
@@ -463,6 +521,12 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
                     &mut file_parallel_seen,
                     blocks.is_empty(),
                 );
+                pick_active_env_directive(
+                    line,
+                    &mut active_env,
+                    &mut active_env_seen,
+                    blocks.is_empty(),
+                );
                 if let Some((name, value)) = parse_var_def(line) {
                     variables.push((name, value));
                 }
@@ -491,6 +555,15 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
         }
     }
 
+    // Drop `active_env` if it doesn't name any declared env block — the
+    // selector would have nothing to resolve to. The directive is still
+    // "consumed" (won't be silently misinterpreted later); just unset.
+    if let Some(ref n) = active_env {
+        if !envs.iter().any(|e| &e.name == n) {
+            active_env = None;
+        }
+    }
+
     TestSuite {
         variables,
         blocks,
@@ -499,6 +572,8 @@ pub fn parse_test_suite(content: &str) -> TestSuite {
         request_id_header,
         redact_body_rules,
         parallel: file_parallel,
+        envs,
+        active_env,
     }
 }
 
@@ -726,6 +801,110 @@ fn pick_file_parallel_directive(
             *slot = Some(clamped);
         }
     }
+}
+
+/// Validate an env name against the grammar `[A-Za-z0-9_.-]+`. Empty names
+/// and names with disallowed characters are rejected.
+fn is_valid_env_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+/// Recognize a top-of-file `# @@active_env <name>` directive that selects
+/// which in-file env block the runner picks up by default.
+///
+/// Rules:
+///   * Must appear before the first runnable block — callers gate this via
+///     `before_first_runnable`.
+///   * Duplicates keep the first occurrence (subsequent silently ignored).
+///   * Invalid names (empty / non-grammar) drop with no effect.
+fn pick_active_env_directive(
+    line: &str,
+    slot: &mut Option<String>,
+    seen: &mut bool,
+    before_first_runnable: bool,
+) {
+    let Some(rest) = match_directive(line, "active_env") else {
+        return;
+    };
+    if !before_first_runnable || *seen {
+        return;
+    }
+    *seen = true;
+    let name = rest.trim().to_string();
+    if is_valid_env_name(&name) {
+        *slot = Some(name);
+    }
+}
+
+/// If this raw block looks like an in-file env block (`### @@env <name>` as
+/// its first meaningful line), parse and return `(name, vars)`. Returns
+/// `None` when the block is not an env block. An env block with an empty
+/// or invalid name returns `Some(("".into(), _))` so the caller can drop
+/// it with a warning rather than mis-route it to `parse_test_block`.
+fn try_parse_env_block(block: &str) -> Option<(String, Vec<(String, String)>)> {
+    let mut lines = block.lines();
+    let mut name_opt: Option<String> = None;
+    for line in lines.by_ref() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let after_at = trimmed
+            .strip_prefix("@@")
+            .or_else(|| trimmed.strip_prefix('@'))?;
+        let rest = after_at.strip_prefix("env")?;
+        // Disambiguate `@@env` from `@@environment` / etc.
+        if !rest.is_empty() && !rest.starts_with(|c: char| c.is_whitespace()) {
+            return None;
+        }
+        name_opt = Some(rest.trim().to_string());
+        break;
+    }
+    let name = name_opt?;
+    let mut vars: Vec<(String, String)> = Vec::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if strip_comment_prefix(trimmed).is_some() {
+            // Comments inside an env body are ignored. Note: `# @@active_env`
+            // and other file-level directives are still picked up by the
+            // separate sweep in `parse_test_suite`.
+            continue;
+        }
+        // Accept `key = value` and legacy `@key = value`. Reject `@@` (Pilot
+        // directive form).
+        if trimmed.starts_with("@@") {
+            continue;
+        }
+        let kv = trimmed.strip_prefix('@').unwrap_or(trimmed);
+        let Some((k, v)) = kv.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        if k.is_empty()
+            || !k
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+        {
+            continue;
+        }
+        let mut v = v.trim().to_string();
+        if v.len() >= 2 {
+            let bytes = v.as_bytes();
+            let first = bytes[0];
+            let last = bytes[v.len() - 1];
+            if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+                v = v[1..v.len() - 1].to_string();
+            }
+        }
+        vars.push((k.to_string(), v));
+    }
+    Some((name, vars))
 }
 
 /// Returns the 0-based starting line number of each runnable block in the same
