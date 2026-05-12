@@ -3210,4 +3210,486 @@ mod tests {
             assert!(for_idx.iter().any(|e| e.status != "running"));
         }
     }
+
+    // -------------------------------------------------------------------
+    // Feature 3 — multi-diff compare blocks: runner-side coverage.
+    //
+    // These tests need real HTTP responses with controllable bodies so the
+    // diff machinery (compute_diff + per-pair $diff.* assertions) has data
+    // to chew on. We spin up a tiny tokio TCP listener per test, dispatch
+    // path -> body responses, and tear it down when the test exits.
+    // -------------------------------------------------------------------
+
+    use crate::http_parser::{Assertion, DiffDirective};
+    use crate::variables::VariableStore;
+
+    /// Spawn a minimal HTTP/1.1 responder on 127.0.0.1:0 that maps request
+    /// path -> response body. Each connection serves exactly one request
+    /// then closes (Connection: close). Returns the bound port. The
+    /// listener task is leaked for the duration of the test process —
+    /// fine, since `cargo test` tears the process down at the end.
+    async fn spawn_mock_http_server(
+        responses: std::collections::HashMap<String, String>,
+    ) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let responses = std::sync::Arc::new(responses);
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let responses = responses.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = match socket.read(&mut buf).await {
+                        Ok(n) if n > 0 => n,
+                        _ => return,
+                    };
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .to_string();
+                    let body = responses.get(&path).cloned().unwrap_or_default();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.as_bytes().len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        port
+    }
+
+    fn make_compare_step(name: &str, port: u16, path: &str) -> CompareStep {
+        CompareStep {
+            name: name.to_string(),
+            request: ParsedRequest {
+                name: Some(name.to_string()),
+                method: "GET".to_string(),
+                url: format!("http://127.0.0.1:{}{}", port, path),
+                headers: Vec::new(),
+                body: None,
+            },
+            assertions: Vec::new(),
+            extracts: Vec::new(),
+        }
+    }
+
+    fn make_compare_block(
+        name: &str,
+        steps: Vec<CompareStep>,
+        diffs: Vec<DiffDirective>,
+    ) -> TestBlock {
+        TestBlock {
+            block_type: "test".to_string(),
+            name: name.to_string(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: vec![],
+            request: ParsedRequest {
+                name: Some(name.to_string()),
+                method: String::new(),
+                url: String::new(),
+                headers: Vec::new(),
+                body: None,
+            },
+            assertions: Vec::new(),
+            extracts: Vec::new(),
+            compare: true,
+            steps,
+            diff: None,
+            diffs,
+            errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
+            for_loop: None,
+        }
+    }
+
+    fn assert_eq_assertion(a: &str, op: &str, b: &str) -> Assertion {
+        Assertion {
+            left: a.to_string(),
+            operator: op.to_string(),
+            right: b.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn f3_runner_motivating_scenario() {
+        // baseline.body == eastus.body, baseline.body != canary.body.
+        // Two pairs: (baseline,canary) should fail (mismatch), (baseline,eastus) pass.
+        let mut responses = std::collections::HashMap::new();
+        responses.insert("/baseline".to_string(), r#"{"region":"baseline","ok":true}"#.to_string());
+        responses.insert("/eastus".to_string(), r#"{"region":"baseline","ok":true}"#.to_string());
+        responses.insert("/canary".to_string(), r#"{"region":"canary","ok":false}"#.to_string());
+        let port = spawn_mock_http_server(responses).await;
+
+        let block = make_compare_block(
+            "motivating",
+            vec![
+                make_compare_step("baseline", port, "/baseline"),
+                make_compare_step("canary", port, "/canary"),
+                make_compare_step("eastus", port, "/eastus"),
+            ],
+            vec![
+                DiffDirective {
+                    step_a: "baseline".to_string(),
+                    step_b: "canary".to_string(),
+                    ..Default::default()
+                },
+                DiffDirective {
+                    step_a: "baseline".to_string(),
+                    step_b: "eastus".to_string(),
+                    ..Default::default()
+                },
+            ],
+        );
+
+        let result = execute_compare_block(block, VariableStore::new(), vec![]).await;
+
+        assert_eq!(result.status, "failed", "block status; result={:?}", result.status);
+        assert_eq!(result.diff_results.len(), 2);
+        assert!(!result.diff_results[0].passed, "pair 0 (canary mismatch) must fail");
+        assert!(result.diff_results[1].passed, "pair 1 (eastus match) must pass");
+
+        let by_name: std::collections::HashMap<_, _> =
+            result.step_results.iter().map(|s| (s.name.clone(), s)).collect();
+        assert!(!by_name["baseline"].diff_failed);
+        assert!(by_name["canary"].diff_failed);
+        assert_eq!(by_name["canary"].diff_failed_pairs, vec![0]);
+        assert!(!by_name["eastus"].diff_failed);
+    }
+
+    #[tokio::test]
+    async fn f3_runner_implicit_mismatch_fails_block() {
+        // No explicit $diff.match assertion, but bodies differ → block fails.
+        let mut responses = std::collections::HashMap::new();
+        responses.insert("/a".to_string(), r#"{"v":1}"#.to_string());
+        responses.insert("/b".to_string(), r#"{"v":2}"#.to_string());
+        let port = spawn_mock_http_server(responses).await;
+
+        let block = make_compare_block(
+            "implicit",
+            vec![
+                make_compare_step("a", port, "/a"),
+                make_compare_step("b", port, "/b"),
+            ],
+            vec![DiffDirective {
+                step_a: "a".to_string(),
+                step_b: "b".to_string(),
+                ..Default::default()
+            }],
+        );
+
+        let result = execute_compare_block(block, VariableStore::new(), vec![]).await;
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.diff_results.len(), 1);
+        assert!(!result.diff_results[0].required_match_passed);
+        assert!(!result.diff_results[0].passed);
+    }
+
+    #[tokio::test]
+    async fn f3_runner_allow_mismatch_passes_block() {
+        // allow_mismatch + body mismatch + no explicit assertions → block passes.
+        let mut responses = std::collections::HashMap::new();
+        responses.insert("/a".to_string(), r#"{"v":1}"#.to_string());
+        responses.insert("/b".to_string(), r#"{"v":2}"#.to_string());
+        let port = spawn_mock_http_server(responses).await;
+
+        let block = make_compare_block(
+            "allow_mm",
+            vec![
+                make_compare_step("a", port, "/a"),
+                make_compare_step("b", port, "/b"),
+            ],
+            vec![DiffDirective {
+                step_a: "a".to_string(),
+                step_b: "b".to_string(),
+                allow_mismatch: true,
+                ..Default::default()
+            }],
+        );
+
+        let result = execute_compare_block(block, VariableStore::new(), vec![]).await;
+        assert_eq!(result.status, "passed", "allow_mismatch should yield passed");
+        assert!(result.diff_results[0].passed);
+        assert!(result.diff_results[0].required_match_passed);
+        let b_step = result.step_results.iter().find(|s| s.name == "b").unwrap();
+        assert!(!b_step.diff_failed);
+    }
+
+    #[tokio::test]
+    async fn f3_runner_allow_mismatch_with_explicit_match_assertion_fails() {
+        // allow_mismatch tolerates implicit body match, but an explicit
+        // `$diff.match == true` assertion still runs and fails.
+        let mut responses = std::collections::HashMap::new();
+        responses.insert("/a".to_string(), r#"{"v":1}"#.to_string());
+        responses.insert("/b".to_string(), r#"{"v":2}"#.to_string());
+        let port = spawn_mock_http_server(responses).await;
+
+        let block = make_compare_block(
+            "explicit_under_allow",
+            vec![
+                make_compare_step("a", port, "/a"),
+                make_compare_step("b", port, "/b"),
+            ],
+            vec![DiffDirective {
+                step_a: "a".to_string(),
+                step_b: "b".to_string(),
+                allow_mismatch: true,
+                assertions: vec![assert_eq_assertion("$diff.match", "==", "true")],
+            }],
+        );
+
+        let result = execute_compare_block(block, VariableStore::new(), vec![]).await;
+        assert_eq!(result.status, "failed");
+        assert!(!result.diff_results[0].passed, "explicit $diff.match should fail");
+        assert!(
+            result.diff_results[0].required_match_passed,
+            "allow_mismatch suppresses implicit check"
+        );
+        let pair_asserts = &result.diff_results[0].assertion_results;
+        assert_eq!(pair_asserts.len(), 1);
+        assert!(!pair_asserts[0].passed);
+    }
+
+    #[tokio::test]
+    async fn f3_runner_per_pair_assertion_evaluation() {
+        // Pair 0 has assertion against pair 0's diff; pair 1 has different
+        // assertion against pair 1's diff. Each should evaluate against its
+        // own pair, not blindly against pair 0.
+        let mut responses = std::collections::HashMap::new();
+        responses.insert("/ref".to_string(), r#"{"k":"ref"}"#.to_string());
+        responses.insert("/foo".to_string(), r#"{"k":"foo"}"#.to_string());
+        responses.insert("/bar".to_string(), r#"{"k":"bar"}"#.to_string());
+        let port = spawn_mock_http_server(responses).await;
+
+        let block = make_compare_block(
+            "per_pair",
+            vec![
+                make_compare_step("ref", port, "/ref"),
+                make_compare_step("foo", port, "/foo"),
+                make_compare_step("bar", port, "/bar"),
+            ],
+            vec![
+                DiffDirective {
+                    step_a: "ref".to_string(),
+                    step_b: "foo".to_string(),
+                    allow_mismatch: true,
+                    // changed_paths for ref->foo will include "$.k" -> "foo"
+                    assertions: vec![assert_eq_assertion("$diff.changed_paths[0].right", "==", "foo")],
+                },
+                DiffDirective {
+                    step_a: "ref".to_string(),
+                    step_b: "bar".to_string(),
+                    allow_mismatch: true,
+                    assertions: vec![assert_eq_assertion("$diff.changed_paths[0].right", "==", "bar")],
+                },
+            ],
+        );
+
+        let result = execute_compare_block(block, VariableStore::new(), vec![]).await;
+        // Both pairs evaluated against their OWN diff and pass.
+        assert_eq!(result.diff_results.len(), 2);
+        assert!(
+            result.diff_results[0].assertion_results[0].passed,
+            "pair 0 assertion: {:?}",
+            result.diff_results[0].assertion_results
+        );
+        assert!(
+            result.diff_results[1].assertion_results[0].passed,
+            "pair 1 assertion: {:?}",
+            result.diff_results[1].assertion_results
+        );
+        assert_eq!(result.status, "passed");
+    }
+
+    #[tokio::test]
+    async fn f3_runner_error_vs_failed_status_separation() {
+        // Case A: missing step reference → status "error".
+        let mut responses = std::collections::HashMap::new();
+        responses.insert("/a".to_string(), r#"{"v":1}"#.to_string());
+        let port = spawn_mock_http_server(responses).await;
+
+        let block_err = make_compare_block(
+            "err_case",
+            vec![make_compare_step("baseline", port, "/a")],
+            vec![DiffDirective {
+                step_a: "baseline".to_string(),
+                step_b: "nonexistent".to_string(),
+                ..Default::default()
+            }],
+        );
+        let result_err = execute_compare_block(block_err, VariableStore::new(), vec![]).await;
+        assert_eq!(result_err.status, "error", "missing step => error, got {:?}", result_err.status);
+
+        // Case B: real bodies that mismatch → status "failed", not "error".
+        let mut responses2 = std::collections::HashMap::new();
+        responses2.insert("/a".to_string(), r#"{"v":1}"#.to_string());
+        responses2.insert("/b".to_string(), r#"{"v":2}"#.to_string());
+        let port2 = spawn_mock_http_server(responses2).await;
+
+        let block_fail = make_compare_block(
+            "fail_case",
+            vec![
+                make_compare_step("a", port2, "/a"),
+                make_compare_step("b", port2, "/b"),
+            ],
+            vec![DiffDirective {
+                step_a: "a".to_string(),
+                step_b: "b".to_string(),
+                ..Default::default()
+            }],
+        );
+        let result_fail = execute_compare_block(block_fail, VariableStore::new(), vec![]).await;
+        assert_eq!(result_fail.status, "failed", "body mismatch => failed");
+    }
+
+    #[tokio::test]
+    async fn f3_runner_legacy_mirror_emits_synthetic_assertion() {
+        // A non-allow_mismatch pair whose bodies differ should surface a
+        // synthetic `$diff.match {a} -> {b}` entry in BlockResult.assertion_results
+        // so old UI versions render a reason for the red block.
+        let mut responses = std::collections::HashMap::new();
+        responses.insert("/a".to_string(), r#"{"v":1}"#.to_string());
+        responses.insert("/b".to_string(), r#"{"v":2}"#.to_string());
+        let port = spawn_mock_http_server(responses).await;
+
+        let block = make_compare_block(
+            "mirror",
+            vec![
+                make_compare_step("alpha", port, "/a"),
+                make_compare_step("beta", port, "/b"),
+            ],
+            vec![DiffDirective {
+                step_a: "alpha".to_string(),
+                step_b: "beta".to_string(),
+                ..Default::default()
+            }],
+        );
+
+        let result = execute_compare_block(block, VariableStore::new(), vec![]).await;
+        let synthetic = result
+            .assertion_results
+            .iter()
+            .find(|a| a.assertion.contains("$diff.match") && a.assertion.contains("alpha")
+                && a.assertion.contains("beta"));
+        assert!(
+            synthetic.is_some(),
+            "expected synthetic $diff.match mirror entry, got {:?}",
+            result.assertion_results
+        );
+        let s = synthetic.unwrap();
+        assert!(!s.passed);
+        assert_eq!(s.actual.as_deref(), Some("mismatch"));
+        assert_eq!(s.expected.as_deref(), Some("match"));
+    }
+
+    #[test]
+    fn f3_runner_legacy_mirror_skips_allow_mismatch_pairs() {
+        // Sanity: under allow_mismatch the synthetic mirror entry must NOT
+        // appear (the loop at line ~1119 skips allow_mismatch pairs). This
+        // is a focused unit check against the assertion_results vector.
+        // We use a hand-built BlockResult-equivalent path: run a small
+        // synchronous-ish check via a tokio runtime in-line.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut responses = std::collections::HashMap::new();
+            responses.insert("/a".to_string(), r#"{"v":1}"#.to_string());
+            responses.insert("/b".to_string(), r#"{"v":2}"#.to_string());
+            let port = spawn_mock_http_server(responses).await;
+
+            let block = make_compare_block(
+                "mirror_allow",
+                vec![
+                    make_compare_step("a", port, "/a"),
+                    make_compare_step("b", port, "/b"),
+                ],
+                vec![DiffDirective {
+                    step_a: "a".to_string(),
+                    step_b: "b".to_string(),
+                    allow_mismatch: true,
+                    ..Default::default()
+                }],
+            );
+            let result = execute_compare_block(block, VariableStore::new(), vec![]).await;
+            let has_synth = result
+                .assertion_results
+                .iter()
+                .any(|a| a.assertion.starts_with("$diff.match a -> b"));
+            assert!(!has_synth, "allow_mismatch pairs must not emit synthetic mirror");
+        });
+    }
+
+    #[test]
+    fn f3_runner_backcompat_minimal_json_deserializes() {
+        // Hand-crafted minimal JSON missing all new V1.3 fields. Serde
+        // defaults should populate them.
+        let minimal_block = r#"{
+            "name": "old",
+            "block_type": "test",
+            "group": null,
+            "request_method": "GET",
+            "request_url": "http://x",
+            "request_headers": [],
+            "request_body": null,
+            "status": "passed",
+            "response": null,
+            "assertion_results": [],
+            "extract_results": [],
+            "error": null,
+            "time_ms": 0
+        }"#;
+        let parsed: BlockResult = serde_json::from_str(minimal_block).expect("BlockResult deserialize");
+        assert!(parsed.step_results.is_empty());
+        assert!(parsed.diff_results.is_empty());
+        assert!(parsed.iterations.is_empty());
+        assert!(parsed.diff_result.is_none());
+
+        let minimal_pair = r#"{
+            "step_a": "a",
+            "step_b": "b"
+        }"#;
+        let pair: NamedDiffResult = serde_json::from_str(minimal_pair).expect("NamedDiffResult deserialize");
+        assert_eq!(pair.step_a, "a");
+        assert_eq!(pair.step_b, "b");
+        assert!(!pair.allow_mismatch);
+        assert!(pair.assertion_results.is_empty());
+        // V1.3 added required_match_passed/passed with default = true so
+        // legacy records (which had no concept of pair-level failure) are
+        // treated as passing.
+        assert!(pair.required_match_passed);
+        assert!(pair.passed);
+
+        let minimal_step = r#"{
+            "name": "s",
+            "request_method": "GET",
+            "request_url": "http://x",
+            "request_headers": [],
+            "request_body": null,
+            "response": null,
+            "assertion_results": [],
+            "extract_results": [],
+            "time_ms": 0,
+            "error": null
+        }"#;
+        let step: StepResult = serde_json::from_str(minimal_step).expect("StepResult deserialize");
+        assert!(!step.diff_failed);
+        assert!(step.diff_failed_pairs.is_empty());
+    }
 }

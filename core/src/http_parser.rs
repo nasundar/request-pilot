@@ -938,6 +938,10 @@ pub fn block_start_lines(content: &str) -> Vec<usize> {
         if has_variables {
             return;
         }
+        // In-file env block — never a runnable block.
+        if try_parse_env_block(block).is_some() {
+            return;
+        }
         // Header-only block: comments + bare directives + var defs only
         let is_header_block = !*seen_any_runnable
             && block.lines().all(|l| {
@@ -1591,6 +1595,26 @@ pub fn generate_http_content(suite: &TestSuite) -> String {
         }
         for (name, value) in &suite.variables {
             output.push_str(&format!("@{} = {}\n", name, value));
+        }
+    }
+
+    // File-level active env directive. Emitted after `@variables` so the
+    // directive sits visually with the env-selection metadata block. Names
+    // are validated at parse time, so we trust the in-memory value.
+    if let Some(ref name) = suite.active_env {
+        if !output.is_empty() && !output.ends_with("\n\n") {
+            output.push('\n');
+        }
+        output.push_str(&format!("# @@active_env {}\n", name));
+    }
+
+    // In-file env blocks — emit in declaration order so round-trips stay
+    // stable. Each block's vars are written in source order (not sorted).
+    for env in &suite.envs {
+        output.push('\n');
+        output.push_str(&format!("### @@env {}\n", env.name));
+        for (k, v) in &env.vars {
+            output.push_str(&format!("{} = {}\n", k, v));
         }
     }
 
