@@ -4599,6 +4599,167 @@ GET https://api.example.com/{{x}}
         assert_eq!(fl.parallel, Some(4));
     }
 
+    // ---------- Feature 2: in-file env blocks ----------
+
+    #[test]
+    fn f2_env_block_basic_parsing() {
+        let input = r#"### @@env dev
+api_base = https://dev.example.com
+key = dev-key
+
+### @@env prod
+api_base = https://api.example.com
+key = prod-key
+
+### @test First request
+GET {{api_base}}/healthz
+"#;
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.envs.len(), 2);
+        assert_eq!(suite.envs[0].name, "dev");
+        assert_eq!(suite.envs[0].vars[0], ("api_base".into(), "https://dev.example.com".into()));
+        assert_eq!(suite.envs[0].vars[1], ("key".into(), "dev-key".into()));
+        assert_eq!(suite.envs[1].name, "prod");
+        // Env blocks must not be parsed as runnable blocks.
+        assert_eq!(suite.blocks.len(), 1);
+        assert_eq!(suite.blocks[0].name, "First request");
+    }
+
+    #[test]
+    fn f2_env_block_zero_blocks() {
+        let input = "### @test Only test\nGET https://example.com/\n";
+        let suite = parse_test_suite(input);
+        assert!(suite.envs.is_empty());
+        assert!(suite.active_env.is_none());
+    }
+
+    #[test]
+    fn f2_env_block_single_block() {
+        let input = "### @@env solo\nk = v\n";
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.envs.len(), 1);
+        assert_eq!(suite.envs[0].name, "solo");
+    }
+
+    #[test]
+    fn f2_env_block_duplicate_name_first_wins() {
+        let input = r#"### @@env shared
+k = v1
+
+### @@env shared
+k = v2
+"#;
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.envs.len(), 1);
+        assert_eq!(suite.envs[0].vars[0], ("k".into(), "v1".into()));
+    }
+
+    #[test]
+    fn f2_env_block_empty_name_is_dropped() {
+        let input = r#"### @@env
+k = v
+
+### @@env ok
+k = ok
+"#;
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.envs.len(), 1);
+        assert_eq!(suite.envs[0].name, "ok");
+    }
+
+    #[test]
+    fn f2_env_block_invalid_name_is_dropped() {
+        let input = r#"### @@env has spaces
+k = v
+
+### @@env weird/name
+k = v
+
+### @@env valid-name_42.test
+k = ok
+"#;
+        let suite = parse_test_suite(input);
+        // Names with spaces or '/' violate [A-Za-z0-9_.-]+ → dropped.
+        // Allowed: dot, dash, underscore, digits.
+        assert_eq!(suite.envs.len(), 1);
+        assert_eq!(suite.envs[0].name, "valid-name_42.test");
+    }
+
+    #[test]
+    fn f2_active_env_selects_named_block() {
+        let input = r#"# @@active_env prod
+
+### @@env dev
+host = dev.local
+
+### @@env prod
+host = prod.cloud
+"#;
+        let suite = parse_test_suite(input);
+        assert_eq!(suite.active_env.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn f2_active_env_unmatched_is_dropped() {
+        let input = r#"# @@active_env ghost
+
+### @@env dev
+host = dev.local
+"#;
+        let suite = parse_test_suite(input);
+        // Directive references a block that doesn't exist → unset to avoid
+        // a silent mis-selection.
+        assert!(suite.active_env.is_none());
+    }
+
+    #[test]
+    fn f2_envs_round_trip_through_generator() {
+        let input = r#"@variables
+common = 1
+
+# @@active_env prod
+
+### @@env dev
+host = dev.local
+key = devk
+
+### @@env prod
+host = prod.cloud
+key = prodk
+
+### @test Hit it
+GET https://{{host}}/healthz
+"#;
+        let suite1 = parse_test_suite(input);
+        let regen = generate_http_content(&suite1);
+        let suite2 = parse_test_suite(&regen);
+        assert_eq!(suite1.envs, suite2.envs);
+        assert_eq!(suite1.active_env, suite2.active_env);
+        // Sanity: source order preserved (dev then prod).
+        assert_eq!(suite2.envs[0].name, "dev");
+        assert_eq!(suite2.envs[1].name, "prod");
+        // Directive emitted in generated output.
+        assert!(regen.contains("# @@active_env prod"), "regen missing active_env directive:\n{}", regen);
+        assert!(regen.contains("### @@env dev"));
+        assert!(regen.contains("### @@env prod"));
+    }
+
+    #[test]
+    fn f2_env_block_serde_back_compat() {
+        // Hand-crafted minimal JSON missing envs/active_env. Serde defaults
+        // should populate them as empty.
+        let minimal = r#"{
+            "variables": [],
+            "blocks": [],
+            "loose_blocks": [],
+            "errors": []
+        }"#;
+        let parsed: TestSuite = serde_json::from_str(minimal).expect("TestSuite deserialize");
+        assert!(parsed.envs.is_empty());
+        assert!(parsed.active_env.is_none());
+    }
+
+
     #[test]
     fn parallel_directive_clamps_above_thirtytwo() {
         let input = r#"### @test Clamp high
@@ -5004,5 +5165,6 @@ GET https://api.example.com/c
         assert!(!dd.allow_mismatch);
     }
 }
+
 
 

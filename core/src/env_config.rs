@@ -83,6 +83,34 @@ impl EnvConfig {
     }
 }
 
+/// Caller-facing selection model for which environment the runner should
+/// apply at suite-start. Persisted by the desktop/CLI/TUI **per canonical
+/// `.http` file path** so a per-file choice (e.g. in-file env on file A)
+/// does not clobber a different file's sidecar selection.
+///
+/// `Sidecar` carries the index into [`EnvConfig::entries`] of the active
+/// `.env` file. `InFile` names an env block declared inside the suite's
+/// `.http` file via `### @@env <name>`. `None` means "no env layer".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ActiveEnvSelection {
+    /// Apply no environment overlay; only `@variables` (+ CLI extras) take
+    /// effect.
+    None,
+    /// Apply variables from the sidecar `.env` at the given persisted index.
+    Sidecar { index: usize },
+    /// Apply variables from the named in-file env block belonging to the
+    /// `.http` file at `file_path`. `file_path` is recorded so the desktop
+    /// UI can persist per-file selections without cross-file leakage.
+    InFile { file_path: String, name: String },
+}
+
+impl Default for ActiveEnvSelection {
+    fn default() -> Self {
+        ActiveEnvSelection::None
+    }
+}
+
 fn canonical_key(path: &str) -> String {
     std::fs::canonicalize(path)
         .map(|p| p.to_string_lossy().to_string())

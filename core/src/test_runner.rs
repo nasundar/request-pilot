@@ -44,9 +44,23 @@ impl CancelToken {
 
 use crate::assertions::{self, AssertionResult};
 use crate::http_client;
-use crate::http_parser::{TestBlock, TestSuite};
+use crate::http_parser::{self, EnvBlock, TestBlock, TestSuite};
 use crate::telemetry::{self, TelemetryCollector, TelemetryStats};
 use crate::variables::{CapturedResponse, VariableStore};
+
+/// Resolve the "first env wins" default for a suite when the caller has
+/// not passed an explicit override. Returns:
+///   * the block matching `suite.active_env` if set
+///   * else the first declared env block if any
+///   * else `None`
+fn pick_default_env(suite: &TestSuite) -> Option<&EnvBlock> {
+    if let Some(ref name) = suite.active_env {
+        if let Some(blk) = suite.envs.iter().find(|e| &e.name == name) {
+            return Some(blk);
+        }
+    }
+    suite.envs.first()
+}
 
 /// Append an auto-injected request-id header (fresh UUIDv4) to `headers`, but
 /// only if no header with the same name is already present (case-insensitive).
@@ -1550,7 +1564,7 @@ pub async fn run_suite(
     progress: Option<Arc<dyn ProgressHandler>>,
     run_mode: Option<&str>,
 ) -> TestRunResults {
-    run_suite_inner(suite, extra_variables, &[], progress, run_mode, None).await
+    run_suite_inner(suite, extra_variables, &[], progress, run_mode, None, None).await
 }
 
 /// Run a test suite with additional headers injected into every request.
@@ -1561,7 +1575,7 @@ pub async fn run_suite_with_headers(
     progress: Option<Arc<dyn ProgressHandler>>,
     run_mode: Option<&str>,
 ) -> TestRunResults {
-    run_suite_inner(suite, extra_variables, extra_headers, progress, run_mode, None).await
+    run_suite_inner(suite, extra_variables, extra_headers, progress, run_mode, None, None).await
 }
 
 /// Run a test suite with optional cancellation. When the token is cancelled,
@@ -1575,7 +1589,42 @@ pub async fn run_suite_with_cancel(
     run_mode: Option<&str>,
     cancel: Option<CancelToken>,
 ) -> TestRunResults {
-    run_suite_inner(suite, extra_variables, extra_headers, progress, run_mode, cancel).await
+    run_suite_inner(suite, extra_variables, extra_headers, progress, run_mode, cancel, None).await
+}
+
+/// Run a test suite with an explicit in-file environment selection. The
+/// `active_env_override` parameter has three meanings:
+///   * `None`           — fall back to precedence chain:
+///                         `suite.active_env` → first declared env → no env
+///   * `Some("")`       — caller explicitly opts out of in-file envs (e.g.
+///                         they are layering a sidecar `.env` via
+///                         `extra_variables` instead). No in-file env is
+///                         applied even if the file declares blocks.
+///   * `Some("name")`   — apply the named in-file env block. If the name
+///                         doesn't match any declared block, fall back to
+///                         the default precedence chain.
+///
+/// The runner ignores `active_env_override` for sidecar selection; callers
+/// are responsible for the XOR (sidecar vars layer via `extra_variables`).
+pub async fn run_suite_with_active_env(
+    suite: &TestSuite,
+    extra_variables: &[(String, String)],
+    extra_headers: &[(String, String)],
+    progress: Option<Arc<dyn ProgressHandler>>,
+    run_mode: Option<&str>,
+    cancel: Option<CancelToken>,
+    active_env_override: Option<String>,
+) -> TestRunResults {
+    run_suite_inner(
+        suite,
+        extra_variables,
+        extra_headers,
+        progress,
+        run_mode,
+        cancel,
+        active_env_override,
+    )
+    .await
 }
 
 /// Inner implementation — emits block-progress events when handler is available.
@@ -1586,6 +1635,7 @@ async fn run_suite_inner(
     handler: Option<Arc<dyn ProgressHandler>>,
     run_mode: Option<&str>,
     cancel: Option<CancelToken>,
+    active_env_override: Option<String>,
 ) -> TestRunResults {
     // Resolve file-level `# @@request-id` into each block's effective header
     // (blocks without their own override inherit the file-level default;
@@ -1606,6 +1656,35 @@ async fn run_suite_inner(
     let suite = &suite_owned;
 
     let mut var_store = VariableStore::from_pairs(&suite.variables);
+
+    // ── In-file environment overlay (Feature 2) ──
+    // Precedence (lowest → highest):
+    //   builtins < @variables < in-file env (chosen below) < extra_variables
+    //
+    // Resolution of the "chosen" env block, in order:
+    //   1. `active_env_override = Some(name)` where name matches a block
+    //   2. `active_env_override = Some("")` → no in-file env (caller opt-out)
+    //   3. `suite.active_env` set by `# @@active_env <name>` directive
+    //   4. First declared env block if any (`suite.envs[0]`)
+    //   5. None → no overlay
+    //
+    // Callers that layer a sidecar `.env` (via `extra_variables`) and want
+    // XOR semantics should pass `Some(String::new())` to opt out here.
+    let chosen_env: Option<&http_parser::EnvBlock> = match active_env_override.as_deref() {
+        Some("") => None,
+        Some(name) => suite
+            .envs
+            .iter()
+            .find(|e| e.name == name)
+            .or_else(|| pick_default_env(suite)),
+        None => pick_default_env(suite),
+    };
+    if let Some(env) = chosen_env {
+        let pairs: Vec<(String, String)> =
+            env.vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        var_store.merge(&pairs);
+    }
+
     var_store.merge(extra_variables);
 
     // ── Initialize telemetry from well-known variables ──
@@ -2210,7 +2289,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], &[], None, None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None, None, None).await;
         assert_eq!(results.block_results.len(), 3);
         for r in &results.block_results {
             assert_ne!(r.status, "skipped");
@@ -2234,7 +2313,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], &[], None, None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None, None, None).await;
         assert_eq!(results.block_results.len(), 2);
         for r in &results.block_results {
             assert_ne!(r.status, "skipped");
@@ -2253,7 +2332,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], &[], None, None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None, None, None).await;
         assert_eq!(results.block_results.len(), 3);
     }
 
@@ -2269,7 +2348,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], &[], None, None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None, None, None).await;
         // Setup fails (unreachable addr) → tests skipped, but teardown always runs
         assert_eq!(results.block_results.len(), 4);
     }
@@ -2297,7 +2376,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], &[], None, None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None, None, None).await;
         assert_eq!(results.block_results.len(), 2);
         for r in &results.block_results {
             assert_eq!(r.status, "skipped");
@@ -2315,7 +2394,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], &[], None, None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None, None, None).await;
         assert_eq!(results.block_results.len(), 3);
         // Setup errors (connection refused)
         assert_eq!(results.block_results[0].status, "error");
@@ -2336,7 +2415,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let results = run_suite_inner(&suite, &[], &[], None, None, None).await;
+        let results = run_suite_inner(&suite, &[], &[], None, None, None, None).await;
         assert_eq!(results.block_results[0].name, "First");
         assert_eq!(results.block_results[1].name, "Second");
         assert_eq!(results.block_results[2].name, "Third");
@@ -3691,5 +3770,278 @@ mod tests {
         let step: StepResult = serde_json::from_str(minimal_step).expect("StepResult deserialize");
         assert!(!step.diff_failed);
         assert!(step.diff_failed_pairs.is_empty());
+    }
+
+    // -------------------------------------------------------------------
+    // Feature 2 — in-file env blocks: runner-side coverage.
+    //
+    // These tests verify the env-overlay merge order and behavior of the
+    // `active_env_override` parameter. We avoid network I/O by checking
+    // `final_variables` after running an empty test suite (no blocks to
+    // execute), which captures the var_store state after env overlay
+    // application.
+    // -------------------------------------------------------------------
+
+    fn make_env_suite(envs: Vec<(&str, Vec<(&str, &str)>)>, active: Option<&str>) -> TestSuite {
+        TestSuite {
+            envs: envs
+                .into_iter()
+                .map(|(name, vars)| crate::http_parser::EnvBlock {
+                    name: name.into(),
+                    vars: vars
+                        .into_iter()
+                        .map(|(k, v)| (k.into(), v.into()))
+                        .collect(),
+                })
+                .collect(),
+            active_env: active.map(|s| s.into()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn f2_runner_first_env_wins_when_no_override() {
+        let suite = make_env_suite(
+            vec![
+                ("dev", vec![("host", "dev.local"), ("k", "dv")]),
+                ("prod", vec![("host", "prod.cloud"), ("k", "pv")]),
+            ],
+            None,
+        );
+        let results = run_suite(&suite, &[], None, None).await;
+        assert_eq!(results.final_variables.get("host").map(|s| s.as_str()), Some("dev.local"));
+        assert_eq!(results.final_variables.get("k").map(|s| s.as_str()), Some("dv"));
+    }
+
+    #[tokio::test]
+    async fn f2_runner_active_env_directive_picks_named_block() {
+        let suite = make_env_suite(
+            vec![
+                ("dev", vec![("host", "dev.local")]),
+                ("prod", vec![("host", "prod.cloud")]),
+            ],
+            Some("prod"),
+        );
+        let results = run_suite(&suite, &[], None, None).await;
+        assert_eq!(results.final_variables.get("host").map(|s| s.as_str()), Some("prod.cloud"));
+    }
+
+    #[tokio::test]
+    async fn f2_runner_override_picks_named_env() {
+        let suite = make_env_suite(
+            vec![
+                ("dev", vec![("host", "dev.local")]),
+                ("prod", vec![("host", "prod.cloud")]),
+                ("staging", vec![("host", "staging.cloud")]),
+            ],
+            Some("prod"),
+        );
+        // Explicit caller override takes precedence over @@active_env.
+        let results = run_suite_with_active_env(
+            &suite,
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            Some("staging".to_string()),
+        )
+        .await;
+        assert_eq!(results.final_variables.get("host").map(|s| s.as_str()), Some("staging.cloud"));
+    }
+
+    #[tokio::test]
+    async fn f2_runner_override_empty_string_skips_in_file_env() {
+        let suite = make_env_suite(
+            vec![("dev", vec![("host", "dev.local"), ("k", "dv")])],
+            None,
+        );
+        // Empty string == caller opts out of in-file envs entirely (e.g.
+        // they're layering sidecar `.env` via extra_variables instead).
+        let results = run_suite_with_active_env(
+            &suite,
+            &[("host".into(), "sidecar.example".into())],
+            &[],
+            None,
+            None,
+            None,
+            Some(String::new()),
+        )
+        .await;
+        // host comes from extra_variables; k is NOT applied because env was skipped.
+        assert_eq!(results.final_variables.get("host").map(|s| s.as_str()), Some("sidecar.example"));
+        assert!(results.final_variables.get("k").is_none());
+    }
+
+    #[tokio::test]
+    async fn f2_runner_extra_variables_override_env() {
+        // CLI / sidecar layer must win over in-file env values for any
+        // overlapping keys, matching the precedence:
+        //   builtins < @variables < in-file env < extra_variables
+        let suite = make_env_suite(
+            vec![("dev", vec![("host", "dev.local"), ("port", "8080")])],
+            None,
+        );
+        let results = run_suite(
+            &suite,
+            &[("host".into(), "override.example".into())],
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(results.final_variables.get("host").map(|s| s.as_str()), Some("override.example"));
+        assert_eq!(results.final_variables.get("port").map(|s| s.as_str()), Some("8080"));
+    }
+
+    #[tokio::test]
+    async fn f2_runner_at_variables_lose_to_env_overlay() {
+        // @variables provide the base; in-file env overlays on top.
+        let mut suite = make_env_suite(
+            vec![("dev", vec![("host", "from-env")])],
+            None,
+        );
+        suite.variables = vec![
+            ("host".into(), "from-at-vars".into()),
+            ("untouched".into(), "static".into()),
+        ];
+        let results = run_suite(&suite, &[], None, None).await;
+        assert_eq!(results.final_variables.get("host").map(|s| s.as_str()), Some("from-env"));
+        // Non-overlapping @variables keys are preserved.
+        assert_eq!(results.final_variables.get("untouched").map(|s| s.as_str()), Some("static"));
+    }
+
+    #[tokio::test]
+    async fn f2_runner_no_envs_means_no_change() {
+        let suite = TestSuite {
+            variables: vec![("a".into(), "1".into())],
+            ..Default::default()
+        };
+        let results = run_suite(&suite, &[], None, None).await;
+        assert_eq!(results.final_variables.get("a").map(|s| s.as_str()), Some("1"));
+    }
+
+    #[tokio::test]
+    async fn f2_runner_unmatched_override_falls_back_to_default_chain() {
+        let suite = make_env_suite(
+            vec![
+                ("dev", vec![("host", "dev.local")]),
+                ("prod", vec![("host", "prod.cloud")]),
+            ],
+            Some("prod"),
+        );
+        // Override names a block that doesn't exist → fall back to
+        // @@active_env (prod), not first-wins (dev).
+        let results = run_suite_with_active_env(
+            &suite,
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            Some("ghost".to_string()),
+        )
+        .await;
+        assert_eq!(results.final_variables.get("host").map(|s| s.as_str()), Some("prod.cloud"));
+    }
+
+    #[tokio::test]
+    async fn f2_runner_extract_overrides_env_at_runtime() {
+        // NON-NEGOTIABLE per Feature 2 design: an @@extract during the run
+        // must mutate the var_store, overriding any env-overlay value with
+        // the same name. We use a mock HTTP server to drive a real setup
+        // block that extracts a value and then a follow-up test that
+        // observes the overridden variable in its URL.
+        let mut responses = std::collections::HashMap::new();
+        responses.insert("/login".to_string(), r#"{"token":"runtime-tok"}"#.to_string());
+        responses.insert(
+            "/with-tok-runtime-tok".to_string(),
+            r#"{"ok":true}"#.to_string(),
+        );
+        let port = spawn_mock_http_server(responses).await;
+
+        let make_block = |bt: &str, name: &str, url: String, extracts: Vec<crate::http_parser::Extract>, assertions: Vec<Assertion>| TestBlock {
+            block_type: bt.into(),
+            name: name.into(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: vec![],
+            request: crate::http_parser::ParsedRequest {
+                name: Some(name.into()),
+                method: "GET".into(),
+                url,
+                headers: vec![],
+                body: None,
+            },
+            assertions,
+            extracts,
+            compare: false,
+            steps: vec![],
+            diff: None,
+            diffs: vec![],
+            errors: vec![],
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: vec![],
+            for_loop: None,
+        };
+
+        let suite = TestSuite {
+            envs: vec![crate::http_parser::EnvBlock {
+                name: "dev".into(),
+                vars: vec![("token".into(), "env-tok".into())],
+            }],
+            active_env: None,
+            blocks: vec![
+                make_block(
+                    "setup",
+                    "Login",
+                    format!("http://127.0.0.1:{}/login", port),
+                    vec![crate::http_parser::Extract {
+                        variable_name: "token".into(),
+                        source_path: "$.token".into(),
+                    }],
+                    vec![],
+                ),
+                make_block(
+                    "test",
+                    "UseToken",
+                    format!("http://127.0.0.1:{}/with-tok-{{{{token}}}}", port),
+                    vec![],
+                    vec![Assertion {
+                        left: "$.ok".into(),
+                        operator: "==".into(),
+                        right: "true".into(),
+                    }],
+                ),
+            ],
+            ..Default::default()
+        };
+
+        let results = run_suite(&suite, &[], None, None).await;
+        // The UseToken block must have observed token=runtime-tok (the
+        // extracted value), not token=env-tok (the env overlay).
+        let use_tok = results
+            .block_results
+            .iter()
+            .find(|r| r.name == "UseToken")
+            .expect("UseToken block ran");
+        let body = use_tok
+            .response
+            .as_ref()
+            .map(|r| r.body.as_str())
+            .unwrap_or("");
+        assert!(
+            body.contains("\"ok\":true"),
+            "expected /with-tok-runtime-tok to hit, got body: {:?}",
+            body
+        );
+        assert_eq!(
+            results.final_variables.get("token").map(|s| s.as_str()),
+            Some("runtime-tok"),
+            "extract must override env-overlay value"
+        );
     }
 }
