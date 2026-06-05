@@ -108,7 +108,7 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 
 **Assertion operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `contains`
 **Special values:** `null`, `!null`
-**Paths:** `status`, `$.field`, `$.nested.field`, `$[0].field`, `$.field.length`, `$.headers.header-name`, `$.foo["literal-key"]` (bracket key for fields whose names contain dots, spaces, or other special chars), `$.arr[*].field` (wildcard — assertion must hold for every element; an empty array vacuously passes, giving "skip when no data" semantics for free)
+**Paths:** `status`, `$.field`, `$.nested.field`, `$[0].field`, `$.field.length`, `$.headers.<name>` (dot syntax — simple header names only), `$.headers["x-ms-request-id"]` (**bracket-key** — required for headers with `-`, `.`, or other non-identifier chars; header lookup is case-insensitive in both forms), `$.foo["literal-key"]` (bracket key for body fields whose names contain dots, spaces, or other special chars), `$.arr[*].field` (wildcard — assertion must hold for every element; an empty array vacuously passes, giving "skip when no data" semantics for free)
 
 ### Built-in Variables
 
@@ -723,6 +723,41 @@ GET {{base_url_canary}}/api/v1/users/{{user_id}}
 # @@assert $diff.similarity >= 0.9
 ```
 
+**Weighted comparison rules (V1.4+):** when you need a middle ground between "byte-identical" and "anything goes", attach **rules** to a `# @@diff` pair. Each rule scopes to the most-recent `# @@diff` above it (same as `$diff.*` assertions).
+
+| Directive | Effect |
+|-----------|--------|
+| `# @@diff_strict <path>` | Path must match. Any difference (added/removed/changed) records a `$diff.strict_violations` entry and forces the pair to fail. |
+| `# @@diff_weight <path> <weight>` | Per-field weight (≥ 0) charged to `$diff.weighted_score` when this path differs. `0.0` means "ignore". |
+| `# @@diff_default_weight <weight>` | Weight for differing paths that match no other rule. Defaults to `1.0`. |
+| `# @@diff_tolerance <N>` *or* `<N>%` | Aggregate budget: absolute weight cap, or percent of `$diff.weighted_total`. |
+
+Path syntax: `$.a.b`, bare `a.b`, `[*]` for any array index, `*` for any object key. Rules are prefix matches — `$.data.result[*].metric` covers every leaf under `metric`. Strict beats weighted; precedence is per-path.
+
+When any rule is present, pair pass/fail switches from "byte equality" to "no strict violations AND tolerance passes AND explicit `$diff.*` assertions pass". `match_exact` and `allow_mismatch` are bypassed. Non-JSON bodies fail (no silent text-mode pass).
+
+```http
+### @@test Numeric drift between API versions
+# @@compare
+
+# @@step v1
+POST {{base_url_v1}}/query
+…
+
+# @@step v2
+POST {{base_url_v2}}/query
+…
+
+# @@diff v1 v2
+# @@diff_strict status
+# @@diff_strict data.resultType
+# @@diff_strict data.result[*].metric
+# @@diff_weight data.result[*].values[*][0] 0.0   # timestamps always vary
+# @@diff_weight data.result[*].values[*][1] 0.1   # samples may drift slightly
+# @@diff_default_weight 1.0
+# @@diff_tolerance 5%
+```
+
 **`$diff` variable reference:**
 
 | Path | Type | Description |
@@ -739,18 +774,27 @@ GET {{base_url_canary}}/api/v1/users/{{user_id}}
 | `$diff.changed_paths[N].path` | string | Path of Nth changed field |
 | `$diff.changed_paths[N].left` | string | Step A value |
 | `$diff.changed_paths[N].right` | string | Step B value |
+| `$diff.strict_violations` | string[] | (V1.4+) Paths that hit a strict rule and differed |
+| `$diff.strict_violations.length` | int | (V1.4+) Strict violation count |
+| `$diff.weighted_score` | float | (V1.4+) Sum of weights charged across differing paths |
+| `$diff.weighted_total` | float | (V1.4+) Sum of weights across the diff-able surface |
+| `$diff.weighted_ratio` | float | (V1.4+) `score / total`, 0.0–1.0 |
+| `$diff.tolerance_passed` | bool? | (V1.4+) `true` when within budget; unset when no tolerance configured |
+| `$diff.rules_applied` | bool? | (V1.4+) `false` when rules couldn't apply (non-JSON body); unset when no rules configured |
 
 **Rules:**
 - ``# @@compare` is a modifier on a `@@test` (or `@@setup`/`@@teardown`) block — place it on the line after the block header
 - ``# @@step <name>` defines a named step within the compare block; each step has its own request line, headers, body, assertions, and extracts
 - ``# @@diff <step_a> <step_b> [allow_mismatch]` triggers comparison between two named steps — place it after all steps. Multiple `# @@diff` lines are allowed; each creates an independent pair.
 - ``# @@assert $diff.*` after a `# @@diff` line routes to **that pair only** (V1.3+); assertions before any `# @@diff` line attach to the first pair declared in the block.
-- ``allow_mismatch` on a `# @@diff` line suppresses the implicit body-match check for that pair only — explicit `$diff.*` assertions still run.
+- ``# @@diff_strict` / `# @@diff_weight` / `# @@diff_default_weight` / `# @@diff_tolerance` after a `# @@diff` line attach to **that pair only** (V1.4+). When ANY rule is set, the pair gate switches from `match_exact` to `strict_violations.is_empty() && tolerance_passed`.
+- ``allow_mismatch` on a `# @@diff` line suppresses the implicit body-match check for that pair only — explicit `$diff.*` assertions still run. With weighted rules, `allow_mismatch` is irrelevant (rules already define the gate).
 - Steps execute sequentially; each step's `@@assert` and `@@extract` directives evaluate immediately after that step's HTTP request completes
 - A pair fails when its explicit assertions fail OR its required body match fails (unless `allow_mismatch`). Other pairs in the same block keep running independently.
 - JSON responses get deep comparison with path-level diffs (e.g., `user.address.city`); non-JSON responses use character-level similarity scoring
 - Use `$diff.similarity >= 0.95` to allow small acceptable drift during incremental migration rollouts
 - Use `$diff.changed_count == 0` for strict parity checks where no field differences are allowed
+- **For "mostly identical with known variance" comparisons** (cross-region, A/B, latency canary, baseline-vs-rollup), prefer weighted rules over `allow_mismatch + similarity threshold` — they let you say *which* fields may drift and by how much, rather than a single global similarity number.
 
 ### Pattern 11: Repeater (`# @@for` over a JSON-array variable)
 

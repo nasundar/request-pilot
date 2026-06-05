@@ -173,6 +173,28 @@ fn resolve_response_value_multi(
         }
         return NavigationResult::single(BranchValue::Missing);
     }
+    // Bracket-key forms for header names containing `.`, `-`, or other
+    // chars not allowed in bare identifiers, e.g.
+    // `$.headers["x-ms-azure-implicit-rollup-applied"]`. We reuse the
+    // existing path-ops parser to get the same quoting/escaping rules as
+    // JSON bodies. Without this branch the path falls through to JSON
+    // body navigation and silently resolves to Missing.
+    if let Some(rest) = path
+        .strip_prefix("$.headers")
+        .or_else(|| path.strip_prefix("response.headers"))
+    {
+        if rest.starts_with('[') {
+            let ops = parse_path_ops(rest);
+            if let Some(PathOp::Field(name)) = ops.first() {
+                for (k, v) in headers {
+                    if k.to_lowercase() == name.to_lowercase() {
+                        return NavigationResult::single(BranchValue::Value(v.clone()));
+                    }
+                }
+                return NavigationResult::single(BranchValue::Missing);
+            }
+        }
+    }
 
     if path == "response.body" {
         return NavigationResult::single(BranchValue::Value(body.to_string()));
@@ -433,6 +455,49 @@ pub struct DiffResult {
     pub added_count: usize,
     pub removed_count: usize,
     pub changed_count: usize,
+    // ── Weighted comparison fields (V1.4) ────────────────────────────
+    // All defaulted so older serialized DiffResult JSON (history /
+    // run.json) still deserializes cleanly.
+    /// Paths that hit a `# @@diff_strict` rule and actually differed.
+    /// Non-empty ⇒ the pair fails regardless of tolerance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strict_violations: Vec<String>,
+    /// One entry per differing path that survived strict matching,
+    /// carrying the weight charged to `weighted_score`. Truncated at
+    /// `MAX_DIFF_PATHS` for display; the score itself is computed from
+    /// the full uncapped enumeration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub weighted_paths: Vec<WeightedDiffPath>,
+    /// Sum of weights across every non-strict differing path.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub weighted_score: f64,
+    /// Sum of weights across every non-strict path on EITHER side.
+    /// Defines the denominator of `weighted_ratio` so the metric is
+    /// comparable across runs of the same suite.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub weighted_total: f64,
+    /// `weighted_score / weighted_total` (0.0 when total is 0).
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub weighted_ratio: f64,
+    /// Echo of the configured tolerance for display / round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<DiffTolerance>,
+    /// `None` when no tolerance was configured. `Some(true)` when the
+    /// weighted score stayed within budget. `Some(false)` when it
+    /// exceeded budget (or rules could not be applied — see
+    /// `rules_applied`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance_passed: Option<bool>,
+    /// `None` when no rules were supplied. `Some(true)` when rules ran
+    /// against valid JSON on both sides. `Some(false)` when one or both
+    /// bodies were non-JSON — runner treats this as a hard failure so a
+    /// silent text-mode pass is impossible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_applied: Option<bool>,
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -440,6 +505,68 @@ pub struct ChangedField {
     pub path: String,
     pub left: String,
     pub right: String,
+}
+
+/// Tolerance budget for a weighted diff. Absolute is a raw weight cap;
+/// Percent is `0.0..=100.0` of `weighted_total`.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[serde(tag = "kind", content = "value")]
+pub enum DiffTolerance {
+    Absolute(f64),
+    Percent(f64),
+}
+
+/// Per-pair weighted comparison rules attached to a `# @@diff a b`
+/// directive. An empty `DiffRules` means "no rules" — the runner
+/// falls back to the existing `match_exact || allow_mismatch` gate.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct DiffRules {
+    /// Paths whose values must match exactly. Any difference at one of
+    /// these paths records a strict violation; the pair fails.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strict_paths: Vec<String>,
+    /// `(path, weight)` pairs. First match wins; later rules with the
+    /// same path are ignored. Weights must be `>= 0`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub weighted_paths: Vec<(String, f64)>,
+    /// Fallback weight for paths that match neither a strict nor a
+    /// weighted rule. `None` ⇒ 1.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_weight: Option<f64>,
+    /// Aggregate budget. `None` ⇒ no tolerance check (any non-strict
+    /// diff still scores, but `tolerance_passed` stays `None` so the
+    /// runner does not fail on score alone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<DiffTolerance>,
+}
+
+impl DiffRules {
+    /// True when no directive populated this struct. Runner uses this
+    /// to decide whether to invoke the weighted code path.
+    pub fn is_empty(&self) -> bool {
+        self.strict_paths.is_empty()
+            && self.weighted_paths.is_empty()
+            && self.default_weight.is_none()
+            && self.tolerance.is_none()
+    }
+
+    fn effective_default_weight(&self) -> f64 {
+        self.default_weight.unwrap_or(1.0)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+pub enum WeightedDiffKind {
+    Added,
+    Removed,
+    Changed,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WeightedDiffPath {
+    pub path: String,
+    pub weight: f64,
+    pub kind: WeightedDiffKind,
 }
 
 /// Recursively collect all leaf paths and their string representations.
@@ -547,7 +674,7 @@ pub fn compute_diff(body_a: &str, body_b: &str) -> DiffResult {
     if let (Ok(va), Ok(vb)) = (json_a, json_b) {
         let na = normalize_json(&va);
         let nb = normalize_json(&vb);
-        compute_json_diff(&na, &nb)
+        raw_to_diff_result(compute_raw_json_diff(&na, &nb))
     } else if body_a.trim().starts_with('<') && body_b.trim().starts_with('<') {
         // Both look like XML — normalize before text comparison
         let norm_a = normalize_xml(body_a);
@@ -558,7 +685,178 @@ pub fn compute_diff(body_a: &str, body_b: &str) -> DiffResult {
     }
 }
 
-fn compute_json_diff(va: &serde_json::Value, vb: &serde_json::Value) -> DiffResult {
+/// Same shape as `compute_diff` but layers per-path weighted rules on
+/// top. When `rules.is_empty()`, returns the unmodified `compute_diff`
+/// output (zero behavior change for callers without rules). When either
+/// body is non-JSON, sets `rules_applied = Some(false)` and
+/// `tolerance_passed = Some(false)` so the runner fails the pair
+/// rather than silently passing on a text-mode diff.
+pub fn compute_diff_with_rules(
+    body_a: &str,
+    body_b: &str,
+    rules: &DiffRules,
+) -> DiffResult {
+    if rules.is_empty() {
+        return compute_diff(body_a, body_b);
+    }
+
+    let json_a = serde_json::from_str::<serde_json::Value>(body_a);
+    let json_b = serde_json::from_str::<serde_json::Value>(body_b);
+    let (va, vb) = match (json_a, json_b) {
+        (Ok(a), Ok(b)) => (a, b),
+        _ => {
+            // Non-JSON body with rules → rules cannot be applied. We
+            // still emit a baseline text-similarity DiffResult so the UI
+            // has something to render, but flag the failure modes so
+            // the runner refuses to pass.
+            let mut base = compute_diff(body_a, body_b);
+            base.rules_applied = Some(false);
+            base.tolerance_passed = Some(false);
+            base.tolerance = rules.tolerance;
+            return base;
+        }
+    };
+
+    let na = normalize_json(&va);
+    let nb = normalize_json(&vb);
+    let raw = compute_raw_json_diff(&na, &nb);
+    let mut result = raw_to_diff_result_capped(&raw);
+
+    // Compile rules into PathOp vectors once.
+    let strict_ops: Vec<Vec<PathOp>> = rules
+        .strict_paths
+        .iter()
+        .map(|p| parse_path_ops(strip_dollar_prefix(p)))
+        .collect();
+    let weighted_ops: Vec<(Vec<PathOp>, f64)> = rules
+        .weighted_paths
+        .iter()
+        .map(|(p, w)| (parse_path_ops(strip_dollar_prefix(p)), *w))
+        .collect();
+    let default_w = rules.effective_default_weight();
+
+    // ── Score: walk every differing path in the uncapped raw enum. ──
+    let mut strict_violations: Vec<String> = Vec::new();
+    let mut weighted_paths: Vec<WeightedDiffPath> = Vec::new();
+    let mut weighted_score: f64 = 0.0;
+
+    let mut process = |path: &str, kind: WeightedDiffKind| {
+        let path_ops = parse_path_ops(path);
+        if strict_ops.iter().any(|r| rule_matches_path(r, &path_ops)) {
+            strict_violations.push(path.to_string());
+            return;
+        }
+        let weight = weighted_ops
+            .iter()
+            .find(|(r, _)| rule_matches_path(r, &path_ops))
+            .map(|(_, w)| *w)
+            .unwrap_or(default_w);
+        weighted_score += weight;
+        if weighted_paths.len() < MAX_DIFF_PATHS {
+            weighted_paths.push(WeightedDiffPath {
+                path: path.to_string(),
+                weight,
+                kind,
+            });
+        }
+    };
+    for p in &raw.added {
+        process(p, WeightedDiffKind::Added);
+    }
+    for p in &raw.removed {
+        process(p, WeightedDiffKind::Removed);
+    }
+    for cf in &raw.changed {
+        process(&cf.path, WeightedDiffKind::Changed);
+    }
+
+    // ── Total: weighted surface across union(A, B), skipping strict. ──
+    // Strict paths contribute 0 because they're hard-fail when violated
+    // and irrelevant to the budget when satisfied — keeping them out of
+    // the denominator means `weighted_ratio` measures "of the diff-able
+    // surface, how much actually differs".
+    let mut weighted_total: f64 = 0.0;
+    let mut seen_paths: std::collections::HashSet<&str> =
+        std::collections::HashSet::with_capacity(raw.paths_a.len() + raw.paths_b.len());
+    for (p, _) in raw.paths_a.iter().chain(raw.paths_b.iter()) {
+        if !seen_paths.insert(p.as_str()) {
+            continue;
+        }
+        let path_ops = parse_path_ops(p);
+        if strict_ops.iter().any(|r| rule_matches_path(r, &path_ops)) {
+            continue;
+        }
+        let weight = weighted_ops
+            .iter()
+            .find(|(r, _)| rule_matches_path(r, &path_ops))
+            .map(|(_, w)| *w)
+            .unwrap_or(default_w);
+        weighted_total += weight;
+    }
+
+    let weighted_ratio = if weighted_total > 0.0 {
+        weighted_score / weighted_total
+    } else {
+        0.0
+    };
+
+    let tolerance_passed = rules.tolerance.map(|tol| match tol {
+        DiffTolerance::Absolute(cap) => weighted_score <= cap,
+        DiffTolerance::Percent(pct) => weighted_ratio * 100.0 <= pct,
+    });
+
+    result.strict_violations = strict_violations;
+    result.weighted_paths = weighted_paths;
+    result.weighted_score = weighted_score;
+    result.weighted_total = weighted_total;
+    result.weighted_ratio = weighted_ratio;
+    result.tolerance = rules.tolerance;
+    result.tolerance_passed = tolerance_passed;
+    result.rules_applied = Some(true);
+    result
+}
+
+fn strip_dollar_prefix(path: &str) -> &str {
+    path.strip_prefix("$.")
+        .or_else(|| path.strip_prefix('$'))
+        .unwrap_or(path)
+}
+
+/// Match a compiled rule against a compiled diff path. The rule must
+/// be a prefix of the path (rule.len() <= path.len()), with wildcards:
+///   * `PathOp::Wildcard` matches any `Index(N)` or another `Wildcard`
+///   * `PathOp::Field("*")` matches any `Field(name)` segment
+///   * everything else requires structural equality
+/// Prefix-matching means `data.result[*].metric` matches every leaf path
+/// under `metric` (e.g. `data.result[0].metric.namespace`).
+fn rule_matches_path(rule: &[PathOp], path: &[PathOp]) -> bool {
+    if rule.len() > path.len() {
+        return false;
+    }
+    rule.iter()
+        .zip(path.iter())
+        .all(|(r, p)| match (r, p) {
+            (PathOp::Field(rn), PathOp::Field(pn)) => rn == "*" || rn == pn,
+            (PathOp::Wildcard, PathOp::Index(_)) => true,
+            (PathOp::Wildcard, PathOp::Wildcard) => true,
+            (PathOp::Index(ri), PathOp::Index(pi)) => ri == pi,
+            _ => false,
+        })
+}
+
+/// Uncapped enumeration of differing leaf paths plus the flattened
+/// leaf-path lists from both sides. The weighted scorer needs the
+/// FULL set; display capping happens separately in
+/// `raw_to_diff_result_capped` / `raw_to_diff_result`.
+struct RawJsonDiff {
+    added: Vec<String>,
+    removed: Vec<String>,
+    changed: Vec<ChangedField>,
+    paths_a: Vec<(String, String)>,
+    paths_b: Vec<(String, String)>,
+}
+
+fn compute_raw_json_diff(va: &serde_json::Value, vb: &serde_json::Value) -> RawJsonDiff {
     let mut paths_a: Vec<(String, String)> = Vec::new();
     let mut paths_b: Vec<(String, String)> = Vec::new();
     collect_json_paths(va, "", &mut paths_a);
@@ -572,50 +870,55 @@ fn compute_json_diff(va: &serde_json::Value, vb: &serde_json::Value) -> DiffResu
     let mut added: Vec<String> = Vec::new();
     let mut removed: Vec<String> = Vec::new();
     let mut changed: Vec<ChangedField> = Vec::new();
-    let mut total_added = 0usize;
-    let mut total_removed = 0usize;
-    let mut total_changed = 0usize;
 
     for (path, val_a) in &map_a {
         match map_b.get(path) {
             Some(val_b) if val_a != val_b => {
-                total_changed += 1;
-                if changed.len() < MAX_DIFF_PATHS {
-                    changed.push(ChangedField {
-                        path: path.to_string(),
-                        left: val_a.to_string(),
-                        right: val_b.to_string(),
-                    });
-                }
+                changed.push(ChangedField {
+                    path: path.to_string(),
+                    left: val_a.to_string(),
+                    right: val_b.to_string(),
+                });
             }
             None => {
-                total_removed += 1;
-                if removed.len() < MAX_DIFF_PATHS {
-                    removed.push(path.to_string());
-                }
+                removed.push(path.to_string());
             }
             _ => {}
         }
     }
-
     for path in map_b.keys() {
         if !map_a.contains_key(path) {
-            total_added += 1;
-            if added.len() < MAX_DIFF_PATHS {
-                added.push(path.to_string());
-            }
+            added.push(path.to_string());
         }
     }
-
     added.sort();
     removed.sort();
     changed.sort_by(|a, b| a.path.cmp(&b.path));
 
-    let added_count = total_added;
-    let removed_count = total_removed;
-    let changed_count = total_changed;
+    RawJsonDiff {
+        added,
+        removed,
+        changed,
+        paths_a,
+        paths_b,
+    }
+}
 
-    let total_max = paths_a.len().max(paths_b.len()).max(1) as f64;
+/// Build a `DiffResult` from a `RawJsonDiff`, truncating the display
+/// vectors at `MAX_DIFF_PATHS` while keeping counts at the uncapped
+/// totals. Identical to `raw_to_diff_result` but without consuming
+/// the raw enumeration — used when the caller still needs `raw` for
+/// weighted scoring.
+fn raw_to_diff_result_capped(raw: &RawJsonDiff) -> DiffResult {
+    let added_count = raw.added.len();
+    let removed_count = raw.removed.len();
+    let changed_count = raw.changed.len();
+
+    let added: Vec<String> = raw.added.iter().take(MAX_DIFF_PATHS).cloned().collect();
+    let removed: Vec<String> = raw.removed.iter().take(MAX_DIFF_PATHS).cloned().collect();
+    let changed: Vec<ChangedField> = raw.changed.iter().take(MAX_DIFF_PATHS).cloned().collect();
+
+    let total_max = raw.paths_a.len().max(raw.paths_b.len()).max(1) as f64;
     let diff_count = (changed_count + added_count + removed_count) as f64;
     let similarity = (1.0 - diff_count / total_max).max(0.0);
 
@@ -629,7 +932,12 @@ fn compute_json_diff(va: &serde_json::Value, vb: &serde_json::Value) -> DiffResu
         added_count,
         removed_count,
         changed_count,
+        ..Default::default()
     }
+}
+
+fn raw_to_diff_result(raw: RawJsonDiff) -> DiffResult {
+    raw_to_diff_result_capped(&raw)
 }
 
 fn compute_text_diff(body_a: &str, body_b: &str) -> DiffResult {
@@ -676,6 +984,16 @@ pub fn resolve_diff_value(path: &str, diff: &DiffResult) -> Option<String> {
         "added_paths.length" => Some(diff.added_paths.len().to_string()),
         "removed_paths.length" => Some(diff.removed_paths.len().to_string()),
         "changed_paths.length" => Some(diff.changed_paths.len().to_string()),
+        // ── Weighted comparison fields (V1.4) ────────────────────
+        "strict_violations" => {
+            Some(serde_json::to_string(&diff.strict_violations).unwrap_or_default())
+        }
+        "strict_violations.length" => Some(diff.strict_violations.len().to_string()),
+        "weighted_score" => Some(format!("{:.4}", diff.weighted_score)),
+        "weighted_total" => Some(format!("{:.4}", diff.weighted_total)),
+        "weighted_ratio" => Some(format!("{:.4}", diff.weighted_ratio)),
+        "tolerance_passed" => diff.tolerance_passed.map(|b| b.to_string()),
+        "rules_applied" => diff.rules_applied.map(|b| b.to_string()),
         _ => resolve_changed_path_index(key, diff),
     }
 }
@@ -1310,6 +1628,7 @@ mod tests {
                     right: "Bob".into(),
                 },
             ],
+            ..Default::default()
         };
 
         assert_eq!(resolve_diff_value("$diff.match", &diff), Some("false".to_string()));
@@ -1676,5 +1995,322 @@ mod tests {
         let body = r#"{"items":[1,2,3]}"#;
         let v = resolve_response_value("$.items[*]", 200, &empty_headers(), body);
         assert!(v.is_none(), "wildcard path must not resolve to a single value");
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // V1.4: weighted-diff rules
+    // ──────────────────────────────────────────────────────────────────
+
+    fn make_rules(
+        strict: &[&str],
+        weighted: &[(&str, f64)],
+        default_weight: Option<f64>,
+        tolerance: Option<DiffTolerance>,
+    ) -> DiffRules {
+        DiffRules {
+            strict_paths: strict.iter().map(|s| s.to_string()).collect(),
+            weighted_paths: weighted.iter().map(|(p, w)| (p.to_string(), *w)).collect(),
+            default_weight,
+            tolerance,
+        }
+    }
+
+    #[test]
+    fn weighted_no_rules_is_passthrough() {
+        // compute_diff_with_rules with empty rules MUST equal compute_diff.
+        let a = r#"{"x":1,"y":2}"#;
+        let b = r#"{"x":1,"y":3}"#;
+        let plain = compute_diff(a, b);
+        let ruled = compute_diff_with_rules(a, b, &DiffRules::default());
+        assert_eq!(plain.changed_count, ruled.changed_count);
+        assert_eq!(plain.match_exact, ruled.match_exact);
+        assert!(ruled.rules_applied.is_none(), "no rules ⇒ rules_applied=None");
+        assert!(ruled.tolerance_passed.is_none());
+        assert!(ruled.strict_violations.is_empty());
+        assert_eq!(ruled.weighted_score, 0.0);
+    }
+
+    #[test]
+    fn weighted_strict_violation_recorded() {
+        // Strict rule on a changed field ⇒ strict_violations populated.
+        let a = r#"{"id":"alice","ts":1}"#;
+        let b = r#"{"id":"bob","ts":2}"#;
+        let rules = make_rules(&["$.id"], &[("$.ts", 0.0)], None, None);
+        let r = compute_diff_with_rules(a, b, &rules);
+        assert_eq!(r.strict_violations, vec!["id".to_string()]);
+        assert_eq!(r.rules_applied, Some(true));
+        // ts difference contributes 0 to score because weight is 0
+        assert_eq!(r.weighted_score, 0.0);
+    }
+
+    #[test]
+    fn weighted_strict_beats_weighted_when_both_match() {
+        // Precedence: strict rule wins over weighted rule for the same path.
+        let a = r#"{"id":"alice"}"#;
+        let b = r#"{"id":"bob"}"#;
+        let rules = make_rules(&["$.id"], &[("$.id", 0.5)], None, None);
+        let r = compute_diff_with_rules(a, b, &rules);
+        assert_eq!(r.strict_violations.len(), 1);
+        assert_eq!(r.weighted_score, 0.0, "weighted rule must not also charge");
+    }
+
+    #[test]
+    fn weighted_default_weight_fallback() {
+        // Path matching no rule gets default_weight.
+        let a = r#"{"a":1,"b":2,"c":3}"#;
+        let b = r#"{"a":9,"b":9,"c":9}"#;
+        let rules = make_rules(&[], &[("$.a", 0.1)], Some(2.0), None);
+        let r = compute_diff_with_rules(a, b, &rules);
+        // a=0.1, b=2.0, c=2.0 = 4.1
+        assert!((r.weighted_score - 4.1).abs() < 1e-9, "got {}", r.weighted_score);
+    }
+
+    #[test]
+    fn weighted_absolute_tolerance_pass_and_fail() {
+        let a = r#"{"x":1,"y":2}"#;
+        let b = r#"{"x":1,"y":99}"#;
+        let pass = compute_diff_with_rules(
+            a, b,
+            &make_rules(&[], &[("$.y", 0.3)], Some(1.0), Some(DiffTolerance::Absolute(0.5))),
+        );
+        assert_eq!(pass.tolerance_passed, Some(true));
+        let fail = compute_diff_with_rules(
+            a, b,
+            &make_rules(&[], &[("$.y", 0.3)], Some(1.0), Some(DiffTolerance::Absolute(0.1))),
+        );
+        assert_eq!(fail.tolerance_passed, Some(false));
+    }
+
+    #[test]
+    fn weighted_percent_tolerance() {
+        // 4 leaf paths; 2 differ; weights all 1.0 → ratio 50%.
+        let a = r#"{"a":1,"b":2,"c":3,"d":4}"#;
+        let b = r#"{"a":1,"b":2,"c":99,"d":99}"#;
+        let r = compute_diff_with_rules(
+            a, b,
+            &make_rules(&[], &[], None, Some(DiffTolerance::Percent(60.0))),
+        );
+        assert!((r.weighted_ratio - 0.5).abs() < 1e-9);
+        assert_eq!(r.tolerance_passed, Some(true));
+        let r2 = compute_diff_with_rules(
+            a, b,
+            &make_rules(&[], &[], None, Some(DiffTolerance::Percent(40.0))),
+        );
+        assert_eq!(r2.tolerance_passed, Some(false));
+    }
+
+    #[test]
+    fn weighted_array_wildcard_matches_every_element() {
+        // $.items[*].price matches both items[0].price and items[1].price.
+        let a = r#"{"items":[{"price":10},{"price":20}]}"#;
+        let b = r#"{"items":[{"price":11},{"price":99}]}"#;
+        let r = compute_diff_with_rules(
+            a, b,
+            &make_rules(&[], &[("$.items[*].price", 0.5)], Some(10.0), None),
+        );
+        // Both diffs charged at 0.5 each ⇒ score 1.0
+        assert_eq!(r.weighted_score, 1.0);
+    }
+
+    #[test]
+    fn weighted_prefix_match_covers_subtree() {
+        // Strict on `$.data.result[*].metric` should catch a violation at
+        // `data.result[0].metric.namespace`.
+        let a = r#"{"data":{"result":[{"metric":{"ns":"a"}}]}}"#;
+        let b = r#"{"data":{"result":[{"metric":{"ns":"b"}}]}}"#;
+        let r = compute_diff_with_rules(
+            a, b,
+            &make_rules(&["$.data.result[*].metric"], &[], None, None),
+        );
+        assert_eq!(r.strict_violations.len(), 1);
+    }
+
+    #[test]
+    fn weighted_strict_on_added_path() {
+        // A path present only in B (added) triggers a strict rule, not just
+        // a "changed" path. Important so partial responses are caught.
+        let a = r#"{"x":1}"#;
+        let b = r#"{"x":1,"id":"new"}"#;
+        let r = compute_diff_with_rules(
+            a, b,
+            &make_rules(&["$.id"], &[], None, None),
+        );
+        assert_eq!(r.strict_violations, vec!["id".to_string()]);
+    }
+
+    #[test]
+    fn weighted_non_json_body_fails_with_rules() {
+        // Non-JSON bodies cannot be path-rule-scored. Runner must see
+        // rules_applied=false + tolerance_passed=false so the pair fails
+        // instead of silently passing on text similarity.
+        let a = "plain text body A";
+        let b = "plain text body B";
+        let r = compute_diff_with_rules(
+            a, b,
+            &make_rules(&[], &[("$.foo", 0.1)], None, Some(DiffTolerance::Percent(50.0))),
+        );
+        assert_eq!(r.rules_applied, Some(false));
+        assert_eq!(r.tolerance_passed, Some(false));
+    }
+
+    #[test]
+    fn weighted_total_excludes_strict_paths() {
+        // Strict paths contribute 0 to denominator, so ratio focuses on
+        // the "diff-able surface" only. Bodies have 3 paths; one is strict.
+        let a = r#"{"id":"a","x":1,"y":2}"#;
+        let b = r#"{"id":"a","x":1,"y":3}"#;
+        let r = compute_diff_with_rules(
+            a, b,
+            &make_rules(&["$.id"], &[("$.x", 0.0)], Some(1.0), None),
+        );
+        // weighted_total: x(0) + y(1) = 1.0. Score: y(1). Ratio 1.0.
+        assert!((r.weighted_total - 1.0).abs() < 1e-9);
+        assert!((r.weighted_ratio - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn weighted_diff_result_round_trips_serde_back_compat() {
+        // Old DiffResult JSON without any of the new fields must still
+        // deserialize cleanly thanks to #[serde(default)].
+        let legacy = r#"{
+            "match_exact": false, "similarity": 0.5, "is_json": true,
+            "added_paths": [], "removed_paths": [], "changed_paths": [],
+            "added_count": 0, "removed_count": 0, "changed_count": 1
+        }"#;
+        let d: DiffResult = serde_json::from_str(legacy)
+            .expect("old DiffResult JSON must deserialize");
+        assert!(d.strict_violations.is_empty());
+        assert!(d.weighted_paths.is_empty());
+        assert_eq!(d.weighted_score, 0.0);
+        assert!(d.tolerance_passed.is_none());
+        assert!(d.rules_applied.is_none());
+    }
+
+    #[test]
+    fn weighted_large_diff_scores_beyond_max_display() {
+        // Regression: scoring must walk the UNCAPPED diff list, not the
+        // display-capped vectors. Build two objects with > MAX_DIFF_PATHS
+        // (1000) leaf differences and verify the score reflects all of them.
+        let mut a = String::from("{");
+        let mut b = String::from("{");
+        for i in 0..1500 {
+            if i > 0 { a.push(','); b.push(','); }
+            a.push_str(&format!(r#""k{}":1"#, i));
+            b.push_str(&format!(r#""k{}":2"#, i));
+        }
+        a.push('}'); b.push('}');
+        let r = compute_diff_with_rules(
+            &a, &b,
+            &make_rules(&[], &[], Some(1.0), None),
+        );
+        assert_eq!(r.changed_count, 1500);
+        assert!(r.changed_paths.len() <= MAX_DIFF_PATHS, "display still capped");
+        assert!((r.weighted_score - 1500.0).abs() < 1e-9, "score includes ALL diffs");
+    }
+
+    #[test]
+    fn weighted_strip_dollar_prefix() {
+        // `$.foo` and `foo` and `$foo` should all behave identically.
+        let a = r#"{"foo":1}"#;
+        let b = r#"{"foo":2}"#;
+        let r1 = compute_diff_with_rules(a, b, &make_rules(&["$.foo"], &[], None, None));
+        let r2 = compute_diff_with_rules(a, b, &make_rules(&["foo"], &[], None, None));
+        let r3 = compute_diff_with_rules(a, b, &make_rules(&["$foo"], &[], None, None));
+        assert_eq!(r1.strict_violations.len(), 1);
+        assert_eq!(r2.strict_violations.len(), 1);
+        assert_eq!(r3.strict_violations.len(), 1);
+    }
+
+    // ── Header bracket-key syntax for names with dashes/dots ─────
+
+    fn header(name: &str, value: &str) -> Vec<(String, String)> {
+        vec![(name.to_string(), value.to_string())]
+    }
+
+    #[test]
+    fn header_bracket_key_resolves_when_dot_syntax_cannot() {
+        // Header names with dashes can't be addressed via dot syntax;
+        // bracket-key syntax must work. Regression test for the
+        // `$.headers["..."]` silent-Missing bug.
+        let hdrs = header(
+            "x-ms-azure-implicit-rollup-applied",
+            r#"[{"tier":1,"B":60}]"#,
+        );
+        let a = make_assertion(
+            r#"$.headers["x-ms-azure-implicit-rollup-applied"]"#,
+            "contains",
+            r#""tier":1"#,
+        );
+        let r = evaluate(&a, 200, &hdrs, "");
+        assert!(
+            r.passed,
+            "bracket-key header lookup must work; got actual={:?}",
+            r.actual
+        );
+    }
+
+    #[test]
+    fn header_bracket_key_not_null_pass() {
+        // The `!= null` assertion from the user's repro should pass
+        // when the header IS present, not fail because the resolver
+        // silently returned Missing.
+        let hdrs = header("x-ms-azure-implicit-rollup-applied", "[{}]");
+        let a = make_assertion(
+            r#"$.headers["x-ms-azure-implicit-rollup-applied"]"#,
+            "!=",
+            "null",
+        );
+        let r = evaluate(&a, 200, &hdrs, "");
+        assert!(r.passed);
+    }
+
+    #[test]
+    fn header_bracket_key_case_insensitive() {
+        // Same case-insensitivity as the dot-syntax path.
+        let hdrs = header("X-Ms-Foo", "bar");
+        let a = make_assertion(r#"$.headers["x-ms-foo"]"#, "==", "bar");
+        let r = evaluate(&a, 200, &hdrs, "");
+        assert!(r.passed);
+    }
+
+    #[test]
+    fn header_bracket_key_missing_returns_missing_for_neq_null() {
+        // When the header is genuinely absent, `!= null` must fail
+        // (matching dot-syntax semantics).
+        let hdrs: Vec<(String, String)> = Vec::new();
+        let a = make_assertion(r#"$.headers["not-there"]"#, "!=", "null");
+        let r = evaluate(&a, 200, &hdrs, "");
+        assert!(!r.passed);
+    }
+
+    #[test]
+    fn header_bracket_key_response_prefix_form() {
+        // `response.headers["..."]` (no leading `$`) must also work.
+        let hdrs = header("x-trace-id", "abc-123");
+        let a = make_assertion(
+            r#"response.headers["x-trace-id"]"#,
+            "==",
+            "abc-123",
+        );
+        let r = evaluate(&a, 200, &hdrs, "");
+        assert!(r.passed);
+    }
+
+    #[test]
+    fn weighted_resolve_diff_value_new_keys() {
+        let a = r#"{"id":"a","x":1}"#;
+        let b = r#"{"id":"b","x":2}"#;
+        let diff = compute_diff_with_rules(
+            a, b,
+            &make_rules(&["$.id"], &[("$.x", 0.3)], None, Some(DiffTolerance::Absolute(1.0))),
+        );
+        assert_eq!(resolve_diff_value("$diff.strict_violations.length", &diff), Some("1".into()));
+        assert_eq!(resolve_diff_value("$diff.weighted_score", &diff), Some("0.3000".into()));
+        assert_eq!(resolve_diff_value("$diff.tolerance_passed", &diff), Some("true".into()));
+        assert_eq!(resolve_diff_value("$diff.rules_applied", &diff), Some("true".into()));
+        // tolerance_passed key returns None when no rules were configured
+        let plain = compute_diff(a, b);
+        assert_eq!(resolve_diff_value("$diff.tolerance_passed", &plain), None);
+        assert_eq!(resolve_diff_value("$diff.rules_applied", &plain), None);
     }
 }
