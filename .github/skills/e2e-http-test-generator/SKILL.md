@@ -90,6 +90,10 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 # @@step <name>                        — define a named request step
 # @@diff <step_a> <step_b>             — compare responses of two steps
 # @@assert $diff.match == true          — diff assertion example
+# @@diff_strict <path>                  — (rule-based diff) path must match; any diff is a hard failure
+# @@diff_weight <path> <weight>         — (rule-based diff) charge `weight` against the tolerance budget when this path differs (`0.0` = ignore)
+# @@diff_default_weight <weight>        — (rule-based diff) weight for paths not matching any rule; defaults to 1.0
+# @@diff_tolerance <N>|<N>%             — (rule-based diff) aggregate budget: absolute weight cap, or % of weighted_total
 # @@for <iter_var> in <source_var>     — iterate block once per element of `source_var` (a JSON-array variable). Bare var name, NOT `{{source_var}}`. Auto-binds `{{$index}}` (0-based) and `{{$iteration}}` (1-based). For object elements, use dotted paths: `{{iter_var.field}}`. Cannot combine with `@@compare`.
 # @@parallel <N>                        — (loop-level, under `# @@for`) run iterations concurrently with N workers (default 4 if bare; clamped to [1,32]; also clamped to file-level cap)
 # @@redact body $.json.path             — scrub a JSON field from recorded bodies (JSONPath: $.foo, $.foo.bar, $.foo[0], $.foo[*])
@@ -109,6 +113,8 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 **Assertion operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `contains`
 **Special values:** `null`, `!null`
 **Paths:** `status`, `$.field`, `$.nested.field`, `$[0].field`, `$.field.length`, `$.headers.<name>` (dot syntax — simple header names only), `$.headers["x-ms-request-id"]` (**bracket-key** — required for headers with `-`, `.`, or other non-identifier chars; header lookup is case-insensitive in both forms), `$.foo["literal-key"]` (bracket key for body fields whose names contain dots, spaces, or other special chars), `$.arr[*].field` (wildcard — assertion must hold for every element; an empty array vacuously passes, giving "skip when no data" semantics for free)
+
+**`{{variable}}` interpolation works inside assertion paths and expected values too** (V1.4+) — both sides of an `# @@assert` are interpolated before evaluation. Useful for parameterising header lookups (`$.headers["{{impl_header}}"] != null`), expected ids (`$.id == {{expected_id}}`), and extract source paths (`# @@extract token = $.headers["{{token_header}}"]`).
 
 ### Built-in Variables
 
@@ -671,10 +677,18 @@ Authorization: Bearer {{access_token}}
 
 ### Pattern 10: Response Comparison (`@@compare`)
 
-When an API is being migrated, versioned, or A/B tested, use `@@compare` to execute two requests within a single test block and diff their responses. This is useful for:
+When an API is being migrated, versioned, or A/B tested, use `@@compare` to execute two requests within a single test block and diff their responses. Two flavours, picked by how much drift is acceptable:
+
+| Scenario | Use |
+|----------|-----|
+| Responses **must** be byte-identical (or differ only on a single similarity threshold) | `# @@diff` + `$diff.match` / `$diff.similarity` / `$diff.changed_count` assertions |
+| Responses are **mostly identical** but specific fields are *allowed* to drift (timestamps, request-ids, numeric measurements within tolerance) while others *must* match exactly (status codes, structural labels) | `# @@diff` **plus rule directives** (`# @@diff_strict`, `# @@diff_weight`, `# @@diff_default_weight`, `# @@diff_tolerance`) — see the "Weighted comparison rules" subsection below |
+
+Common applications:
 - **API migration parity** — verify v1 and v2 return equivalent data
 - **A/B testing** — compare responses from two backends or feature flag states
 - **Version comparison** — ensure a refactored endpoint matches the original
+- **Cross-region / canary parity with bounded drift** — strict on structural labels, weighted-tolerant on numeric samples and timestamps (use rule-based diff)
 
 ```http
 ### @@test API v1 vs v2 Parity — User Endpoint
@@ -1266,6 +1280,7 @@ If you only have a list of objects (`{ "users": [{...}, {...}] }`), extract the 
 - **Use ``# @@dev_auth <scope>` on `@@mode app` token-fetch blocks** — specifies the Azure scope for user auth. When the user authenticates via device code flow, the app fetches a user token with this scope and injects it into the block's `@@extract` variable.
 - **Add telemetry variables for E2E observability** — when the test file should export OTEL telemetry (traces, metrics, logs), set `telemetry_traces_endpoint`, `telemetry_metrics_endpoint`, and/or `telemetry_logs_endpoint` variables. These can be set directly as top-level `@name = value` definitions or extracted via `@@setup` steps (e.g., fetching OTLP endpoints from ARM). Use `telemetry_token` for Bearer auth or `telemetry_api_key` for `x-ms-ikey`. Optionally set `telemetry_service` to customize the `service.name` resource attribute (defaults to filename).
 - **Use ``# @@compare` for API migration and comparison scenarios** — when the code change involves versioned endpoints, A/B testing, or endpoint migration, generate a `@@compare` test block with ``# @@step` for each endpoint and ``# @@diff` to assert response parity. Use `$diff.match`, `$diff.similarity`, and `$diff.changed_count` assertions to validate equivalence (see Pattern 10).
+- **Pick weighted-diff rules over `allow_mismatch` + similarity thresholds when fields have *known* drift profiles** — if the responses being compared have fields that *should* differ (timestamps, trace ids, server-stamped epoch values) AND fields that *must not* differ (resource ids, status, structural labels), generate `# @@diff_strict <path>` for the must-match fields and `# @@diff_weight <path> <weight>` for the may-drift fields. Use `weight 0.0` to ignore a field's drift entirely (e.g. timestamps), and `# @@diff_tolerance <N>%` to cap the aggregate drift budget. This produces actionable failures ("X drifted by Y%") instead of a single global similarity number that hides which fields actually broke. Especially valuable for cross-region parity, baseline-vs-canary latency comparisons, pre-aggregated metric responses, and any rollup/sampled data API where numeric values naturally fluctuate within bounds (see Pattern 10's "Weighted comparison rules" subsection).
 - **Use ``# @@auto_run <interval>` for continuous monitoring** — add as a file-level directive (before any `@name = value` definitions) when tests should auto-repeat. Valid intervals: `30s`, `1m`, `5m`, `15m`, `1h`, `2h`, `4h`, `1d`. Both TUI and desktop show a toolbar control; the directive sets the default. Example: ``# @@auto_run 15m`
 - **Use ``# @@request-id [header]` to tag every request with a unique id** — add as a file-level directive when downstream services log a correlation/request-id header. A fresh UUIDv4 is injected into every request under the named header (default `X-Request-Id`) unless the block already sets that header. Examples: ``# @@request-id` (uses `X-Request-Id`), ``# @@request-id X-Correlation-ID`. Per-block override: ``# @@request-id X-Other-Id`. Opt out for a specific block: ``# @@request-id off`. Useful for tracing test calls in server logs.
 - **Comments explain non-obvious logic** — especially complex assertions or why a specific test exists
