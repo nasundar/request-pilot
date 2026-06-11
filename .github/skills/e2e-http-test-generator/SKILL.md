@@ -90,6 +90,10 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 # @@step <name>                        — define a named request step
 # @@diff <step_a> <step_b>             — compare responses of two steps
 # @@assert $diff.match == true          — diff assertion example
+# @@diff_strict <path>                  — (rule-based diff) path must match; any diff is a hard failure
+# @@diff_weight <path> <weight>         — (rule-based diff) charge `weight` against the tolerance budget when this path differs (`0.0` = ignore)
+# @@diff_default_weight <weight>        — (rule-based diff) weight for paths not matching any rule; defaults to 1.0
+# @@diff_tolerance <N>|<N>%             — (rule-based diff) aggregate budget: absolute weight cap, or % of weighted_total
 # @@for <iter_var> in <source_var>     — iterate block once per element of `source_var` (a JSON-array variable). Bare var name, NOT `{{source_var}}`. Auto-binds `{{$index}}` (0-based) and `{{$iteration}}` (1-based). For object elements, use dotted paths: `{{iter_var.field}}`. Cannot combine with `@@compare`.
 # @@parallel <N>                        — (loop-level, under `# @@for`) run iterations concurrently with N workers (default 4 if bare; clamped to [1,32]; also clamped to file-level cap)
 # @@redact body $.json.path             — scrub a JSON field from recorded bodies (JSONPath: $.foo, $.foo.bar, $.foo[0], $.foo[*])
@@ -108,7 +112,9 @@ Blocks execute in three phases: **setup (sequential) → test (parallel-safe) �
 
 **Assertion operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `contains`
 **Special values:** `null`, `!null`
-**Paths:** `status`, `$.field`, `$.nested.field`, `$[0].field`, `$.field.length`, `$.headers.header-name`, `$.foo["literal-key"]` (bracket key for fields whose names contain dots, spaces, or other special chars), `$.arr[*].field` (wildcard — assertion must hold for every element; an empty array vacuously passes, giving "skip when no data" semantics for free)
+**Paths:** `status`, `$.field`, `$.nested.field`, `$[0].field`, `$.field.length`, `$.headers.<name>` (dot syntax — simple header names only), `$.headers["x-ms-request-id"]` (**bracket-key** — required for headers with `-`, `.`, or other non-identifier chars; header lookup is case-insensitive in both forms), `$.foo["literal-key"]` (bracket key for body fields whose names contain dots, spaces, or other special chars), `$.arr[*].field` (wildcard — assertion must hold for every element; an empty array vacuously passes, giving "skip when no data" semantics for free)
+
+**`{{variable}}` interpolation works inside assertion paths and expected values too** (V1.4+) — both sides of an `# @@assert` are interpolated before evaluation. Useful for parameterising header lookups (`$.headers["{{impl_header}}"] != null`), expected ids (`$.id == {{expected_id}}`), and extract source paths (`# @@extract token = $.headers["{{token_header}}"]`).
 
 ### Built-in Variables
 
@@ -671,10 +677,18 @@ Authorization: Bearer {{access_token}}
 
 ### Pattern 10: Response Comparison (`@@compare`)
 
-When an API is being migrated, versioned, or A/B tested, use `@@compare` to execute two requests within a single test block and diff their responses. This is useful for:
+When an API is being migrated, versioned, or A/B tested, use `@@compare` to execute two requests within a single test block and diff their responses. Two flavours, picked by how much drift is acceptable:
+
+| Scenario | Use |
+|----------|-----|
+| Responses **must** be byte-identical (or differ only on a single similarity threshold) | `# @@diff` + `$diff.match` / `$diff.similarity` / `$diff.changed_count` assertions |
+| Responses are **mostly identical** but specific fields are *allowed* to drift (timestamps, request-ids, numeric measurements within tolerance) while others *must* match exactly (status codes, structural labels) | `# @@diff` **plus rule directives** (`# @@diff_strict`, `# @@diff_weight`, `# @@diff_default_weight`, `# @@diff_tolerance`) — see the "Weighted comparison rules" subsection below |
+
+Common applications:
 - **API migration parity** — verify v1 and v2 return equivalent data
 - **A/B testing** — compare responses from two backends or feature flag states
 - **Version comparison** — ensure a refactored endpoint matches the original
+- **Cross-region / canary parity with bounded drift** — strict on structural labels, weighted-tolerant on numeric samples and timestamps (use rule-based diff)
 
 ```http
 ### @@test API v1 vs v2 Parity — User Endpoint
@@ -723,6 +737,41 @@ GET {{base_url_canary}}/api/v1/users/{{user_id}}
 # @@assert $diff.similarity >= 0.9
 ```
 
+**Weighted comparison rules (V1.4+):** when you need a middle ground between "byte-identical" and "anything goes", attach **rules** to a `# @@diff` pair. Each rule scopes to the most-recent `# @@diff` above it (same as `$diff.*` assertions).
+
+| Directive | Effect |
+|-----------|--------|
+| `# @@diff_strict <path>` | Path must match. Any difference (added/removed/changed) records a `$diff.strict_violations` entry and forces the pair to fail. |
+| `# @@diff_weight <path> <weight>` | Per-field weight (≥ 0) charged to `$diff.weighted_score` when this path differs. `0.0` means "ignore". |
+| `# @@diff_default_weight <weight>` | Weight for differing paths that match no other rule. Defaults to `1.0`. |
+| `# @@diff_tolerance <N>` *or* `<N>%` | Aggregate budget: absolute weight cap, or percent of `$diff.weighted_total`. |
+
+Path syntax: `$.a.b`, bare `a.b`, `[*]` for any array index, `*` for any object key. Rules are prefix matches — `$.data.result[*].metric` covers every leaf under `metric`. Strict beats weighted; precedence is per-path.
+
+When any rule is present, pair pass/fail switches from "byte equality" to "no strict violations AND tolerance passes AND explicit `$diff.*` assertions pass". `match_exact` and `allow_mismatch` are bypassed. Non-JSON bodies fail (no silent text-mode pass).
+
+```http
+### @@test Numeric drift between API versions
+# @@compare
+
+# @@step v1
+POST {{base_url_v1}}/query
+…
+
+# @@step v2
+POST {{base_url_v2}}/query
+…
+
+# @@diff v1 v2
+# @@diff_strict status
+# @@diff_strict data.resultType
+# @@diff_strict data.result[*].metric
+# @@diff_weight data.result[*].values[*][0] 0.0   # timestamps always vary
+# @@diff_weight data.result[*].values[*][1] 0.1   # samples may drift slightly
+# @@diff_default_weight 1.0
+# @@diff_tolerance 5%
+```
+
 **`$diff` variable reference:**
 
 | Path | Type | Description |
@@ -739,18 +788,27 @@ GET {{base_url_canary}}/api/v1/users/{{user_id}}
 | `$diff.changed_paths[N].path` | string | Path of Nth changed field |
 | `$diff.changed_paths[N].left` | string | Step A value |
 | `$diff.changed_paths[N].right` | string | Step B value |
+| `$diff.strict_violations` | string[] | (V1.4+) Paths that hit a strict rule and differed |
+| `$diff.strict_violations.length` | int | (V1.4+) Strict violation count |
+| `$diff.weighted_score` | float | (V1.4+) Sum of weights charged across differing paths |
+| `$diff.weighted_total` | float | (V1.4+) Sum of weights across the diff-able surface |
+| `$diff.weighted_ratio` | float | (V1.4+) `score / total`, 0.0–1.0 |
+| `$diff.tolerance_passed` | bool? | (V1.4+) `true` when within budget; unset when no tolerance configured |
+| `$diff.rules_applied` | bool? | (V1.4+) `false` when rules couldn't apply (non-JSON body); unset when no rules configured |
 
 **Rules:**
 - ``# @@compare` is a modifier on a `@@test` (or `@@setup`/`@@teardown`) block — place it on the line after the block header
 - ``# @@step <name>` defines a named step within the compare block; each step has its own request line, headers, body, assertions, and extracts
 - ``# @@diff <step_a> <step_b> [allow_mismatch]` triggers comparison between two named steps — place it after all steps. Multiple `# @@diff` lines are allowed; each creates an independent pair.
 - ``# @@assert $diff.*` after a `# @@diff` line routes to **that pair only** (V1.3+); assertions before any `# @@diff` line attach to the first pair declared in the block.
-- ``allow_mismatch` on a `# @@diff` line suppresses the implicit body-match check for that pair only — explicit `$diff.*` assertions still run.
+- ``# @@diff_strict` / `# @@diff_weight` / `# @@diff_default_weight` / `# @@diff_tolerance` after a `# @@diff` line attach to **that pair only** (V1.4+). When ANY rule is set, the pair gate switches from `match_exact` to `strict_violations.is_empty() && tolerance_passed`.
+- ``allow_mismatch` on a `# @@diff` line suppresses the implicit body-match check for that pair only — explicit `$diff.*` assertions still run. With weighted rules, `allow_mismatch` is irrelevant (rules already define the gate).
 - Steps execute sequentially; each step's `@@assert` and `@@extract` directives evaluate immediately after that step's HTTP request completes
 - A pair fails when its explicit assertions fail OR its required body match fails (unless `allow_mismatch`). Other pairs in the same block keep running independently.
 - JSON responses get deep comparison with path-level diffs (e.g., `user.address.city`); non-JSON responses use character-level similarity scoring
 - Use `$diff.similarity >= 0.95` to allow small acceptable drift during incremental migration rollouts
 - Use `$diff.changed_count == 0` for strict parity checks where no field differences are allowed
+- **For "mostly identical with known variance" comparisons** (cross-region, A/B, latency canary, baseline-vs-rollup), prefer weighted rules over `allow_mismatch + similarity threshold` — they let you say *which* fields may drift and by how much, rather than a single global similarity number.
 
 ### Pattern 11: Repeater (`# @@for` over a JSON-array variable)
 
@@ -1222,6 +1280,7 @@ If you only have a list of objects (`{ "users": [{...}, {...}] }`), extract the 
 - **Use ``# @@dev_auth <scope>` on `@@mode app` token-fetch blocks** — specifies the Azure scope for user auth. When the user authenticates via device code flow, the app fetches a user token with this scope and injects it into the block's `@@extract` variable.
 - **Add telemetry variables for E2E observability** — when the test file should export OTEL telemetry (traces, metrics, logs), set `telemetry_traces_endpoint`, `telemetry_metrics_endpoint`, and/or `telemetry_logs_endpoint` variables. These can be set directly as top-level `@name = value` definitions or extracted via `@@setup` steps (e.g., fetching OTLP endpoints from ARM). Use `telemetry_token` for Bearer auth or `telemetry_api_key` for `x-ms-ikey`. Optionally set `telemetry_service` to customize the `service.name` resource attribute (defaults to filename).
 - **Use ``# @@compare` for API migration and comparison scenarios** — when the code change involves versioned endpoints, A/B testing, or endpoint migration, generate a `@@compare` test block with ``# @@step` for each endpoint and ``# @@diff` to assert response parity. Use `$diff.match`, `$diff.similarity`, and `$diff.changed_count` assertions to validate equivalence (see Pattern 10).
+- **Pick weighted-diff rules over `allow_mismatch` + similarity thresholds when fields have *known* drift profiles** — if the responses being compared have fields that *should* differ (timestamps, trace ids, server-stamped epoch values) AND fields that *must not* differ (resource ids, status, structural labels), generate `# @@diff_strict <path>` for the must-match fields and `# @@diff_weight <path> <weight>` for the may-drift fields. Use `weight 0.0` to ignore a field's drift entirely (e.g. timestamps), and `# @@diff_tolerance <N>%` to cap the aggregate drift budget. This produces actionable failures ("X drifted by Y%") instead of a single global similarity number that hides which fields actually broke. Especially valuable for cross-region parity, baseline-vs-canary latency comparisons, pre-aggregated metric responses, and any rollup/sampled data API where numeric values naturally fluctuate within bounds (see Pattern 10's "Weighted comparison rules" subsection).
 - **Use ``# @@auto_run <interval>` for continuous monitoring** — add as a file-level directive (before any `@name = value` definitions) when tests should auto-repeat. Valid intervals: `30s`, `1m`, `5m`, `15m`, `1h`, `2h`, `4h`, `1d`. Both TUI and desktop show a toolbar control; the directive sets the default. Example: ``# @@auto_run 15m`
 - **Use ``# @@request-id [header]` to tag every request with a unique id** — add as a file-level directive when downstream services log a correlation/request-id header. A fresh UUIDv4 is injected into every request under the named header (default `X-Request-Id`) unless the block already sets that header. Examples: ``# @@request-id` (uses `X-Request-Id`), ``# @@request-id X-Correlation-ID`. Per-block override: ``# @@request-id X-Other-Id`. Opt out for a specific block: ``# @@request-id off`. Useful for tracing test calls in server logs.
 - **Comments explain non-obvious logic** — especially complex assertions or why a specific test exists

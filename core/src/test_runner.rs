@@ -79,6 +79,22 @@ fn inject_request_id_header(headers: &mut Vec<(String, String)>, block: &TestBlo
     headers.push((name.to_string(), uuid::Uuid::new_v4().to_string()));
 }
 
+/// Return a copy of `a` with `{{var}}` references in both the LHS path and
+/// the RHS expected value resolved against `var_store`. Without this, an
+/// assertion like `$.headers["{{impl_header}}"] != null` arrives at the
+/// resolver as the literal string `{{impl_header}}` and silently misses.
+/// Same rationale for RHS — users often write `$.id == {{expected_id}}`.
+fn interpolate_assertion(
+    a: &http_parser::Assertion,
+    var_store: &VariableStore,
+) -> http_parser::Assertion {
+    http_parser::Assertion {
+        left: var_store.interpolate(&a.left),
+        operator: a.operator.clone(),
+        right: var_store.interpolate(&a.right),
+    }
+}
+
 /// Capture a completed block's response into the var_store so later blocks
 /// can reference it via `{{blockName.response.*}}` interpolation.
 fn capture_block_response(var_store: &mut VariableStore, result: &BlockResult) {
@@ -430,8 +446,9 @@ async fn execute_block(block: TestBlock, var_store: VariableStore, extra_headers
                 .extracts
                 .iter()
                 .map(|extract| {
+                    let path = var_store.interpolate(&extract.source_path);
                     let value = assertions::resolve_response_value(
-                        &extract.source_path,
+                        &path,
                         response.status,
                         &response.headers,
                         &response.body,
@@ -448,7 +465,8 @@ async fn execute_block(block: TestBlock, var_store: VariableStore, extra_headers
                 .assertions
                 .iter()
                 .map(|a| {
-                    assertions::evaluate(a, response.status, &response.headers, &response.body)
+                    let ai = interpolate_assertion(a, &var_store);
+                    assertions::evaluate(&ai, response.status, &response.headers, &response.body)
                 })
                 .collect();
             let all_passed = assertion_results.iter().all(|r| r.passed);
@@ -972,8 +990,9 @@ async fn execute_compare_block(
                     .extracts
                     .iter()
                     .map(|extract| {
+                        let path = var_store.interpolate(&extract.source_path);
                         let value = assertions::resolve_response_value(
-                            &extract.source_path,
+                            &path,
                             response.status,
                             &response.headers,
                             &response.body,
@@ -998,7 +1017,8 @@ async fn execute_compare_block(
                     .assertions
                     .iter()
                     .map(|a| {
-                        assertions::evaluate(a, response.status, &response.headers, &response.body)
+                        let ai = interpolate_assertion(a, &var_store);
+                        assertions::evaluate(&ai, response.status, &response.headers, &response.body)
                     })
                     .collect();
                 if !assertion_results.iter().all(|r| r.passed) {
@@ -1080,12 +1100,36 @@ async fn execute_compare_block(
             .get(&diff.step_b)
             .map(|r| r.body.as_str())
             .unwrap_or("");
-        let computed = assertions::compute_diff(body_a, body_b);
-        let required_match_passed = diff.allow_mismatch || computed.match_exact;
+        // V1.4: when the pair declares any rules, route through
+        // `compute_diff_with_rules` and switch pass/fail to the
+        // strict + tolerance gate. `match_exact`/`allow_mismatch` only
+        // gate the no-rules path. This keeps backwards compatibility
+        // for every existing `# @@diff` pair while letting users opt in
+        // to weighted comparison per pair.
+        let has_rules = !diff.rules.is_empty();
+        let computed = if has_rules {
+            assertions::compute_diff_with_rules(body_a, body_b, &diff.rules)
+        } else {
+            assertions::compute_diff(body_a, body_b)
+        };
+        let required_match_passed = if has_rules {
+            // Strict rules + tolerance budget replace the byte-equality
+            // check. Failures here drop into `pair_passed` regardless of
+            // `allow_mismatch` — the latter is meaningless with rules.
+            let strict_ok = computed.strict_violations.is_empty();
+            let tolerance_ok = computed.tolerance_passed.unwrap_or(true);
+            let rules_applied_ok = computed.rules_applied.unwrap_or(true);
+            strict_ok && tolerance_ok && rules_applied_ok
+        } else {
+            diff.allow_mismatch || computed.match_exact
+        };
         let pair_assertion_results: Vec<AssertionResult> = diff
             .assertions
             .iter()
-            .map(|a| assertions::evaluate_with_diff(a, &computed))
+            .map(|a| {
+                let ai = interpolate_assertion(a, &var_store);
+                assertions::evaluate_with_diff(&ai, &computed)
+            })
             .collect();
         let all_pair_asserts_pass = pair_assertion_results.iter().all(|r| r.passed);
         let pair_passed = required_match_passed && all_pair_asserts_pass;
@@ -1125,7 +1169,10 @@ async fn execute_compare_block(
         block
             .assertions
             .iter()
-            .map(|a| assertions::evaluate_with_diff(a, diff))
+            .map(|a| {
+                let ai = interpolate_assertion(a, &var_store);
+                assertions::evaluate_with_diff(&ai, diff)
+            })
             .collect()
     } else {
         Vec::new()
@@ -1916,8 +1963,9 @@ pub async fn resolve_variables_only(
         match result {
             Ok(response) => {
                 for extract in &block.extracts {
+                    let path = var_store.interpolate(&extract.source_path);
                     let value = assertions::resolve_response_value(
-                        &extract.source_path,
+                        &path,
                         response.status,
                         &response.headers,
                         &response.body,
@@ -3310,12 +3358,25 @@ mod tests {
     async fn spawn_mock_http_server(
         responses: std::collections::HashMap<String, String>,
     ) -> u16 {
+        spawn_mock_http_server_with_headers(responses, Vec::new()).await
+    }
+
+    /// Variant of the mock server that also injects extra response
+    /// headers on every reply. Used by tests that need to assert
+    /// against a header value (e.g. variable-interpolation in header
+    /// paths). The extra headers are appended verbatim after the
+    /// built-in Content-Type/Length/Connection lines.
+    async fn spawn_mock_http_server_with_headers(
+        responses: std::collections::HashMap<String, String>,
+        extra_headers: Vec<(String, String)>,
+    ) -> u16 {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let responses = std::sync::Arc::new(responses);
+        let extras = std::sync::Arc::new(extra_headers);
         tokio::spawn(async move {
             loop {
                 let (mut socket, _) = match listener.accept().await {
@@ -3323,6 +3384,7 @@ mod tests {
                     Err(_) => continue,
                 };
                 let responses = responses.clone();
+                let extras = extras.clone();
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 8192];
                     let n = match socket.read(&mut buf).await {
@@ -3337,10 +3399,16 @@ mod tests {
                         .unwrap_or("/")
                         .to_string();
                     let body = responses.get(&path).cloned().unwrap_or_default();
+                    let mut header_block = format!(
+                        "Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+                        body.as_bytes().len()
+                    );
+                    for (k, v) in extras.iter() {
+                        header_block.push_str(&format!("{}: {}\r\n", k, v));
+                    }
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.as_bytes().len(),
-                        body
+                        "HTTP/1.1 200 OK\r\n{}\r\n{}",
+                        header_block, body
                     );
                     let _ = socket.write_all(response.as_bytes()).await;
                     let _ = socket.shutdown().await;
@@ -3532,6 +3600,7 @@ mod tests {
                 step_b: "b".to_string(),
                 allow_mismatch: true,
                 assertions: vec![assert_eq_assertion("$diff.match", "==", "true")],
+                rules: Default::default(),
             }],
         );
 
@@ -3572,12 +3641,14 @@ mod tests {
                     allow_mismatch: true,
                     // changed_paths for ref->foo will include "$.k" -> "foo"
                     assertions: vec![assert_eq_assertion("$diff.changed_paths[0].right", "==", "foo")],
+                    rules: Default::default(),
                 },
                 DiffDirective {
                     step_a: "ref".to_string(),
                     step_b: "bar".to_string(),
                     allow_mismatch: true,
                     assertions: vec![assert_eq_assertion("$diff.changed_paths[0].right", "==", "bar")],
+                    rules: Default::default(),
                 },
             ],
         );
@@ -4043,5 +4114,122 @@ mod tests {
             Some("runtime-tok"),
             "extract must override env-overlay value"
         );
+    }
+
+    // ── Assertion-path variable interpolation regression tests ──
+
+    #[test]
+    fn interpolate_assertion_resolves_both_sides() {
+        // Unit test for the helper: `{{var}}` references on both the
+        // left (path) and right (expected) sides must resolve before
+        // the assertion is evaluated.
+        let mut store = VariableStore::new();
+        store.set("impl_header", "x-trace-id");
+        store.set("expected_id", "abc-123");
+        let a = Assertion {
+            left: r#"$.headers["{{impl_header}}"]"#.to_string(),
+            operator: "==".to_string(),
+            right: "{{expected_id}}".to_string(),
+        };
+        let ai = interpolate_assertion(&a, &store);
+        assert_eq!(ai.left, r#"$.headers["x-trace-id"]"#);
+        assert_eq!(ai.right, "abc-123");
+    }
+
+    #[tokio::test]
+    async fn runner_interpolates_variable_in_assertion_header_path() {
+        // End-to-end regression test for the user-reported failure:
+        //   # @@assert $.headers["{{impl_header}}"] != null
+        //   # @@assert $.headers["{{impl_header}}"] contains "tier":1
+        // must resolve `{{impl_header}}` to the actual header name and
+        // then look up the header value. Without runner-layer
+        // interpolation the resolver received the literal `{{impl_header}}`
+        // and every assertion silently failed.
+        let mut responses = std::collections::HashMap::new();
+        responses.insert("/q".to_string(), "{}".to_string());
+        let port = spawn_mock_http_server_with_headers(
+            responses,
+            vec![(
+                "x-ms-azure-implicit-rollup-applied".to_string(),
+                r#"[{"tier":1,"B":60,"sampling":"sum"}]"#.to_string(),
+            )],
+        )
+        .await;
+
+        let mut vars = vec![
+            ("impl_header".to_string(), "x-ms-azure-implicit-rollup-applied".to_string()),
+            ("base_url".to_string(), format!("http://127.0.0.1:{}", port)),
+        ];
+        // Realistic block: variable interpolation in both the URL and
+        // every assertion path; varied operators (!=, contains).
+        let block = TestBlock {
+            block_type: "test".to_string(),
+            name: "header_var".to_string(),
+            description: String::new(),
+            disabled: false,
+            mode: None,
+            dev_auth: None,
+            group: None,
+            depends: vec![],
+            request: ParsedRequest {
+                name: Some("header_var".to_string()),
+                method: "GET".to_string(),
+                url: "{{base_url}}/q".to_string(),
+                headers: Vec::new(),
+                body: None,
+            },
+            assertions: vec![
+                Assertion {
+                    left: r#"$.headers["{{impl_header}}"]"#.to_string(),
+                    operator: "!=".to_string(),
+                    right: "null".to_string(),
+                },
+                Assertion {
+                    left: r#"$.headers["{{impl_header}}"]"#.to_string(),
+                    operator: "contains".to_string(),
+                    right: r#""tier":1"#.to_string(),
+                },
+                Assertion {
+                    left: r#"$.headers["{{impl_header}}"]"#.to_string(),
+                    operator: "contains".to_string(),
+                    right: r#""B":60"#.to_string(),
+                },
+            ],
+            extracts: Vec::new(),
+            compare: false,
+            steps: Vec::new(),
+            diff: None,
+            diffs: Vec::new(),
+            errors: Vec::new(),
+            request_id_header: None,
+            request_id_disabled: false,
+            redact_body_rules: Vec::new(),
+            for_loop: None,
+        };
+        let suite = TestSuite {
+            variables: std::mem::take(&mut vars),
+            blocks: vec![block],
+            ..Default::default()
+        };
+        let results = run_suite(&suite, &[], None, None).await;
+        let br = &results.block_results[0];
+        assert_eq!(
+            br.status, "passed",
+            "expected pass; got status={} asserts={:?}",
+            br.status, br.assertion_results
+        );
+        // Every assertion's `actual` should be the resolved header value
+        // (not None and not the literal `{{impl_header}}` lookup).
+        for ar in &br.assertion_results {
+            assert!(ar.passed, "{:?}", ar);
+            assert!(
+                ar.actual
+                    .as_deref()
+                    .map(|a| a.contains("\"tier\":1"))
+                    .unwrap_or(false),
+                "actual should be the resolved header value: {:?}",
+                ar
+            );
+        }
     }
 }

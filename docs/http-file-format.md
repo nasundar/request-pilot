@@ -215,9 +215,12 @@ Validates response values. If any assertion fails, the block is marked as failed
 | `$.parent.child` | Nested JSON field | `$.user.profile.name == John` |
 | `$[index].field` | Array element access | `$[0].id == 1` |
 | `$.field.length` | Array/string length | `$.items.length > 0` |
-| `$.headers.name` | Response header (case-insensitive) | `$.headers.content-type contains json` |
+| `$.headers.name` | Response header — dot syntax (case-insensitive) | `$.headers.content-type contains json` |
+| `$.headers["name"]` | Response header — bracket-key syntax (required when the header name contains `-`, `.`, or other non-identifier chars) | `$.headers["x-ms-azure-implicit-rollup-applied"] != null` |
 
-> **Note:** In assert paths, `status` is shorthand for `response.status`, and `$.field` is shorthand for `response.body.field`. The full `response.` prefix also works.
+> **Note:** In assert paths, `status` is shorthand for `response.status`, and `$.field` is shorthand for `response.body.field`. The full `response.` prefix also works (`response.headers["x-trace-id"] != null`).
+>
+> **Header path forms:** real-world response headers like `x-ms-request-id`, `x-content-type-options`, `cache-control` contain dashes — these **must** use bracket-key syntax (`$.headers["x-ms-request-id"]`), because dot syntax treats `-` as part of the segment but the resolver has no way to disambiguate `headers.foo-bar` from a header literally named `foo-bar`. Dot syntax works fine for simple names like `etag` or `location`. Header lookup is case-insensitive in both forms.
 
 #### Assertion Operators
 
@@ -559,6 +562,59 @@ A `@compare` block may declare multiple `# @diff` pairs. Each pair runs independ
 # @assert $diff.similarity >= 0.9
 ```
 
+### `# @diff_strict`, `# @diff_weight`, `# @diff_default_weight`, `# @diff_tolerance` — weighted comparison (V1.4+)
+
+By default `# @diff` requires byte-identical bodies (or `allow_mismatch` to disable the check entirely). Sometimes you want a **third option**: declare that certain fields *must* match exactly, certain fields *may* differ within a per-field weight, and the total drift across allowed-to-differ fields must stay under a budget. That's what these four directives express.
+
+Each directive attaches to the **most recent `# @diff <a> <b>`** above it (same scoping as `# @assert $diff.*`). A single `@compare` block can have many `# @diff` pairs, each with its own independent ruleset.
+
+| Directive | Syntax | Purpose |
+|-----------|--------|---------|
+| `# @diff_strict <path>` | `# @diff_strict $.id` | Path that **must** match. Any difference at one of these paths is recorded in `$diff.strict_violations` and forces the pair to fail, regardless of tolerance. |
+| `# @diff_weight <path> <weight>` | `# @diff_weight $.items[*].price 0.5` | Per-field weight (≥ 0) charged to `weighted_score` when that path differs. Weight `0.0` means "ignore changes here". |
+| `# @diff_default_weight <weight>` | `# @diff_default_weight 1.0` | Fallback weight for differing paths that match no `# @diff_strict` or `# @diff_weight` rule. Defaults to `1.0` when unset. |
+| `# @diff_tolerance <N>` *or* `<N>%` | `# @diff_tolerance 15%` | Aggregate budget. `<N>` is an absolute weight cap; `<N>%` is a percent of `weighted_total`. Tolerance "passes" when `weighted_score` stays within budget. |
+
+**Path syntax** for rules accepts both `$.foo.bar` and bare `foo.bar`. `[*]` matches any array index; `*` as a bare segment matches any object key. Rules are **prefix matches** — `$.data.result[*].metric` matches every leaf path under `metric` (e.g. `data.result[0].metric.namespace`). Strict rules apply equally to **added, removed, and changed** paths.
+
+**Precedence:** strict beats weighted beats default. A path that matches both a strict and a weighted rule is treated as strict only and contributes 0 to the score.
+
+**Pass/fail semantics** when any rule is present on a pair:
+- `match_exact`/`allow_mismatch` are ignored.
+- Pair passes iff `strict_violations` is empty AND tolerance (if set) passes AND all explicit `$diff.*` assertions pass.
+- If the response body isn't valid JSON on both sides, `$diff.rules_applied` is `false` and the pair fails (no silent text-mode pass).
+
+**Example — fuzzy comparison of two API versions where IDs and labels must match but numeric measurements may drift:**
+
+```http
+### @@test [tier1-exact] sum_over_time(delta[5m]) — v1 vs v2 numeric drift
+# @@compare
+
+# @@step v1
+POST {{base_url_v1}}/query
+…
+
+# @@step v2
+POST {{base_url_v2}}/query
+…
+
+# @@diff v1 v2
+# Structural drift is a hard failure
+# @@diff_strict status
+# @@diff_strict data.resultType
+# @@diff_strict data.result[*].metric
+
+# Timestamps always vary — weight 0 means "ignore differences here"
+# @@diff_weight data.result[*].values[*][0] 0.0
+# Numeric samples can drift slightly
+# @@diff_weight data.result[*].values[*][1] 0.1
+
+# Anything else uses default_weight
+# @@diff_default_weight 1.0
+# Allow up to 5% aggregate drift across the diff-able surface
+# @@diff_tolerance 5%
+```
+
 ---
 
 ## Variable Interpolation
@@ -684,6 +740,13 @@ After a `# @diff` directive executes, the comparison result is available through
 | `$diff.changed_paths[N].path` | string | JSON path of the Nth changed field |
 | `$diff.changed_paths[N].left` | any | Value from step A for the Nth changed field |
 | `$diff.changed_paths[N].right` | any | Value from step B for the Nth changed field |
+| `$diff.strict_violations` | string[] | (V1.4+) Paths that hit a `# @diff_strict` rule and differed. Non-empty ⇒ pair fails. |
+| `$diff.strict_violations.length` | int | (V1.4+) Number of strict violations. |
+| `$diff.weighted_score` | float | (V1.4+) Sum of weights charged across every non-strict differing path. |
+| `$diff.weighted_total` | float | (V1.4+) Sum of weights across the union of leaf paths on both sides (excluding strict paths). |
+| `$diff.weighted_ratio` | float | (V1.4+) `weighted_score / weighted_total`, in `[0.0, 1.0]`. |
+| `$diff.tolerance_passed` | bool? | (V1.4+) `true` if `# @diff_tolerance` was met; `false` if exceeded; unset when no tolerance was configured. |
+| `$diff.rules_applied` | bool? | (V1.4+) `true` when weighted rules ran against valid JSON on both sides; `false` when one body wasn't JSON; unset when no rules were configured. |
 
 ### Full Comparison Example
 

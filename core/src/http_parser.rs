@@ -192,6 +192,12 @@ pub struct DiffDirective {
     /// V1.3: trailing `allow_mismatch` flag suppresses the implicit body-match check.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_mismatch: bool,
+    /// V1.4: per-pair weighted-comparison rules. Empty by default.
+    /// When non-empty, the runner ignores `match_exact` and instead
+    /// gates the pair on strict violations + tolerance. See
+    /// `crate::assertions::compute_diff_with_rules`.
+    #[serde(default, skip_serializing_if = "crate::assertions::DiffRules::is_empty")]
+    pub rules: crate::assertions::DiffRules,
 }
 
 /// `# @@for <iter_var> in <source_var>` directive — turns a normal block
@@ -287,6 +293,20 @@ fn strip_comment_prefix(line: &str) -> Option<&str> {
 }
 
 /// Match a Pilot directive on a comment line (e.g. `# @@assert ...` or the
+/// Format a weight as either an integer (when whole) or with up to 4
+/// significant digits. Keeps round-trips clean for common cases like
+/// `0.1`, `0.5`, `1.0` while not emitting `1` as `1.0000`.
+fn format_weight(w: f64) -> String {
+    if w == w.trunc() && w.abs() < 1e15 {
+        format!("{}", w as i64)
+    } else {
+        // Trim trailing zeros after a `.` but keep at least one digit.
+        let s = format!("{:.4}", w);
+        let trimmed = s.trim_end_matches('0').trim_end_matches('.').to_string();
+        if trimmed.is_empty() { "0".to_string() } else { trimmed }
+    }
+}
+
 /// legacy `# @assert ...`). Accepts both `#` and `//` comment markers and both
 /// `@@name` (new) and `@name` (legacy) prefixes.
 ///
@@ -1186,9 +1206,146 @@ fn parse_test_block(block: &str) -> Option<TestBlock> {
                         step_b: parts[1].to_string(),
                         assertions: Vec::new(),
                         allow_mismatch,
+                        rules: crate::assertions::DiffRules::default(),
                     });
                     current_diff_idx = Some(diff_directives.len() - 1);
                 }
+            }
+            continue;
+        }
+        // ── V1.4: weighted-diff rule directives ──────────────────────
+        // All four attach to the most recently declared `# @@diff` pair.
+        // Used outside `# @@compare` or before any `# @@diff` → recorded
+        // as a parse error and silently dropped.
+        if let Some(rest) = match_directive(line, "diff_strict") {
+            let path = rest.trim();
+            if path.is_empty() {
+                errors.push(
+                    "`# @@diff_strict` requires a path argument — directive dropped".to_string(),
+                );
+            } else if let Some(idx) = current_diff_idx {
+                diff_directives[idx].rules.strict_paths.push(path.to_string());
+            } else {
+                errors.push(format!(
+                    "`# @@diff_strict {}` declared before any `# @@diff a b` — directive dropped",
+                    path
+                ));
+            }
+            continue;
+        }
+        if let Some(rest) = match_directive(line, "diff_weight") {
+            // `# @@diff_weight <path> <weight>` — split last whitespace
+            // token as weight so paths containing spaces in bracket-quoted
+            // keys still parse. (Conservative: require non-quoted paths
+            // until we see real-world demand for quoted-key support.)
+            let toks: Vec<&str> = rest.split_whitespace().collect();
+            if toks.len() < 2 {
+                errors.push(format!(
+                    "`# @@diff_weight {}` — expected `<path> <weight>`, directive dropped",
+                    rest
+                ));
+                continue;
+            }
+            let path = toks[..toks.len() - 1].join(" ");
+            let weight_str = toks[toks.len() - 1];
+            let weight: f64 = match weight_str.parse() {
+                Ok(w) if w >= 0.0 => w,
+                Ok(_) => {
+                    errors.push(format!(
+                        "`# @@diff_weight {} {}` — weight must be >= 0, directive dropped",
+                        path, weight_str
+                    ));
+                    continue;
+                }
+                Err(_) => {
+                    errors.push(format!(
+                        "`# @@diff_weight {} {}` — weight must be numeric, directive dropped",
+                        path, weight_str
+                    ));
+                    continue;
+                }
+            };
+            if let Some(idx) = current_diff_idx {
+                diff_directives[idx]
+                    .rules
+                    .weighted_paths
+                    .push((path, weight));
+            } else {
+                errors.push(format!(
+                    "`# @@diff_weight {} {}` declared before any `# @@diff a b` — directive dropped",
+                    path, weight
+                ));
+            }
+            continue;
+        }
+        if let Some(rest) = match_directive(line, "diff_default_weight") {
+            let weight_str = rest.trim();
+            let weight: f64 = match weight_str.parse() {
+                Ok(w) if w >= 0.0 => w,
+                Ok(_) => {
+                    errors.push(format!(
+                        "`# @@diff_default_weight {}` — weight must be >= 0, directive dropped",
+                        weight_str
+                    ));
+                    continue;
+                }
+                Err(_) => {
+                    errors.push(format!(
+                        "`# @@diff_default_weight {}` — weight must be numeric, directive dropped",
+                        weight_str
+                    ));
+                    continue;
+                }
+            };
+            if let Some(idx) = current_diff_idx {
+                if diff_directives[idx].rules.default_weight.is_some() {
+                    errors.push(format!(
+                        "duplicate `# @@diff_default_weight` on the same `# @@diff` pair — keeping the first"
+                    ));
+                } else {
+                    diff_directives[idx].rules.default_weight = Some(weight);
+                }
+            } else {
+                errors.push(format!(
+                    "`# @@diff_default_weight {}` declared before any `# @@diff a b` — directive dropped",
+                    weight
+                ));
+            }
+            continue;
+        }
+        if let Some(rest) = match_directive(line, "diff_tolerance") {
+            let trimmed = rest.trim();
+            let tolerance = if let Some(num) = trimmed.strip_suffix('%') {
+                match num.trim().parse::<f64>() {
+                    Ok(p) if p >= 0.0 => Some(crate::assertions::DiffTolerance::Percent(p)),
+                    _ => None,
+                }
+            } else {
+                match trimmed.parse::<f64>() {
+                    Ok(v) if v >= 0.0 => Some(crate::assertions::DiffTolerance::Absolute(v)),
+                    _ => None,
+                }
+            };
+            let Some(tol) = tolerance else {
+                errors.push(format!(
+                    "`# @@diff_tolerance {}` — expected `<N>` or `<N>%` with N >= 0, directive dropped",
+                    trimmed
+                ));
+                continue;
+            };
+            if let Some(idx) = current_diff_idx {
+                if diff_directives[idx].rules.tolerance.is_some() {
+                    errors.push(format!(
+                        "duplicate `# @@diff_tolerance` on the same `# @@diff` pair — keeping the first"
+                    ));
+                } else {
+                    diff_directives[idx].rules.tolerance = Some(tol);
+                }
+            } else {
+                errors.push(format!(
+                    "`# @@diff_tolerance {}` declared before any `# @@diff a b` — directive dropped",
+                    trimmed
+                ));
             }
             continue;
         }
@@ -1736,6 +1893,33 @@ pub fn generate_http_content(suite: &TestSuite) -> String {
                     output.push_str(" allow_mismatch");
                 }
                 output.push('\n');
+                // V1.4: emit weighted-diff rule directives right after
+                // the `# @@diff` so they visually scope to that pair.
+                for path in &diff.rules.strict_paths {
+                    output.push_str(&format!("# @@diff_strict {}\n", path));
+                }
+                for (path, weight) in &diff.rules.weighted_paths {
+                    output.push_str(&format!(
+                        "# @@diff_weight {} {}\n",
+                        path,
+                        format_weight(*weight)
+                    ));
+                }
+                if let Some(w) = diff.rules.default_weight {
+                    output.push_str(&format!(
+                        "# @@diff_default_weight {}\n",
+                        format_weight(w)
+                    ));
+                }
+                if let Some(tol) = diff.rules.tolerance {
+                    let s = match tol {
+                        crate::assertions::DiffTolerance::Absolute(v) => format_weight(v),
+                        crate::assertions::DiffTolerance::Percent(p) => {
+                            format!("{}%", format_weight(p))
+                        }
+                    };
+                    output.push_str(&format!("# @@diff_tolerance {}\n", s));
+                }
                 for assertion in &diff.assertions {
                     output.push_str(&format!(
                         "# @@assert {} {} {}\n",
@@ -3515,6 +3699,174 @@ GET https://api.example.com/v2
             block.errors.iter().any(|e| e.contains("nonexistent")),
             "expected validation error for unknown step, got: {:?}",
             block.errors
+        );
+    }
+
+    // ── V1.4: weighted-diff rule directives ──────────────────────
+
+    #[test]
+    fn diff_rules_parse_and_attach_to_correct_pair() {
+        let input = r#"
+### @@test Compare with rules
+# @@compare
+# @@step a
+GET https://api.example.com/a
+
+# @@step b
+GET https://api.example.com/b
+
+# @@step c
+GET https://api.example.com/c
+
+# @@diff a b
+# @@diff_strict $.id
+# @@diff_strict $.account.tenantId
+# @@diff_weight $.timestamp 0.0
+# @@diff_weight $.items[*].price 0.5
+# @@diff_default_weight 1.0
+# @@diff_tolerance 15%
+
+# @@diff a c
+# @@diff_strict $.id
+# @@diff_tolerance 5
+"#;
+        let suite = parse_test_suite(input);
+        let block = &suite.blocks[0];
+        assert!(block.errors.is_empty(), "no parse errors: {:?}", block.errors);
+        assert_eq!(block.diffs.len(), 2);
+
+        // Pair 0 (a→b) — full ruleset
+        let r0 = &block.diffs[0].rules;
+        assert_eq!(r0.strict_paths, vec!["$.id".to_string(), "$.account.tenantId".to_string()]);
+        assert_eq!(r0.weighted_paths.len(), 2);
+        assert_eq!(r0.weighted_paths[0], ("$.timestamp".to_string(), 0.0));
+        assert_eq!(r0.weighted_paths[1], ("$.items[*].price".to_string(), 0.5));
+        assert_eq!(r0.default_weight, Some(1.0));
+        assert!(matches!(r0.tolerance, Some(crate::assertions::DiffTolerance::Percent(p)) if (p - 15.0).abs() < 1e-9));
+
+        // Pair 1 (a→c) — separate, independent ruleset
+        let r1 = &block.diffs[1].rules;
+        assert_eq!(r1.strict_paths, vec!["$.id".to_string()]);
+        assert!(r1.weighted_paths.is_empty());
+        assert!(matches!(r1.tolerance, Some(crate::assertions::DiffTolerance::Absolute(v)) if (v - 5.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn diff_rules_round_trip_through_generator() {
+        let input = r#"### @@test rt
+# @@compare
+# @@step a
+GET https://api.example.com/a
+
+# @@step b
+GET https://api.example.com/b
+
+# @@diff a b
+# @@diff_strict $.id
+# @@diff_weight $.items[*].price 0.5
+# @@diff_default_weight 1
+# @@diff_tolerance 15%
+"#;
+        let suite = parse_test_suite(input);
+        let generated = generate_http_content(&suite);
+        assert!(generated.contains("# @@diff_strict $.id"), "strict missing: {}", generated);
+        assert!(generated.contains("# @@diff_weight $.items[*].price 0.5"), "weight missing: {}", generated);
+        assert!(generated.contains("# @@diff_default_weight 1"), "default missing: {}", generated);
+        assert!(generated.contains("# @@diff_tolerance 15%"), "tolerance missing: {}", generated);
+
+        // Re-parse and check ruleset survived a full round-trip.
+        let re = parse_test_suite(&generated);
+        let r = &re.blocks[0].diffs[0].rules;
+        assert_eq!(r.strict_paths, vec!["$.id".to_string()]);
+        assert_eq!(r.weighted_paths[0].1, 0.5);
+        assert_eq!(r.default_weight, Some(1.0));
+    }
+
+    #[test]
+    fn diff_rules_without_diff_directive_records_error() {
+        let input = r#"
+### @@test no_diff_yet
+# @@compare
+# @@step a
+GET https://api.example.com/a
+
+# @@step b
+GET https://api.example.com/b
+
+# @@diff_strict $.id
+# @@diff_tolerance 5%
+"#;
+        let suite = parse_test_suite(input);
+        let block = &suite.blocks[0];
+        assert!(
+            block.errors.iter().any(|e| e.contains("diff_strict")),
+            "expected error for strict before diff, got: {:?}",
+            block.errors
+        );
+        assert!(
+            block.errors.iter().any(|e| e.contains("diff_tolerance")),
+            "expected error for tolerance before diff, got: {:?}",
+            block.errors
+        );
+    }
+
+    #[test]
+    fn diff_rules_reject_negative_or_non_numeric_weights() {
+        let input = r#"
+### @@test bad_weights
+# @@compare
+# @@step a
+GET https://api.example.com/a
+
+# @@step b
+GET https://api.example.com/b
+
+# @@diff a b
+# @@diff_weight $.x -0.1
+# @@diff_weight $.y oops
+# @@diff_default_weight -2
+# @@diff_tolerance -5%
+"#;
+        let suite = parse_test_suite(input);
+        let block = &suite.blocks[0];
+        // All four directives should be rejected; the diff itself survives.
+        assert_eq!(block.diffs.len(), 1);
+        assert!(block.diffs[0].rules.weighted_paths.is_empty());
+        assert!(block.diffs[0].rules.default_weight.is_none());
+        assert!(block.diffs[0].rules.tolerance.is_none());
+        // 4 errors expected, one per malformed directive.
+        let weight_errs = block.errors.iter().filter(|e| e.contains("must be")).count();
+        assert!(weight_errs >= 3, "expected several rejection errors, got: {:?}", block.errors);
+    }
+
+    #[test]
+    fn diff_rules_duplicate_default_or_tolerance_kept_first() {
+        let input = r#"
+### @@test dups
+# @@compare
+# @@step a
+GET https://api.example.com/a
+
+# @@step b
+GET https://api.example.com/b
+
+# @@diff a b
+# @@diff_default_weight 1.0
+# @@diff_default_weight 5.0
+# @@diff_tolerance 10%
+# @@diff_tolerance 20%
+"#;
+        let suite = parse_test_suite(input);
+        let block = &suite.blocks[0];
+        assert_eq!(block.diffs[0].rules.default_weight, Some(1.0));
+        assert!(matches!(
+            block.diffs[0].rules.tolerance,
+            Some(crate::assertions::DiffTolerance::Percent(p)) if (p - 10.0).abs() < 1e-9
+        ));
+        // Two duplicate-warning errors.
+        assert_eq!(
+            block.errors.iter().filter(|e| e.contains("duplicate")).count(),
+            2
         );
     }
 
